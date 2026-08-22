@@ -65,6 +65,22 @@ public static class PostgresSchema
             CREATE TRIGGER armada_event_ledger_no_update
                 BEFORE UPDATE OR DELETE ON armada_event_ledger
                 FOR EACH ROW EXECUTE FUNCTION armada_reject_ledger_mutation();
+            """),
+        new(
+            2,
+            "github-projection-receipts",
+            """
+            CREATE TABLE IF NOT EXISTS armada_github_projection_receipts (
+                source_event_id UUID NOT NULL REFERENCES armada_event_ledger(event_id),
+                repository TEXT NOT NULL,
+                issue_number INTEGER NOT NULL CHECK (issue_number > 0),
+                summary_name TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                external_reference TEXT NOT NULL,
+                recorded_at TIMESTAMPTZ NOT NULL,
+                PRIMARY KEY (source_event_id, repository, issue_number, summary_name)
+            );
             """)
     ];
 }

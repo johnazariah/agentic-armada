@@ -7,7 +7,7 @@ public sealed class PostgresSchemaTests
     [Fact]
     public void Migration_creates_authoritative_current_state_with_CAS_column()
     {
-        var sql = Assert.Single(PostgresSchema.Migrations).Sql;
+        var sql = PostgresSchema.Migrations.Single(static migration => migration.Version == 1).Sql;
 
         Assert.Contains("CREATE TABLE IF NOT EXISTS armada_current_resources", sql, StringComparison.Ordinal);
         Assert.Contains("resource_version TEXT NOT NULL", sql, StringComparison.Ordinal);
@@ -18,7 +18,7 @@ public sealed class PostgresSchemaTests
     [Fact]
     public void Migration_binds_ledger_and_outbox_to_the_same_transactional_event()
     {
-        var sql = Assert.Single(PostgresSchema.Migrations).Sql;
+        var sql = PostgresSchema.Migrations.Single(static migration => migration.Version == 1).Sql;
 
         Assert.Contains("CREATE TABLE IF NOT EXISTS armada_event_ledger", sql, StringComparison.Ordinal);
         Assert.Contains("CREATE TABLE IF NOT EXISTS armada_outbox", sql, StringComparison.Ordinal);
@@ -30,7 +30,7 @@ public sealed class PostgresSchemaTests
     [Fact]
     public void Migration_prevents_ledger_rewrites()
     {
-        var sql = Assert.Single(PostgresSchema.Migrations).Sql;
+        var sql = PostgresSchema.Migrations.Single(static migration => migration.Version == 1).Sql;
 
         Assert.Contains("armada_event_ledger is append-only", sql, StringComparison.Ordinal);
         Assert.Contains("BEFORE UPDATE OR DELETE ON armada_event_ledger", sql, StringComparison.Ordinal);
@@ -55,5 +55,15 @@ public sealed class PostgresSchemaTests
         Assert.Contains("SELECT commit_snapshot::text", sql, StringComparison.Ordinal);
         Assert.Contains("FROM armada_event_ledger", sql, StringComparison.Ordinal);
         Assert.DoesNotContain("armada_current_resources", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Projection_receipt_migration_binds_receipts_to_immutable_ledger_events()
+    {
+        var sql = PostgresSchema.Migrations.Single(static migration => migration.Version == 2).Sql;
+
+        Assert.Contains("CREATE TABLE IF NOT EXISTS armada_github_projection_receipts", sql, StringComparison.Ordinal);
+        Assert.Contains("source_event_id UUID NOT NULL REFERENCES armada_event_ledger(event_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("PRIMARY KEY (source_event_id, repository, issue_number, summary_name)", sql, StringComparison.Ordinal);
     }
 }
