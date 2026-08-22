@@ -59,7 +59,7 @@ public sealed class WorkloadLifecycleTests
     }
 
     [Fact]
-    public void Replaying_the_same_transition_is_idempotent_but_cannot_change_its_target()
+    public void Replaying_the_same_transition_is_idempotent_but_rejects_changed_command_data()
     {
         var fixture = new LifecycleFixture();
         var desired = fixture.Desired();
@@ -69,18 +69,44 @@ public sealed class WorkloadLifecycleTests
         var replay = Apply(admitted, admission);
         var conflictingReplay = WorkloadLifecycleTransitions.Apply(
             admitted,
-            new AssignWorkload(
-                admission.Id,
-                admitted.ResourceVersion,
-                new ResourceVersion("2"),
-                admitted.Generation,
-                fixture.NodeId));
+            admission with { ResultingResourceVersion = new ResourceVersion("different") });
 
         Assert.Equal(admitted, replay);
         Assert.Single(replay.AppliedTransitions);
         Assert.Equal(
             "transition-replay-conflict",
             Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(conflictingReplay).Error.Code);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Start_requires_a_current_unrevoked_lease(bool isRevoked)
+    {
+        var fixture = new LifecycleFixture();
+        var lifecycle = fixture.ProgressToStartApproved();
+        var lease = isRevoked
+            ? fixture.Lease(revokedAt: DateTimeOffset.Parse("2029-01-01T00:00:00Z"))
+            : fixture.Lease(expiresAt: DateTimeOffset.Parse("2028-01-01T00:00:00Z"));
+
+        var result = WorkloadLifecycleTransitions.Apply(lifecycle, fixture.Start(lifecycle, lease));
+
+        Assert.Equal(
+            "invalid-lease-binding",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Start_rejects_an_admission_without_issue_master_authority()
+    {
+        var fixture = new LifecycleFixture();
+        var lifecycle = fixture.ProgressToStartApproved(SessionAuthority.None);
+
+        var result = WorkloadLifecycleTransitions.Apply(lifecycle, fixture.Start(lifecycle));
+
+        Assert.Equal(
+            "session-authority-not-admitted",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
     }
 
     [Fact]
@@ -161,7 +187,9 @@ internal sealed class LifecycleFixture
     public WorkloadLifecycle Desired() =>
         WorkloadLifecycle.Desired(WorkloadId, 1, new ResourceVersion("0"));
 
-    public AdmitWorkload Admit(WorkloadLifecycle lifecycle) =>
+    public AdmitWorkload Admit(
+        WorkloadLifecycle lifecycle,
+        SessionAuthority sessionAuthority = SessionAuthority.IssueMaster) =>
         new(
             TransitionId.New(),
             lifecycle.ResourceVersion,
@@ -176,7 +204,7 @@ internal sealed class LifecycleFixture
                     Digest,
                     Digest,
                     ImmutableHashSet.Create("create-worktree"),
-                    SessionAuthority.IssueMaster,
+                    sessionAuthority,
                     IsolationProfile.IsolatedContainer,
                     new ResourceRequirements(1000, 0, 1024, 1024),
                     ImmutableArray<Sha256Digest>.Empty,
@@ -219,13 +247,13 @@ internal sealed class LifecycleFixture
             lifecycle.ResourceVersion,
             NextVersion(lifecycle),
             lifecycle.Generation,
-            new Lease(
-                Metadata(LeaseId),
-                new LeaseSpec(AttemptId, NodeId, 1, DateTimeOffset.Parse("2030-01-01T00:00:00Z")),
-                new LeaseStatus(CommonStatus(), null, null)),
+            Lease(),
             DateTimeOffset.Parse("2029-01-01T00:00:00Z"));
 
-    public StartWorkload Start(WorkloadLifecycle lifecycle) =>
+    public StartWorkload Start(
+        WorkloadLifecycle lifecycle,
+        Lease? lease = null,
+        DateTimeOffset? evaluatedAt = null) =>
         new(
             TransitionId.New(),
             lifecycle.ResourceVersion,
@@ -240,7 +268,21 @@ internal sealed class LifecycleFixture
                     AgentSessionRole.IssueMaster,
                     "issue-master-1",
                     null),
-                new AgentSessionStatus(CommonStatus(), null, null, null, false)));
+                new AgentSessionStatus(CommonStatus(), null, null, null, false)),
+            lease ?? Lease(),
+            evaluatedAt ?? DateTimeOffset.Parse("2029-01-01T00:00:00Z"));
+
+    public Lease Lease(
+        DateTimeOffset? expiresAt = null,
+        DateTimeOffset? revokedAt = null) =>
+        new(
+            Metadata(LeaseId),
+            new LeaseSpec(
+                AttemptId,
+                NodeId,
+                1,
+                expiresAt ?? DateTimeOffset.Parse("2030-01-01T00:00:00Z")),
+            new LeaseStatus(CommonStatus(), null, revokedAt));
 
     public SubmitTerminalObservation SubmitTerminal(WorkloadLifecycle lifecycle, TerminalOutcome outcome) =>
         new(
@@ -281,14 +323,21 @@ internal sealed class LifecycleFixture
 
     public WorkloadLifecycle ProgressToTerminalPending(TerminalOutcome outcome)
     {
-        var desired = Desired();
-        var admitted = Apply(desired, Admit(desired));
-        var assigned = Apply(admitted, Assign(admitted));
-        var claimed = Apply(assigned, Claim(assigned));
-        var approved = Apply(claimed, Approve(claimed));
+        var approved = ProgressToStartApproved();
         var running = Apply(approved, Start(approved));
 
         return Apply(running, SubmitTerminal(running, outcome));
+    }
+
+    public WorkloadLifecycle ProgressToStartApproved(
+        SessionAuthority sessionAuthority = SessionAuthority.IssueMaster)
+    {
+        var desired = Desired();
+        var admitted = Apply(desired, Admit(desired, sessionAuthority));
+        var assigned = Apply(admitted, Assign(admitted));
+        var claimed = Apply(assigned, Claim(assigned));
+
+        return Apply(claimed, Approve(claimed));
     }
 
     private static ResourceVersion NextVersion(WorkloadLifecycle lifecycle) =>

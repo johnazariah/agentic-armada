@@ -13,10 +13,10 @@ public enum TerminalOutcome
 
 public sealed record LifecycleFailure(string Code, string Message);
 
-public sealed record AppliedTransition(
-    TransitionId Id,
-    WorkloadLifecycleState Target,
-    ResourceVersion ResultingVersion);
+public sealed record AppliedTransition(LifecycleCommand Command)
+{
+    public TransitionId Id => Command.Id;
+}
 
 public sealed record WorkloadLifecycle(
     ResourceId WorkloadId,
@@ -25,6 +25,7 @@ public sealed record WorkloadLifecycle(
     WorkloadLifecycleState State,
     ResourceId? AdmissionDecisionReference,
     ResourceId? AdmittedNodeReference,
+    SessionAuthority? AdmittedSessionAuthority,
     ResourceId? AssignedNodeReference,
     ResourceId? AttemptReference,
     ResourceId? LeaseReference,
@@ -41,6 +42,7 @@ public sealed record WorkloadLifecycle(
             generation,
             resourceVersion,
             WorkloadLifecycleState.Desired,
+            null,
             null,
             null,
             null,
@@ -111,7 +113,9 @@ public sealed record StartWorkload(
     ResourceVersion ExpectedResourceVersion,
     ResourceVersion ResultingResourceVersion,
     long ExpectedGeneration,
-    AgentSession Session)
+    AgentSession Session,
+    Lease Lease,
+    DateTimeOffset EvaluatedAt)
     : LifecycleCommand(Id, ExpectedResourceVersion, ResultingResourceVersion, ExpectedGeneration)
 {
     public override WorkloadLifecycleState Target => WorkloadLifecycleState.Running;
@@ -157,11 +161,11 @@ public static class WorkloadLifecycleTransitions
         var replay = lifecycle.AppliedTransitions.FirstOrDefault(applied => applied.Id == command.Id);
         if (replay is not null)
         {
-            return replay.Target == command.Target
+            return replay.Command == command
                 ? new Result<WorkloadLifecycle, LifecycleFailure>.Success(lifecycle)
                 : Failure(
                     "transition-replay-conflict",
-                    $"Transition {command.Id} was already applied as {replay.Target}, not {command.Target}.");
+                    $"Transition {command.Id} was already applied with different command bindings.");
         }
 
         if (command.ExpectedGeneration != lifecycle.Generation)
@@ -223,7 +227,8 @@ public static class WorkloadLifecycleTransitions
             command,
             WorkloadLifecycleState.Admitted,
             admissionDecisionReference: decision.Metadata.Uid,
-            admittedNodeReference: decision.Spec.NodeReference);
+            admittedNodeReference: decision.Spec.NodeReference,
+            admittedSessionAuthority: decision.Spec.SessionAuthority);
     }
 
     private static Result<WorkloadLifecycle, LifecycleFailure> ApplyAssignment(
@@ -328,6 +333,27 @@ public static class WorkloadLifecycleTransitions
                 "Running requires an Issue Master session bound to the claimed attempt and assigned node.");
         }
 
+        if (lifecycle.AdmittedSessionAuthority is not (
+            SessionAuthority.IssueMaster or SessionAuthority.IssueMasterWithChildren))
+        {
+            return Failure(
+                "session-authority-not-admitted",
+                "Running requires Issue Master authority in the admitted decision.");
+        }
+
+        var lease = command.Lease;
+        if (lifecycle.LeaseReference is null ||
+            lease.Metadata.Uid != lifecycle.LeaseReference ||
+            lease.Spec.AttemptReference != lifecycle.AttemptReference ||
+            lease.Spec.NodeReference != lifecycle.AssignedNodeReference ||
+            lease.Spec.ExpiresAt <= command.EvaluatedAt ||
+            lease.Status.RevokedAt is not null)
+        {
+            return Failure(
+                "invalid-lease-binding",
+                "Running requires the current, unrevoked lease approved for the claimed attempt and assigned node.");
+        }
+
         return Succeed(
             lifecycle,
             command,
@@ -393,6 +419,7 @@ public static class WorkloadLifecycleTransitions
         WorkloadLifecycleState state,
         ResourceId? admissionDecisionReference = null,
         ResourceId? admittedNodeReference = null,
+        SessionAuthority? admittedSessionAuthority = null,
         ResourceId? assignedNodeReference = null,
         ResourceId? attemptReference = null,
         ResourceId? leaseReference = null,
@@ -405,13 +432,14 @@ public static class WorkloadLifecycleTransitions
                 State = state,
                 AdmissionDecisionReference = admissionDecisionReference ?? lifecycle.AdmissionDecisionReference,
                 AdmittedNodeReference = admittedNodeReference ?? lifecycle.AdmittedNodeReference,
+                AdmittedSessionAuthority = admittedSessionAuthority ?? lifecycle.AdmittedSessionAuthority,
                 AssignedNodeReference = assignedNodeReference ?? lifecycle.AssignedNodeReference,
                 AttemptReference = attemptReference ?? lifecycle.AttemptReference,
                 LeaseReference = leaseReference ?? lifecycle.LeaseReference,
                 RunningSessionReference = runningSessionReference ?? lifecycle.RunningSessionReference,
                 PendingOutcome = pendingOutcome,
                 AppliedTransitions = lifecycle.AppliedTransitions.Add(
-                    new(command.Id, command.Target, command.ResultingResourceVersion))
+                    new(command))
             });
 
     private static Result<WorkloadLifecycle, LifecycleFailure> InvalidPredecessor(
