@@ -8,6 +8,11 @@
     <CoverletOutputFormat>json</CoverletOutputFormat>
     <Include>[Armada.Contracts]*</Include>
     <SkipAutoProps>true</SkipAutoProps>
+    <CollectCoverage Condition="'$(CollectCoverage)' == ''">true</CollectCoverage>
+    <Threshold Condition="'$(Threshold)' == ''">85</Threshold>
+    <ThresholdType Condition="'$(ThresholdType)' == ''">line</ThresholdType>
+    <ThresholdStat Condition="'$(ThresholdStat)' == ''">total</ThresholdStat>
+    <CoverletOutput>$(BaseIntermediateOutputPath)coverage/</CoverletOutput>
   </PropertyGroup>
 
   <ItemGroup>

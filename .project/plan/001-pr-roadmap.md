@@ -60,11 +60,12 @@ accepted v1 GitHub/GitHubCopilot/GitHubRelease profiles and no consumer
 **Quality gate:** local and CI validation run:
 
 ```text
-dotnet test Armada.slnx --no-restore /p:CollectCoverage=true /p:CoverletOutputFormat=json /p:Threshold=85 /p:ThresholdType=line /p:ThresholdStat=total
+dotnet msbuild eng/Verify.proj /t:Verify
 ```
 
-The command collects deterministic Coverlet/MSBuild line coverage for the
-affected production projects and fails below the 85% floor. Each test project
+The tracked `Verify` target collects deterministic Coverlet/MSBuild line
+coverage for the affected production projects and fails below the 85% floor.
+The repository CI workflow invokes this exact command. Each test project
 includes only its directly tested production assembly. `SkipAutoProps=true`
 omits only compiler-generated record/DTO auto-property accessors; all
 hand-written contract, mapper and lifecycle source remains measured.

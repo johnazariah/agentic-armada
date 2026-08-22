@@ -444,6 +444,25 @@ public sealed class ContractValidationTests
             Assert.IsType<Result<Project, ContractValidationError>.Failure>(statusResult).Error.Code);
     }
 
+    [Theory]
+    [InlineData("name", "invalid-resource-name")]
+    [InlineData("resource-version", "invalid-resource-version")]
+    [InlineData("generation", "invalid-generation")]
+    [InlineData("labels", "missing-required-metadata")]
+    [InlineData("owners", "missing-required-metadata")]
+    [InlineData("finalizers", "missing-required-metadata")]
+    [InlineData("timestamps", "missing-required-metadata")]
+    [InlineData("finalizer-duplicate", "invalid-finalizers")]
+    [InlineData("owner-kind", "invalid-owner-reference")]
+    public void Metadata_schema_requirements_fail_closed(string boundary, string expectedCode)
+    {
+        var result = V1Alpha1Json.FromWire(InvalidProjectMetadataWire(boundary));
+
+        Assert.Equal(
+            expectedCode,
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
     [Fact]
     public void Project_wire_requires_all_nested_profiles()
     {
@@ -568,6 +587,26 @@ public sealed class ContractValidationTests
             "checkpoint-mode" => wire with { Spec = spec with { Scheduling = spec.Scheduling! with { CheckpointMode = "Other" } } },
             "pull-request" => wire with { Status = wire.Status! with { GithubPullRequest = new(0, null) } },
             _ => throw new ArgumentOutOfRangeException(nameof(boundary), boundary, "Unknown workload validation boundary.")
+        };
+    }
+
+    private static V1Alpha1ProjectWire InvalidProjectMetadataWire(string boundary)
+    {
+        var wire = ValidProjectWire();
+        var metadata = wire.Metadata!;
+
+        return boundary switch
+        {
+            "name" => wire with { Metadata = metadata with { Name = "Not-valid" } },
+            "resource-version" => wire with { Metadata = metadata with { ResourceVersion = string.Empty } },
+            "generation" => wire with { Metadata = metadata with { Generation = 0 } },
+            "labels" => wire with { Metadata = metadata with { Labels = null } },
+            "owners" => wire with { Metadata = metadata with { OwnerReferences = null } },
+            "finalizers" => wire with { Metadata = metadata with { Finalizers = null } },
+            "timestamps" => wire with { Metadata = metadata with { CreatedAt = default } },
+            "finalizer-duplicate" => wire with { Metadata = metadata with { Finalizers = ["cleanup", "cleanup"] } },
+            "owner-kind" => wire with { Metadata = metadata with { OwnerReferences = [new("", "11111111-1111-1111-1111-111111111111")] } },
+            _ => throw new ArgumentOutOfRangeException(nameof(boundary), boundary, "Unknown metadata validation boundary.")
         };
     }
 

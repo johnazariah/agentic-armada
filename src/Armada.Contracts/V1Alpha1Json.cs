@@ -295,11 +295,41 @@ public static class V1Alpha1Json
         {
             return Failure<ResourceMetadata>("invalid-resource-id", "Metadata IDs must be UUID strings.");
         }
+        if (!IsResourceName(wire.Name))
+        {
+            return Failure<ResourceMetadata>("invalid-resource-name", "Metadata name must be a lowercase DNS label of at most 63 characters.");
+        }
+        if (string.IsNullOrEmpty(wire.ResourceVersion))
+        {
+            return Failure<ResourceMetadata>("invalid-resource-version", "Metadata resourceVersion cannot be empty.");
+        }
+        if (wire.Generation < 1)
+        {
+            return Failure<ResourceMetadata>("invalid-generation", "Metadata generation must be at least one.");
+        }
+        if (wire.Labels is null || wire.OwnerReferences is null || wire.Finalizers is null)
+        {
+            return Failure<ResourceMetadata>("missing-required-metadata", "Metadata labels, ownerReferences, and finalizers are required.");
+        }
+        if (wire.CreatedAt == default || wire.UpdatedAt == default)
+        {
+            return Failure<ResourceMetadata>("missing-required-metadata", "Metadata createdAt and updatedAt are required.");
+        }
+        if (wire.Labels.Any(static label => label.Value is null || label.Value.Length > 256) ||
+            wire.Annotations?.Any(static annotation => annotation.Value is null || annotation.Value.Length > 4096) == true)
+        {
+            return Failure<ResourceMetadata>("invalid-metadata-map", "Metadata label or annotation values exceed schema constraints.");
+        }
+        if (wire.Finalizers.Any(static finalizer => string.IsNullOrEmpty(finalizer)) ||
+            wire.Finalizers.Distinct(StringComparer.Ordinal).Count() != wire.Finalizers.Count)
+        {
+            return Failure<ResourceMetadata>("invalid-finalizers", "Metadata finalizers must be non-empty and unique.");
+        }
 
         var owners = new List<OwnerReference>();
-        foreach (var owner in wire.OwnerReferences ?? [])
+        foreach (var owner in wire.OwnerReferences)
         {
-            if (owner is null || !Guid.TryParse(owner.Uid, out var ownerId))
+            if (owner is null || string.IsNullOrEmpty(owner.Kind) || !Guid.TryParse(owner.Uid, out var ownerId))
             {
                 return Failure<ResourceMetadata>("invalid-owner-reference", "Owner reference IDs must be UUID strings.");
             }
@@ -315,14 +345,30 @@ public static class V1Alpha1Json
                 wire.Name,
                 new ResourceVersion(wire.ResourceVersion),
                 wire.Generation,
-                wire.Labels?.ToImmutableDictionary() ?? ImmutableDictionary<string, string>.Empty,
+                wire.Labels.ToImmutableDictionary(),
                 wire.Annotations?.ToImmutableDictionary() ?? ImmutableDictionary<string, string>.Empty,
                 owners.ToImmutableArray(),
-                (wire.Finalizers ?? []).ToImmutableArray(),
+                wire.Finalizers.ToImmutableArray(),
                 wire.CreatedAt,
                 wire.UpdatedAt,
                 wire.DeletionRequestedAt));
     }
+
+    private static bool IsResourceName(string? value)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length > 63 ||
+            !IsLowercaseAlphanumeric(value[0]) ||
+            !IsLowercaseAlphanumeric(value[^1]))
+        {
+            return false;
+        }
+
+        return value.All(static character =>
+            character is >= 'a' and <= 'z' or >= '0' and <= '9' or '-');
+    }
+
+    private static bool IsLowercaseAlphanumeric(char value) =>
+        value is >= 'a' and <= 'z' or >= '0' and <= '9';
 
     private static V1Alpha1ConditionWire ToWire(Condition condition) =>
         new(
