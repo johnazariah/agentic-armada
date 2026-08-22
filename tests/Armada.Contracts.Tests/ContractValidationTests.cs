@@ -298,6 +298,36 @@ public sealed class ContractValidationTests
     }
 
     [Theory]
+    [InlineData("bundle-digest", "invalid-sha256-digest")]
+    [InlineData("policy-digest", "invalid-sha256-digest")]
+    [InlineData("config-digest", "invalid-sha256-digest")]
+    [InlineData("source-provider", "unsupported-provider-profile")]
+    [InlineData("session-provider", "unsupported-provider-profile")]
+    [InlineData("archive-provider", "unsupported-provider-profile")]
+    [InlineData("repository", "invalid-repository-name")]
+    [InlineData("source-revision", "invalid-source-revision")]
+    [InlineData("action-schemas", "invalid-action-schemas")]
+    [InlineData("github-issue", "invalid-github-issue")]
+    [InlineData("scheduling", "missing-required-section")]
+    [InlineData("scheduling-resources", "missing-required-section")]
+    [InlineData("evidence", "missing-required-section")]
+    [InlineData("archive-repository", "invalid-repository-name")]
+    [InlineData("retention-class", "invalid-evidence-requirement")]
+    [InlineData("project-scope", "project-scope-required")]
+    [InlineData("checkpoint-mode", "invalid-checkpoint-mode")]
+    [InlineData("pull-request", "invalid-github-pull-request")]
+    public void Workload_wire_required_fields_and_constraints_fail_closed(
+        string boundary,
+        string expectedCode)
+    {
+        var result = V1Alpha1Json.FromWire(InvalidWorkloadWire(boundary));
+
+        Assert.Equal(
+            expectedCode,
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Theory]
     [InlineData("invalid-resource-id")]
     [InlineData("invalid-lifecycle")]
     [InlineData("invalid-session-authority")]
@@ -511,6 +541,35 @@ public sealed class ContractValidationTests
                 }
             }
         };
+
+    private static V1Alpha1WorkloadWire InvalidWorkloadWire(string boundary)
+    {
+        var wire = ValidWorkloadWire();
+        var spec = wire.Spec!;
+
+        return boundary switch
+        {
+            "bundle-digest" => wire with { Spec = spec with { BundleDigest = null! } },
+            "policy-digest" => wire with { Spec = spec with { PolicyDigest = null! } },
+            "config-digest" => wire with { Spec = spec with { ConfigDigest = null! } },
+            "source-provider" => wire with { Spec = spec with { SourceProvider = "Other" } },
+            "session-provider" => wire with { Spec = spec with { SessionProvider = "Other" } },
+            "archive-provider" => wire with { Spec = spec with { Evidence = spec.Evidence! with { ArchiveProvider = "Other" } } },
+            "repository" => wire with { Spec = spec with { Repository = null! } },
+            "source-revision" => wire with { Spec = spec with { SourceRevision = "short" } },
+            "action-schemas" => wire with { Spec = spec with { ActionSchemas = [] } },
+            "github-issue" => wire with { Spec = spec with { GithubIssue = new(0, null) } },
+            "scheduling" => wire with { Spec = spec with { Scheduling = null } },
+            "scheduling-resources" => wire with { Spec = spec with { Scheduling = spec.Scheduling! with { Resources = null } } },
+            "evidence" => wire with { Spec = spec with { Evidence = null } },
+            "archive-repository" => wire with { Spec = spec with { Evidence = spec.Evidence! with { ArchiveRepository = null! } } },
+            "retention-class" => wire with { Spec = spec with { Evidence = spec.Evidence! with { RetentionClass = string.Empty } } },
+            "project-scope" => wire with { Metadata = wire.Metadata! with { ProjectId = null } },
+            "checkpoint-mode" => wire with { Spec = spec with { Scheduling = spec.Scheduling! with { CheckpointMode = "Other" } } },
+            "pull-request" => wire with { Status = wire.Status! with { GithubPullRequest = new(0, null) } },
+            _ => throw new ArgumentOutOfRangeException(nameof(boundary), boundary, "Unknown workload validation boundary.")
+        };
+    }
 
     private static V1Alpha1MetadataWire WireMetadata(string? projectId) =>
         new(

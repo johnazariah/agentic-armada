@@ -144,6 +144,25 @@ public static class V1Alpha1Json
         {
             return Failure<Workload>("unsupported-provider-profile", "Workload providers must be GitHub, GitHubCopilot, and GitHubRelease.");
         }
+        if (wire.Spec.SourceRevision is null ||
+            wire.Spec.SourceRevision.Length is < 40 or > 64)
+        {
+            return Failure<Workload>("invalid-source-revision", "Source revision must be between 40 and 64 characters.");
+        }
+        if (wire.Spec.ActionSchemas is not { Count: > 0 } ||
+            wire.Spec.ActionSchemas.Any(static schema => schema is null))
+        {
+            return Failure<Workload>("invalid-action-schemas", "Workload action schemas must contain at least one non-null entry.");
+        }
+        if (wire.Spec.GithubIssue.Number < 1 ||
+            wire.Spec.GithubIssue.NodeId is { Length: 0 })
+        {
+            return Failure<Workload>("invalid-github-issue", "GitHub Issue number must be positive and nodeId cannot be empty.");
+        }
+        if (string.IsNullOrEmpty(wire.Spec.Evidence.RetentionClass))
+        {
+            return Failure<Workload>("invalid-evidence-requirement", "Evidence retention class cannot be empty.");
+        }
 
         var metadata = Metadata(wire.Metadata);
         var bundleDigest = Sha256Digest.Parse(wire.Spec.BundleDigest);
@@ -196,6 +215,11 @@ public static class V1Alpha1Json
         if (attemptReference is Result<ResourceId?, ContractValidationError>.Failure attemptFailure)
         {
             return new Result<Workload, ContractValidationError>.Failure(attemptFailure.Error);
+        }
+        if (wire.Status.GithubPullRequest is { } statusPullRequest &&
+            (statusPullRequest.Number < 1 || statusPullRequest.NodeId is { Length: 0 }))
+        {
+            return Failure<Workload>("invalid-github-pull-request", "GitHub pull request number must be positive and nodeId cannot be empty.");
         }
 
         var attemptSuccess = (Result<ResourceId?, ContractValidationError>.Success)attemptReference;
@@ -390,12 +414,24 @@ public static class V1Alpha1Json
                 "invalid-maximum-estimated-cost",
                 "Maximum estimated cost cannot be negative.");
         }
+        if (wire.CheckpointMode is not null &&
+            wire.CheckpointMode is not ("Forbidden" or "Preferred" or "Required"))
+        {
+            return Failure<SchedulingRequirements>(
+                "invalid-checkpoint-mode",
+                $"Unknown checkpoint mode '{wire.CheckpointMode}'.");
+        }
         var tolerations = ImmutableArray.CreateBuilder<Toleration>();
         foreach (var toleration in wire.Tolerations ?? [])
         {
             if (toleration is null)
             {
                 return Failure<SchedulingRequirements>("invalid-toleration", "Toleration array entries cannot be null.");
+            }
+            if (string.IsNullOrEmpty(toleration.Key) ||
+                toleration.Operator is not ("Exists" or "Equal"))
+            {
+                return Failure<SchedulingRequirements>("invalid-toleration", "Toleration key and operator are invalid.");
             }
             if (!Enum.TryParse<TaintEffect>(toleration.Effect, false, out var effect))
             {
