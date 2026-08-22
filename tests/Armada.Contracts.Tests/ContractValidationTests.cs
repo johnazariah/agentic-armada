@@ -76,6 +76,42 @@ public sealed class ContractValidationTests
     }
 
     [Fact]
+    public void Primitive_validation_rejects_null_and_incomplete_values()
+    {
+        Assert.False(RepositoryName.Parse(null!).IsSuccess);
+        Assert.False(BlockedEscalation.Create("", new ActorId(""), "", "", new ActorId(""), DateTimeOffset.UtcNow).IsSuccess);
+        Assert.False(Condition.Create("", ConditionStatus.True, "", "", -1, DateTimeOffset.UtcNow).IsSuccess);
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<Sha256Digest>("42"));
+    }
+
+    [Fact]
+    public void Every_resource_exposes_the_v1alpha1_envelope_discriminator()
+    {
+        var metadata = Metadata(new ProjectId(Guid.Parse("22222222-2222-2222-2222-222222222222")));
+        var status = Status();
+        var repository = Repository("johnazariah/agentic-armada");
+        var resources = new IArmadaResource[]
+        {
+            new Project(metadata with { ProjectId = null }, new ProjectSpec([repository], new GitHubReleaseEvidenceArchiveProfile(repository), new GitHubCopilotSessionProfile(Digest('a')), Digest('b'), null), new ProjectStatus(status, null)),
+            new Node(metadata with { ProjectId = null }, new NodeSpec(ResourceId.New(), new NodeSchedulingCeiling(1, 1000, 1024, 1024), DesiredNodeOperation.Active, []), new NodeStatus(status, null, null)),
+            new NodeIdentity(metadata with { ProjectId = null }, new NodeIdentitySpec(Digest('a'), NodeAssurance.DeviceKey, 1, null), new NodeIdentityStatus(status, null, null, null, null)),
+            new Capability(metadata with { ProjectId = null }, new CapabilitySpec(ResourceId.New(), ["container"]), new CapabilityStatus(status, [], null, null)),
+            new Workload(metadata, new WorkloadSpec(Digest('a'), Digest('b'), new GitHubSourceProfile(repository), new string('c', 40), Digest('d'), ["action"], new GitHubCopilotSessionProvider(), SessionAuthority.None, IsolationProfile.DedicatedNode, new GitHubIssue(1), new SchedulingRequirements(null, [], null, null, new ResourceRequirements(1, 0, 1, 1), null, null), new WorkloadEvidenceRequirement(new GitHubReleaseEvidenceArchiveProfile(repository), "standard")), new WorkloadStatus(status, WorkloadLifecycleState.Desired, null, null, null, null, null, null)),
+            new AdmissionDecision(metadata, new AdmissionDecisionSpec(ResourceId.New(), 1, ResourceId.New(), Digest('a'), Digest('b'), ["action"], SessionAuthority.None, IsolationProfile.DedicatedNode, new ResourceRequirements(1, 0, 1, 1), [], [], Digest('d'), DateTimeOffset.UtcNow.AddHours(1)), new AdmissionDecisionStatus(status, AdmissionVerdict.Pending, null)),
+            new Attempt(metadata, new AttemptSpec(ResourceId.New(), 1, ResourceId.New(), ResourceId.New(), Digest('a'), Digest('b'), Digest('c'), Digest('d')), new AttemptStatus(status, null)),
+            new Lease(metadata, new LeaseSpec(ResourceId.New(), ResourceId.New(), 1, DateTimeOffset.UtcNow.AddHours(1)), new LeaseStatus(status, null, null)),
+            new AgentSession(metadata, new AgentSessionSpec(ResourceId.New(), ResourceId.New(), new GitHubCopilotSessionProfile(Digest('a')), AgentSessionRole.IssueMaster, "key", null), new AgentSessionStatus(status, null, null, null, false)),
+            new EvidenceReceipt(metadata, new EvidenceReceiptSpec(ResourceId.New(), Digest('a'), new GitHubReleaseEvidenceArchiveProfile(repository), "release", Digest('b')), new EvidenceReceiptStatus(status, EvidenceVerification.Pending, null)),
+            new Event(metadata with { ProjectId = null }, new EventSpec("Observed", DateTimeOffset.UtcNow, new ActorId("controller"), Guid.NewGuid(), null, Digest('a')), status)
+        };
+
+        Assert.All(resources, resource => Assert.Equal(ArmadaApi.V1Alpha1, resource.ApiVersion));
+        Assert.Equal(
+            ["Project", "Node", "NodeIdentity", "Capability", "Workload", "AdmissionDecision", "Attempt", "Lease", "AgentSession", "EvidenceReceipt", "Event"],
+            resources.Select(static resource => resource.Kind));
+    }
+
+    [Fact]
     public void Provider_profiles_are_explicit_typed_v1_profiles()
     {
         var repository = Assert.IsType<Result<RepositoryName, ContractValidationError>.Success>(
@@ -235,6 +271,101 @@ public sealed class ContractValidationTests
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
     }
 
+    [Theory]
+    [InlineData("invalid-resource-id")]
+    [InlineData("invalid-lifecycle")]
+    [InlineData("invalid-session-authority")]
+    [InlineData("invalid-taint-effect")]
+    [InlineData("invalid-attempt-reference")]
+    public void Parseable_wire_validation_returns_typed_errors_for_each_boundary(string expectedCode)
+    {
+        var wire = ValidWorkloadWire();
+        wire = expectedCode switch
+        {
+            "invalid-resource-id" => wire with
+            {
+                Metadata = wire.Metadata! with { Uid = "not-a-uuid" }
+            },
+            "invalid-lifecycle" => wire with
+            {
+                Status = wire.Status! with { Lifecycle = "unknown" }
+            },
+            "invalid-session-authority" => wire with
+            {
+                Spec = wire.Spec! with { SessionAuthority = "Unbounded" }
+            },
+            "invalid-taint-effect" => wire with
+            {
+                Spec = wire.Spec! with
+                {
+                    Scheduling = wire.Spec.Scheduling! with
+                    {
+                        Tolerations = [new V1Alpha1TolerationWire("dedicated", "Equal", "armada", "Unknown")]
+                    }
+                }
+            },
+            _ => wire with
+            {
+                Status = wire.Status! with { AttemptRef = "not-a-uuid" }
+            }
+        };
+
+        var result = V1Alpha1Json.FromWire(wire);
+
+        Assert.Equal(
+            expectedCode == "invalid-attempt-reference" ? "invalid-resource-id" : expectedCode,
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Wire_status_and_metadata_validation_handles_invalid_conditions_and_references()
+    {
+        var wire = ValidProjectWire() with
+        {
+            Metadata = ValidProjectWire().Metadata! with
+            {
+                OwnerReferences = [new V1Alpha1OwnerReferenceWire("Project", "not-a-uuid")]
+            }
+        };
+        var ownerResult = V1Alpha1Json.FromWire(wire);
+
+        var invalidStatus = ValidProjectWire() with
+        {
+            Status = ValidProjectWire().Status! with
+            {
+                Conditions = [new V1Alpha1ConditionWire(
+                    "Ready",
+                    "Invalid",
+                    "Unknown",
+                    "Invalid status",
+                    1,
+                    DateTimeOffset.UtcNow,
+                    null)]
+            }
+        };
+        var statusResult = V1Alpha1Json.FromWire(invalidStatus);
+
+        Assert.Equal(
+            "invalid-owner-reference",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(ownerResult).Error.Code);
+        Assert.Equal(
+            "invalid-condition-status",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(statusResult).Error.Code);
+    }
+
+    [Fact]
+    public void Project_wire_requires_all_nested_profiles()
+    {
+        var result = V1Alpha1Json.FromWire(ValidProjectWire() with
+        {
+            Spec = ValidProjectWire().Spec! with { SessionProfile = null }
+        });
+
+        Assert.Equal(
+            "missing-required-section",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
     private static Sha256Digest Digest(char character) =>
         Assert.IsType<Result<Sha256Digest, ContractValidationError>.Success>(
             Sha256Digest.Parse($"sha256:{new string(character, 64)}")).Value;
@@ -260,4 +391,61 @@ public sealed class ContractValidationTests
 
     private static ResourceStatus Status() =>
         new(1, ImmutableArray<Condition>.Empty);
+
+    private static V1Alpha1ProjectWire ValidProjectWire() =>
+        new(
+            ArmadaApi.V1Alpha1,
+            "Project",
+            WireMetadata(projectId: null),
+            new(
+                new(["johnazariah/agentic-armada"]),
+                new("GitHubRelease", "johnazariah/agentic-armada-evidence"),
+                new("GitHubCopilot", Digest('a').Value),
+                Digest('b').Value,
+                100m),
+            new(1, [], 10m));
+
+    private static V1Alpha1WorkloadWire ValidWorkloadWire() =>
+        new(
+            ArmadaApi.V1Alpha1,
+            "Workload",
+            WireMetadata("22222222-2222-2222-2222-222222222222"),
+            new(
+                Digest('a').Value,
+                Digest('b').Value,
+                "GitHub",
+                "johnazariah/agentic-armada",
+                new string('c', 40),
+                Digest('d').Value,
+                ["create-worktree"],
+                "GitHubCopilot",
+                "IssueMaster",
+                "IsolatedContainer",
+                new(42, null),
+                new(
+                    null,
+                    [],
+                    null,
+                    null,
+                    new(1000, 0, 1024, 2048),
+                    null,
+                    null),
+                new("GitHubRelease", "johnazariah/agentic-armada-evidence", "standard")),
+            new(1, [], "desired", null, null, null, null, null, null));
+
+    private static V1Alpha1MetadataWire WireMetadata(string? projectId) =>
+        new(
+            "11111111-1111-1111-1111-111111111111",
+            "33333333-3333-3333-3333-333333333333",
+            projectId,
+            "contract-test",
+            "rv-1",
+            1,
+            ImmutableDictionary<string, string>.Empty,
+            ImmutableDictionary<string, string>.Empty,
+            [],
+            [],
+            DateTimeOffset.Parse("2026-08-22T00:00:00Z"),
+            DateTimeOffset.Parse("2026-08-22T00:00:00Z"),
+            null);
 }

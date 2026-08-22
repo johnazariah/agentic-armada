@@ -5,6 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <CoverletOutputFormat>json</CoverletOutputFormat>
+    <Include>[Armada.Domain]*</Include>
+    <SkipAutoProps>true</SkipAutoProps>
   </PropertyGroup>
 
   <ItemGroup>

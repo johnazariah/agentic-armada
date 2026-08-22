@@ -64,4 +64,7 @@ dotnet test Armada.slnx --no-restore /p:CollectCoverage=true /p:CoverletOutputFo
 ```
 
 The command collects deterministic Coverlet/MSBuild line coverage for the
-affected production projects and fails below the 85% floor.
+affected production projects and fails below the 85% floor. Each test project
+includes only its directly tested production assembly. `SkipAutoProps=true`
+omits only compiler-generated record/DTO auto-property accessors; all
+hand-written contract, mapper and lifecycle source remains measured.
