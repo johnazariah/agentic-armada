@@ -35,7 +35,14 @@ public sealed record PfqeObserverCandidate(
 public sealed record PfqeMigrationInventory(
     ImmutableArray<PfqeImmutableReference> References,
     ImmutableArray<PfqeObserverCandidate> Candidates,
-    PfqeMigrationStage Stage);
+    PfqeMigrationStage Stage,
+    ImmutableArray<PfqeMigrationStageEvidence> StageEvidence);
+
+public sealed record PfqeMigrationStageEvidence(
+    PfqeMigrationStage Stage,
+    string SourceLocation,
+    Sha256Digest ContentDigest,
+    bool IsNonScientificCanary);
 
 public sealed record PfqeMigrationFailure(string Code, string Message);
 
@@ -67,7 +74,8 @@ public static class PfqeMigration
         var candidates = candidateProfiles
             .Select(static profile => profile?.Trim())
             .ToImmutableArray();
-        if (candidates.Any(string.IsNullOrWhiteSpace) ||
+        if (candidates.Length == 0 ||
+            candidates.Any(string.IsNullOrWhiteSpace) ||
             candidates.Distinct(StringComparer.Ordinal).Count() != candidates.Length)
         {
             return Failure("invalid-observer-candidate", "Observer candidates require unique non-empty profile names.");
@@ -83,18 +91,28 @@ public static class PfqeMigration
             .ToImmutableArray();
 
         return new Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success(
-            new(immutableReferences, observerCandidates, PfqeMigrationStage.Inventory));
+            new(immutableReferences, observerCandidates, PfqeMigrationStage.Inventory, []));
     }
 
     public static Result<PfqeMigrationInventory, PfqeMigrationFailure> Advance(
         PfqeMigrationInventory inventory,
-        PfqeMigrationStage nextStage)
+        PfqeMigrationStage nextStage,
+        PfqeMigrationStageEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(inventory);
 
         if ((int)nextStage != (int)inventory.Stage + 1)
         {
             return Failure("invalid-migration-stage", "Migration stages may advance only one reviewed stage at a time.");
+        }
+
+        if (evidence.Stage != nextStage ||
+            string.IsNullOrWhiteSpace(evidence.SourceLocation) ||
+            evidence.ContentDigest is null ||
+            (nextStage == PfqeMigrationStage.NonScientificCanary && !evidence.IsNonScientificCanary) ||
+            (nextStage != PfqeMigrationStage.NonScientificCanary && evidence.IsNonScientificCanary))
+        {
+            return Failure("invalid-stage-evidence", "Each migration stage requires its own immutable evidence; the canary stage must be explicitly non-scientific.");
         }
 
         if (inventory.Candidates.Any(candidate =>
@@ -107,7 +125,7 @@ public static class PfqeMigration
         }
 
         return new Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success(
-            inventory with { Stage = nextStage });
+            inventory with { Stage = nextStage, StageEvidence = inventory.StageEvidence.Add(evidence) });
     }
 
     private static Result<PfqeMigrationInventory, PfqeMigrationFailure> Failure(string code, string message) =>

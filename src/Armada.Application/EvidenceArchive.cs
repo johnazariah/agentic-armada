@@ -18,7 +18,9 @@ public sealed record GitHubReleaseEvidenceExpectation(
     string Provider,
     string EvidenceAssetName,
     string ManifestAssetName,
-    Sha256Digest ProvenanceDigest);
+    string ProvenanceAssetName,
+    Sha256Digest ProvenanceDigest,
+    string TrustedSigner);
 
 public sealed record EvidenceArchiveVerification(
     bool IsVerified,
@@ -36,5 +38,17 @@ public interface IEvidenceArchive
 {
     Task<EvidenceArchiveVerification> VerifyAsync(
         GitHubReleaseEvidenceExpectation expectation,
+        CancellationToken cancellationToken);
+}
+
+public sealed record ReleaseEvidenceProvenance(
+    GitHubReleaseAsset Manifest,
+    GitHubReleaseAsset Provenance,
+    string TrustedSigner);
+
+public interface IReleaseEvidenceProvenanceVerifier
+{
+    Task<bool> VerifyAsync(
+        ReleaseEvidenceProvenance provenance,
         CancellationToken cancellationToken);
 }

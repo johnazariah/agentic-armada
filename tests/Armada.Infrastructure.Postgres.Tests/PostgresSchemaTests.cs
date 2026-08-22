@@ -58,6 +58,14 @@ public sealed class PostgresSchemaTests
     }
 
     [Fact]
+    public void Pending_projection_query_never_replays_acknowledged_outbox_messages()
+    {
+        Assert.Contains("WHERE outbox.dispatched_at IS NULL", PostgresOutboxSql.PendingEvents, StringComparison.Ordinal);
+        Assert.Contains("SET dispatched_at = @dispatchedAt", PostgresOutboxSql.Acknowledge, StringComparison.Ordinal);
+        Assert.Contains("dispatch_attempts = dispatch_attempts + 1", PostgresOutboxSql.Acknowledge, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Projection_receipt_migration_binds_receipts_to_immutable_ledger_events()
     {
         var sql = PostgresSchema.Migrations.Single(static migration => migration.Version == 2).Sql;

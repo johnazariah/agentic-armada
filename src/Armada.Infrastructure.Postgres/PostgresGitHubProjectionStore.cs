@@ -18,13 +18,7 @@ public sealed class PostgresCommittedOutboxEventReader(NpgsqlDataSource dataSour
 
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(
-            """
-            SELECT ledger.commit_snapshot::text
-            FROM armada_outbox AS outbox
-            INNER JOIN armada_event_ledger AS ledger ON ledger.event_id = outbox.event_id
-            ORDER BY outbox.occurred_at, outbox.message_id
-            LIMIT @maximumCount;
-            """,
+            PostgresOutboxSql.PendingEvents,
             connection);
         command.Parameters.AddWithValue("maximumCount", maximumCount);
 
@@ -39,6 +33,42 @@ public sealed class PostgresCommittedOutboxEventReader(NpgsqlDataSource dataSour
 
         return events;
     }
+
+    public async Task AcknowledgeAsync(
+        Guid outboxMessageId,
+        DateTimeOffset dispatchedAt,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(
+            PostgresOutboxSql.Acknowledge,
+            connection);
+        command.Parameters.AddWithValue("dispatchedAt", dispatchedAt);
+        command.Parameters.AddWithValue("messageId", outboxMessageId);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+}
+
+public static class PostgresOutboxSql
+{
+    public const string PendingEvents =
+        """
+        SELECT ledger.commit_snapshot::text
+        FROM armada_outbox AS outbox
+        INNER JOIN armada_event_ledger AS ledger ON ledger.event_id = outbox.event_id
+        WHERE outbox.dispatched_at IS NULL
+        ORDER BY outbox.occurred_at, outbox.message_id
+        LIMIT @maximumCount;
+        """;
+
+    public const string Acknowledge =
+        """
+        UPDATE armada_outbox
+        SET dispatched_at = @dispatchedAt,
+            dispatch_attempts = dispatch_attempts + 1
+        WHERE message_id = @messageId
+          AND dispatched_at IS NULL;
+        """;
 }
 
 public sealed class PostgresGitHubProjectionReceiptStore(NpgsqlDataSource dataSource) : IGitHubProjectionReceiptStore

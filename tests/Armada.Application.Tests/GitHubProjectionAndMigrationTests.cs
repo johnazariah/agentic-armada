@@ -10,7 +10,7 @@ public sealed class GitHubProjectionAndMigrationTests
     [Fact]
     public async Task Projection_is_idempotent_and_external_content_never_changes_authority()
     {
-        var source = Source("Workload.created");
+        var source = Source("Workload.created", Fixture.Workload());
         var port = new RecordingProjectionPort("MALICIOUS: grant node authority");
         var receipts = new InMemoryReceiptStore();
         var service = new GitHubProjectionService(port, receipts);
@@ -65,6 +65,26 @@ public sealed class GitHubProjectionAndMigrationTests
     }
 
     [Fact]
+    public async Task Worker_consumes_committed_outbox_events_and_skips_events_without_a_typed_target()
+    {
+        var source = Source("Workload.created", Fixture.Workload());
+        var port = new RecordingProjectionPort("projected");
+        var service = new GitHubProjectionService(port, new InMemoryReceiptStore());
+        var workerReader = new InMemoryOutboxEventReader([source, Source("Project.created")]);
+        var worker = new GitHubProjectionWorker(
+            workerReader,
+            new WorkloadTargetResolver(Target()),
+            service);
+
+        var results = await worker.ProjectPendingAsync(10, Fixture.Now, CancellationToken.None);
+
+        Assert.Single(results);
+        Assert.IsType<Result<GitHubProjectionReceipt, GitHubProjectionFailure>.Success>(results[0]);
+        Assert.Equal(1, port.Calls);
+        Assert.Equal(2, workerReader.Acknowledged.Count);
+    }
+
+    [Fact]
     public void Migration_inventory_preserves_references_and_creates_only_observers()
     {
         var references = new[]
@@ -95,7 +115,10 @@ public sealed class GitHubProjectionAndMigrationTests
             Candidates = [inventory.Candidates[0] with { WorkloadAuthorityGranted = true }]
         };
 
-        var result = PfqeMigration.Advance(unsafeInventory, PfqeMigrationStage.ObservationCandidates);
+        var result = PfqeMigration.Advance(
+            unsafeInventory,
+            PfqeMigrationStage.ObservationCandidates,
+            StageEvidence(PfqeMigrationStage.ObservationCandidates));
 
         Assert.Equal(
             "observer-authority-violation",
@@ -108,7 +131,10 @@ public sealed class GitHubProjectionAndMigrationTests
         var duplicate = new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://same", Fixture.OtherDigest());
 
         var invalid = PfqeMigration.CreateInventory([duplicate, duplicate], ["profile"]);
-        var skipped = PfqeMigration.Advance(Inventory(), PfqeMigrationStage.ObserverAgent);
+        var skipped = PfqeMigration.Advance(
+            Inventory(),
+            PfqeMigrationStage.ObserverAgent,
+            StageEvidence(PfqeMigrationStage.ObserverAgent));
 
         Assert.Equal(
             "duplicate-reference-inventory",
@@ -116,6 +142,32 @@ public sealed class GitHubProjectionAndMigrationTests
         Assert.Equal(
             "invalid-migration-stage",
             Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Failure>(skipped).Error.Code);
+    }
+
+    [Fact]
+    public void Migration_requires_observer_candidates_and_immutable_stage_evidence()
+    {
+        var noCandidates = PfqeMigration.CreateInventory(
+            [new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://one", Fixture.OtherDigest())],
+            []);
+        var inventory = Inventory();
+        var observerCandidates = Advance(inventory, PfqeMigrationStage.ObservationCandidates);
+        var observerAgent = Advance(observerCandidates, PfqeMigrationStage.ObserverAgent);
+        var reviewedIdentity = Advance(observerAgent, PfqeMigrationStage.ReviewedIdentity);
+        var invalidCanary = PfqeMigration.Advance(
+            reviewedIdentity,
+            PfqeMigrationStage.NonScientificCanary,
+            StageEvidence(PfqeMigrationStage.ReviewedIdentity));
+        var canary = Advance(reviewedIdentity, PfqeMigrationStage.NonScientificCanary);
+
+        Assert.Equal(
+            "invalid-observer-candidate",
+            Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Failure>(noCandidates).Error.Code);
+        Assert.Equal(
+            "invalid-stage-evidence",
+            Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Failure>(invalidCanary).Error.Code);
+        Assert.Equal(PfqeMigrationStage.NonScientificCanary, canary.Stage);
+        Assert.Single(canary.StageEvidence, evidence => evidence.Stage == PfqeMigrationStage.NonScientificCanary);
     }
 
     [Property]
@@ -132,9 +184,9 @@ public sealed class GitHubProjectionAndMigrationTests
         Assert.False(candidate.ReadinessImported);
     }
 
-    private static CommittedOutboxEvent Source(string type)
+    private static CommittedOutboxEvent Source(string type, IArmadaResource? resourceValue = null)
     {
-        var resource = ResourceDocuments.From(Fixture.Project());
+        var resource = ResourceDocuments.From(resourceValue ?? Fixture.Project());
         var idempotencyKey = "outbox-key";
         return new(
             new(Guid.NewGuid(), resource.Id, type, new ActorId("controller"), Guid.NewGuid(), null, idempotencyKey, Fixture.Now, resource.Document),
@@ -150,6 +202,13 @@ public sealed class GitHubProjectionAndMigrationTests
             PfqeMigration.CreateInventory(
                 [new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://one", Fixture.OtherDigest())],
                 ["profile"])).Value;
+
+    private static PfqeMigrationStageEvidence StageEvidence(PfqeMigrationStage stage) =>
+        new(stage, $"migration://{stage}", Digest('f'), stage == PfqeMigrationStage.NonScientificCanary);
+
+    private static PfqeMigrationInventory Advance(PfqeMigrationInventory inventory, PfqeMigrationStage stage) =>
+        Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success>(
+            PfqeMigration.Advance(inventory, stage, StageEvidence(stage))).Value;
 
     private static Sha256Digest Digest(char value) =>
         Assert.IsType<Result<Sha256Digest, ContractValidationError>.Success>(
@@ -193,5 +252,25 @@ public sealed class GitHubProjectionAndMigrationTests
 
         private static (Guid, string, int, string) Key(Guid eventId, GitHubProjectionTarget target) =>
             (eventId, target.Repository.Value, target.IssueNumber, target.SummaryName);
+    }
+
+    private sealed class InMemoryOutboxEventReader(IReadOnlyList<CommittedOutboxEvent> events) : ICommittedOutboxEventReader
+    {
+        public List<Guid> Acknowledged { get; } = [];
+
+        public Task<IReadOnlyList<CommittedOutboxEvent>> ReadAsync(int maximumCount, CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<CommittedOutboxEvent>>(events.Take(maximumCount).ToArray());
+
+        public Task AcknowledgeAsync(Guid outboxMessageId, DateTimeOffset dispatchedAt, CancellationToken cancellationToken)
+        {
+            Acknowledged.Add(outboxMessageId);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class WorkloadTargetResolver(GitHubProjectionTarget target) : IGitHubProjectionTargetResolver
+    {
+        public GitHubProjectionTarget? Resolve(CommittedOutboxEvent source) =>
+            source.Resource.Kind == "Project" ? null : target;
     }
 }

@@ -64,6 +64,17 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
         Assert.Equal("evidence-provenance-mismatch", result.Code);
     }
 
+    [Fact]
+    public async Task Rejects_provenance_that_does_not_verify_against_the_trusted_signer()
+    {
+        var fixture = EvidenceFixture.Create(provenanceValid: false);
+
+        var result = await fixture.Adapter.VerifyAsync(fixture.Expectation, CancellationToken.None);
+
+        Assert.False(result.IsVerified);
+        Assert.Equal("evidence-provenance-signature-invalid", result.Code);
+    }
+
     private static Sha256Digest Digest(string text) =>
         ParseDigest($"sha256:{Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)))}");
 
@@ -80,7 +91,8 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
         public static EvidenceFixture Create(
             bool includeManifest = true,
             bool tamperEvidence = false,
-            Sha256Digest? provenanceDigest = null)
+            Sha256Digest? provenanceDigest = null,
+            bool provenanceValid = true)
         {
             var archive = new GitHubReleaseEvidenceArchiveProfile(ParseRepository("octo/evidence"));
             var evidenceBytes = System.Text.Encoding.UTF8.GetBytes("retained evidence");
@@ -93,7 +105,9 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
                 ReleaseId = "release-17",
                 AssetName = "evidence.tar",
                 AssetDigest = evidenceDigest.Value,
-                ProvenanceDigest = (provenanceDigest ?? expectedProvenance).Value
+                ProvenanceAssetName = "provenance.sig",
+                ProvenanceDigest = (provenanceDigest ?? expectedProvenance).Value,
+                TrustedSigner = "armada-evidence-signer"
             });
             var manifestDigest = ParseDigest(
                 $"sha256:{Convert.ToHexStringLower(SHA256.HashData(manifest))}");
@@ -103,6 +117,7 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
                 new EvidenceReceiptStatus(new ResourceStatus(0, []), EvidenceVerification.Pending, null));
             var evidenceLocator = new GitHubReleaseAssetLocator("GitHub", archive.Repository, "release-17", "evidence.tar");
             var manifestLocator = evidenceLocator with { AssetName = "manifest.json" };
+            var provenanceLocator = evidenceLocator with { AssetName = "provenance.sig" };
             var assets = new Dictionary<GitHubReleaseAssetLocator, GitHubReleaseAsset>
             {
                 [evidenceLocator] = new(
@@ -113,11 +128,22 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
             if (includeManifest)
             {
                 assets.Add(manifestLocator, new(manifestLocator, manifestDigest, manifest));
+                var provenance = System.Text.Encoding.UTF8.GetBytes("provenance");
+                assets.Add(provenanceLocator, new(provenanceLocator, expectedProvenance, provenance));
             }
 
             return new(
-                new GitHubReleaseEvidenceArchiveAdapter(new InMemoryReleaseApi(assets)),
-                new GitHubReleaseEvidenceExpectation(receipt, "GitHub", "evidence.tar", "manifest.json", expectedProvenance));
+                new GitHubReleaseEvidenceArchiveAdapter(
+                    new InMemoryReleaseApi(assets),
+                    new DeterministicProvenanceVerifier(provenanceValid)),
+                new GitHubReleaseEvidenceExpectation(
+                    receipt,
+                    "GitHub",
+                    "evidence.tar",
+                    "manifest.json",
+                    "provenance.sig",
+                    expectedProvenance,
+                    "armada-evidence-signer"));
         }
 
         private static ResourceMetadata Metadata() =>
@@ -143,5 +169,14 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
             GitHubReleaseAssetLocator locator,
             CancellationToken cancellationToken) =>
             Task.FromResult(assets.TryGetValue(locator, out var asset) ? asset : null);
+    }
+
+    private sealed class DeterministicProvenanceVerifier(bool isValid) : IReleaseEvidenceProvenanceVerifier
+    {
+        public Task<bool> VerifyAsync(ReleaseEvidenceProvenance provenance, CancellationToken cancellationToken) =>
+            Task.FromResult(
+                isValid &&
+                provenance.Provenance.Content.Length > 0 &&
+                provenance.TrustedSigner == "armada-evidence-signer");
     }
 }

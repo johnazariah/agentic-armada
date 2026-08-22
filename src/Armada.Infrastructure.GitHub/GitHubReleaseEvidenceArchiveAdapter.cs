@@ -5,7 +5,9 @@ using Armada.Contracts;
 
 namespace Armada.Infrastructure.GitHub;
 
-public sealed class GitHubReleaseEvidenceArchiveAdapter(IGitHubReleaseApi api) : IEvidenceArchive
+public sealed class GitHubReleaseEvidenceArchiveAdapter(
+    IGitHubReleaseApi api,
+    IReleaseEvidenceProvenanceVerifier provenanceVerifier) : IEvidenceArchive
 {
     public async Task<EvidenceArchiveVerification> VerifyAsync(
         GitHubReleaseEvidenceExpectation expectation,
@@ -24,16 +26,19 @@ public sealed class GitHubReleaseEvidenceArchiveAdapter(IGitHubReleaseApi api) :
             expectation.Receipt.Spec.ReleaseId,
             expectation.EvidenceAssetName);
         var manifestLocator = evidenceLocator with { AssetName = expectation.ManifestAssetName };
+        var provenanceLocator = evidenceLocator with { AssetName = expectation.ProvenanceAssetName };
         var evidence = await api.GetAssetAsync(evidenceLocator, cancellationToken);
         var manifest = await api.GetAssetAsync(manifestLocator, cancellationToken);
+        var provenance = await api.GetAssetAsync(provenanceLocator, cancellationToken);
 
-        if (evidence is null || manifest is null)
+        if (evidence is null || manifest is null || provenance is null)
         {
             return Rejected("release-asset-missing", "The expected evidence asset or manifest asset is missing from the release.");
         }
 
         if (!Matches(evidence, evidenceLocator, expectation.Receipt.Spec.AssetDigest) ||
-            !Matches(manifest, manifestLocator, expectation.Receipt.Spec.ManifestDigest))
+            !Matches(manifest, manifestLocator, expectation.Receipt.Spec.ManifestDigest) ||
+            !Matches(provenance, provenanceLocator, expectation.ProvenanceDigest))
         {
             return Rejected("release-asset-identity-mismatch", "The retrieved release assets do not match the expected provider, repository, release, name, and digest.");
         }
@@ -45,9 +50,18 @@ public sealed class GitHubReleaseEvidenceArchiveAdapter(IGitHubReleaseApi api) :
             parsedManifest.ReleaseId != expectation.Receipt.Spec.ReleaseId ||
             parsedManifest.AssetName != expectation.EvidenceAssetName ||
             parsedManifest.AssetDigest != expectation.Receipt.Spec.AssetDigest.Value ||
-            parsedManifest.ProvenanceDigest != expectation.ProvenanceDigest.Value)
+            parsedManifest.ProvenanceAssetName != expectation.ProvenanceAssetName ||
+            parsedManifest.ProvenanceDigest != expectation.ProvenanceDigest.Value ||
+            parsedManifest.TrustedSigner != expectation.TrustedSigner)
         {
             return Rejected("evidence-provenance-mismatch", "The independently retrieved manifest does not bind the expected evidence asset provenance.");
+        }
+
+        if (!await provenanceVerifier.VerifyAsync(
+                new ReleaseEvidenceProvenance(manifest, provenance, expectation.TrustedSigner),
+                cancellationToken))
+        {
+            return Rejected("evidence-provenance-signature-invalid", "The independently retrieved provenance did not verify against the configured trusted signer.");
         }
 
         return new EvidenceArchiveVerification(true, "verified", "The GitHub release evidence and provenance are independently verified.");
@@ -101,5 +115,7 @@ public sealed class GitHubReleaseEvidenceArchiveAdapter(IGitHubReleaseApi api) :
         string ReleaseId,
         string AssetName,
         string AssetDigest,
-        string ProvenanceDigest);
+        string ProvenanceAssetName,
+        string ProvenanceDigest,
+        string TrustedSigner);
 }

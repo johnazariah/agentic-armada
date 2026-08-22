@@ -37,6 +37,11 @@ public interface ICommittedOutboxEventReader
     Task<IReadOnlyList<CommittedOutboxEvent>> ReadAsync(
         int maximumCount,
         CancellationToken cancellationToken);
+
+    Task AcknowledgeAsync(
+        Guid outboxMessageId,
+        DateTimeOffset dispatchedAt,
+        CancellationToken cancellationToken);
 }
 
 public interface IGitHubProjectionPort
@@ -56,6 +61,11 @@ public interface IGitHubProjectionReceiptStore
     Task<GitHubProjectionReceipt> RecordAsync(
         GitHubProjectionReceipt receipt,
         CancellationToken cancellationToken);
+}
+
+public interface IGitHubProjectionTargetResolver
+{
+    GitHubProjectionTarget? Resolve(CommittedOutboxEvent source);
 }
 
 public static class GitHubProjectionMapping
@@ -143,6 +153,40 @@ public sealed class GitHubProjectionService(
             recordedAt);
         return new Result<GitHubProjectionReceipt, GitHubProjectionFailure>.Success(
             await receiptStore.RecordAsync(receipt, cancellationToken));
+    }
+}
+
+public sealed class GitHubProjectionWorker(
+    ICommittedOutboxEventReader eventReader,
+    IGitHubProjectionTargetResolver targetResolver,
+    GitHubProjectionService projectionService)
+{
+    public async Task<IReadOnlyList<Result<GitHubProjectionReceipt, GitHubProjectionFailure>>> ProjectPendingAsync(
+        int maximumCount,
+        DateTimeOffset recordedAt,
+        CancellationToken cancellationToken)
+    {
+        var results = new List<Result<GitHubProjectionReceipt, GitHubProjectionFailure>>();
+        var events = await eventReader.ReadAsync(maximumCount, cancellationToken);
+        foreach (var source in events)
+        {
+            var target = targetResolver.Resolve(source);
+            if (target is not null)
+            {
+                var result = await projectionService.ProjectAsync(source, target, recordedAt, cancellationToken);
+                results.Add(result);
+                if (result is Result<GitHubProjectionReceipt, GitHubProjectionFailure>.Success)
+                {
+                    await eventReader.AcknowledgeAsync(source.OutboxMessage.Id, recordedAt, cancellationToken);
+                }
+            }
+            else
+            {
+                await eventReader.AcknowledgeAsync(source.OutboxMessage.Id, recordedAt, cancellationToken);
+            }
+        }
+
+        return results;
     }
 }
 
