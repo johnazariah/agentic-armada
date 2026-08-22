@@ -20,6 +20,29 @@ public interface INodeJournal
         JournalEntry entry,
         CancellationToken cancellationToken);
 
+    Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimedAsync(
+        string claimIdentity,
+        Func<long, JournalEntry> entryFactory,
+        CancellationToken cancellationToken);
+
+    Task<Result<JournalAppendClaim, JournalFailure>> ClaimUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent claim,
+        CancellationToken cancellationToken);
+
+    Task<Result<JournalAppendClaim, JournalFailure>> RenewUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeOperationFence fence,
+        DateTimeOffset renewedAt,
+        DateTimeOffset expiresAt,
+        CancellationToken cancellationToken);
+
+    Task<Result<JournalAppendClaim, JournalFailure>> CompleteUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent completion,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
+
     Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(
         CancellationToken cancellationToken);
 }
@@ -61,4 +84,5 @@ public interface IProcessSupervisor
 }
 
 public sealed record JournalFailure(string Code, string Message);
+public sealed record JournalAppendClaim(JournalEntry Entry, bool Added);
 public sealed record ProcessSupervisorFailure(string Code, string Message);

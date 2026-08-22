@@ -9,7 +9,8 @@ public enum JournalEntryType
 {
     CommandDecision,
     AttemptStarted,
-    EvidenceObservation
+    EvidenceObservation,
+    ReleaseUpgrade
 }
 
 public sealed record JournalEntry(
@@ -41,7 +42,8 @@ public sealed record JournalEntry(
     Sha256Digest? ReleaseDigest,
     Sha256Digest? ManifestDigest,
     Sha256Digest? OutputDigest,
-    DateTimeOffset RecordedAt)
+    DateTimeOffset RecordedAt,
+    UpgradeJournalEvent? Upgrade = null)
 {
     public static JournalEntry ForCommand(
         long ordinal,
@@ -59,7 +61,7 @@ public sealed record JournalEntry(
             envelope.MessageId,
             envelope.CorrelationId,
             envelope.IdempotencyKey,
-            ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey),
+            CommandClaimIdentity(envelope),
             outcome.Acknowledgement.Accepted,
             outcome.AdvancesSequence,
             outcome.Acknowledgement.Code,
@@ -99,7 +101,7 @@ public sealed record JournalEntry(
             Guid.Empty,
             Guid.Empty,
             $"evidence:{observation.AttemptId}:{observation.ManifestDigest}",
-            observation.AttemptId.ToString(),
+            EvidenceClaimIdentity(observation),
             true,
             false,
             "evidence-observed",
@@ -135,7 +137,7 @@ public sealed record JournalEntry(
             Guid.Empty,
             Guid.Empty,
             $"attempt-start:{attempt.AttemptId}",
-            ProtocolIdentity.Join(
+            AttemptStartClaimIdentity(
                 attempt.ProjectId.ToString(),
                 attempt.WorkloadId.ToString(),
                 attempt.AttemptId.ToString(),
@@ -165,6 +167,93 @@ public sealed record JournalEntry(
             null,
             null,
             recordedAt);
+
+    public static JournalEntry ForUpgrade(
+        long ordinal,
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent upgrade)
+    {
+        var durableUpgrade = upgrade.Fence == 0 ? upgrade with { Fence = ordinal } : upgrade;
+        return new(
+            ordinal,
+            JournalEntryType.ReleaseUpgrade,
+            identity.NodeId,
+            identity.IdentityEpoch,
+            0,
+            0,
+            Guid.Empty,
+            Guid.Empty,
+            durableUpgrade.IdempotencyKey,
+            UpgradeClaimIdentity(durableUpgrade),
+            true,
+            false,
+            durableUpgrade.Code,
+            durableUpgrade.Message,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            durableUpgrade.RecordedAt,
+            durableUpgrade);
+    }
+
+    public static string EvidenceClaimIdentity(EvidenceObservation observation) =>
+        ProtocolIdentity.Join(
+            "evidence",
+            observation.AttemptId.ToString(),
+            observation.ManifestDigest.Value,
+            observation.OutputDigest.Value);
+
+    public static string CommandClaimIdentity(OutboundEnvelope<NodeCommand> envelope) =>
+        ProtocolIdentity.Join(
+            "node-command",
+            envelope.ProtocolVersion,
+            envelope.NodeId.ToString(),
+            envelope.IdentityEpoch.ToString(),
+            envelope.StreamEpoch.ToString(),
+            envelope.Sequence.ToString(),
+            ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey));
+
+    public static string AttemptStartClaimIdentity(
+        string projectId,
+        string workloadId,
+        string attemptId,
+        string admissionDecisionId,
+        string leaseId,
+        string bundleDigest,
+        string policyDigest,
+        string releaseDigest,
+        string capabilityGrantDigest,
+        string authorityExpiresAt) =>
+        ProtocolIdentity.Join(
+            "attempt-start",
+            projectId,
+            workloadId,
+            attemptId,
+            admissionDecisionId,
+            leaseId,
+            bundleDigest,
+            policyDigest,
+            releaseDigest,
+            capabilityGrantDigest,
+            authorityExpiresAt);
+
+    public static string UpgradeClaimIdentity(UpgradeJournalEvent upgrade) =>
+        ProtocolIdentity.Join(
+            "release-upgrade",
+            upgrade.IdempotencyKey,
+            upgrade.Phase.ToString(),
+            upgrade.OperationId.ToString("D"));
 }
 
 public sealed record EncryptedJournalRecord(string Nonce, string Tag, string Ciphertext);
@@ -233,6 +322,7 @@ public sealed class AesGcmJournalProtector
         {
             return Failure("journal-ciphertext-invalid", "The encrypted journal record cannot be processed.");
         }
+
     }
 
     public static Result<bool, JournalFailure> ValidateRecord(EncryptedJournalRecord? record)
@@ -318,6 +408,187 @@ public sealed class EncryptedFileJournal : INodeJournal
         }
     }
 
+    public async Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimedAsync(
+            string claimIdentity,
+            Func<long, JournalEntry> entryFactory,
+            CancellationToken cancellationToken)
+        {
+            await operationGate.WaitAsync(cancellationToken);
+            try
+            {
+                var loaded = await ReadValidatedAsync(cancellationToken);
+                if (loaded is Result<JournalSnapshot, JournalFailure>.Failure failure)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(failure.Error);
+                }
+
+                var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                var existing = snapshot.Entries.SingleOrDefault(entry => entry.PayloadIdentity == claimIdentity);
+                if (existing is not null)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false));
+                }
+
+                var entry = entryFactory(snapshot.Anchor.Ordinal + 1);
+                if (entry.PayloadIdentity != claimIdentity)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-claim-identity-mismatch", "The claimed journal entry must retain its supplied claim identity."));
+                }
+
+                return await AppendCoreAsync(entry, cancellationToken) switch
+                {
+                    Result<JournalEntry, JournalFailure>.Success success =>
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(success.Value, true)),
+                    Result<JournalEntry, JournalFailure>.Failure appendFailure =>
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(appendFailure.Error),
+                    _ => new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-write-failed", "The journal append returned an unsupported result."))
+                };
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
+
+    public async Task<Result<JournalAppendClaim, JournalFailure>> ClaimUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeJournalEvent claim,
+            CancellationToken cancellationToken)
+        {
+            await operationGate.WaitAsync(cancellationToken);
+            try
+            {
+                var loaded = await ReadValidatedAsync(cancellationToken);
+                if (loaded is Result<JournalSnapshot, JournalFailure>.Failure failure)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(failure.Error);
+                }
+
+                var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                if (claim.Phase == UpgradePhase.RollbackClaimed &&
+                    HasActivatedTerminal(snapshot.Entries, claim.IdempotencyKey))
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("upgrade-already-activated", "A durable activated terminal state rejects stale rollback claims."));
+                }
+                if (claim.Phase != UpgradePhase.RollbackClaimed &&
+                    HasOutstandingRollback(snapshot.Entries, claim.IdempotencyKey))
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions."));
+                }
+                var existing = snapshot.Entries
+                    .Where(entry =>
+                        entry.Upgrade?.IdempotencyKey == claim.IdempotencyKey &&
+                        entry.Upgrade.Phase == claim.Phase)
+                    .OrderBy(static entry => entry.Ordinal)
+                    .LastOrDefault();
+                if (existing?.Upgrade?.ClaimExpiresAt is { } expiresAt && expiresAt > claim.RecordedAt)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false));
+                }
+
+                var entry = JournalEntry.ForUpgrade(snapshot.Anchor.Ordinal + 1, identity, claim);
+                return await AppendCoreAsync(entry, cancellationToken) switch
+                {
+                    Result<JournalEntry, JournalFailure>.Success success =>
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(success.Value, true)),
+                    Result<JournalEntry, JournalFailure>.Failure appendFailure =>
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(appendFailure.Error),
+                    _ => new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-write-failed", "The journal transition claim returned an unsupported result."))
+                };
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
+
+        public async Task<Result<JournalAppendClaim, JournalFailure>> RenewUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeOperationFence fence,
+            DateTimeOffset renewedAt,
+            DateTimeOffset expiresAt,
+            CancellationToken cancellationToken) =>
+            await AppendFencedUpgradeAsync(
+                identity,
+                fence,
+                new(
+                    fence.IdempotencyKey,
+                    fence.ReleaseId,
+                    fence.ManifestDigest,
+                    fence.ClaimPhase,
+                    renewedAt,
+                    "upgrade-transition-renewed",
+                    $"The {fence.ClaimPhase} transition claim was renewed.",
+                    fence.OperationId,
+                    expiresAt,
+                    0),
+                cancellationToken);
+
+        public async Task<Result<JournalAppendClaim, JournalFailure>> CompleteUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeJournalEvent completion,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken) =>
+            await AppendFencedUpgradeAsync(identity, fence, completion, cancellationToken);
+
+        private async Task<Result<JournalAppendClaim, JournalFailure>> AppendFencedUpgradeAsync(
+            NodeDeviceIdentity identity,
+            UpgradeOperationFence fence,
+            UpgradeJournalEvent upgrade,
+            CancellationToken cancellationToken)
+        {
+            await operationGate.WaitAsync(cancellationToken);
+            try
+            {
+                var loaded = await ReadValidatedAsync(cancellationToken);
+                if (loaded is Result<JournalSnapshot, JournalFailure>.Failure failure)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(failure.Error);
+                }
+
+                var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                if (fence.ClaimPhase != UpgradePhase.RollbackClaimed &&
+                    HasOutstandingRollback(snapshot.Entries, fence.IdempotencyKey))
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions."));
+                }
+                var currentClaim = snapshot.Entries
+                    .Select(static entry => entry.Upgrade)
+                    .OfType<UpgradeJournalEvent>()
+                    .Where(eventValue =>
+                        eventValue.IdempotencyKey == fence.IdempotencyKey &&
+                        eventValue.Phase == fence.ClaimPhase)
+                    .LastOrDefault();
+                if (currentClaim is null ||
+                    currentClaim.OperationId != fence.OperationId ||
+                    currentClaim.Fence != fence.Fence)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("upgrade-fence-lost", "The journal transition claim was superseded before this effect could be recorded."));
+                }
+
+                var entry = JournalEntry.ForUpgrade(snapshot.Anchor.Ordinal + 1, identity, upgrade);
+                return await AppendCoreAsync(entry, cancellationToken) switch
+                {
+                    Result<JournalEntry, JournalFailure>.Success success =>
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(success.Value, true)),
+                    Result<JournalEntry, JournalFailure>.Failure appendFailure =>
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(appendFailure.Error),
+                    _ => new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-write-failed", "The fenced journal transition returned an unsupported result."))
+                };
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
     private async Task<Result<JournalEntry, JournalFailure>> AppendCoreAsync(
         JournalEntry entry,
         CancellationToken cancellationToken)
@@ -649,6 +920,29 @@ public sealed class EncryptedFileJournal : INodeJournal
     private static Result<T, JournalFailure> Failure<T>(string code, string message) =>
         new Result<T, JournalFailure>.Failure(new(code, message));
 
+    private static bool HasOutstandingRollback(
+        IReadOnlyList<JournalEntry> entries,
+        string idempotencyKey)
+    {
+        var upgrades = entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Where(upgrade => upgrade.IdempotencyKey == idempotencyKey)
+            .ToArray();
+        return upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RollbackClaimed) &&
+               !upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RolledBack);
+    }
+
+    private static bool HasActivatedTerminal(
+        IReadOnlyList<JournalEntry> entries,
+        string idempotencyKey) =>
+        entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Any(upgrade =>
+                upgrade.IdempotencyKey == idempotencyKey &&
+                upgrade.Phase == UpgradePhase.Activated);
+
     private sealed record JournalSnapshot(
         IReadOnlyList<JournalEntry> Entries,
         LocalJournalTailMarker Anchor);
@@ -683,6 +977,106 @@ public sealed class InMemoryJournal : INodeJournal
             new Result<JournalEntry, JournalFailure>.Success(entry));
     }
 
+    public Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimedAsync(
+            string claimIdentity,
+            Func<long, JournalEntry> entryFactory,
+            CancellationToken cancellationToken)
+        {
+            if (appendFailure is { } failure)
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(failure));
+            }
+
+            lock (sync)
+            {
+                var existing = entries.SingleOrDefault(entry => entry.PayloadIdentity == claimIdentity);
+                if (existing is not null)
+                {
+                    return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false)));
+                }
+
+                var entry = entryFactory(entries.Count + 1L);
+                return entry.PayloadIdentity != claimIdentity
+                    ? Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(
+                            new("journal-claim-identity-mismatch", "The claimed journal entry must retain its supplied claim identity.")))
+                    : AppendClaimed(entry);
+            }
+        }
+
+    public Task<Result<JournalAppendClaim, JournalFailure>> ClaimUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent claim,
+        CancellationToken cancellationToken)
+    {
+        if (appendFailure is { } failure)
+        {
+            return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                new Result<JournalAppendClaim, JournalFailure>.Failure(failure));
+        }
+
+        lock (sync)
+        {
+            if (claim.Phase == UpgradePhase.RollbackClaimed &&
+                HasActivatedTerminal(claim.IdempotencyKey))
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("upgrade-already-activated", "A durable activated terminal state rejects stale rollback claims.")));
+            }
+            if (claim.Phase != UpgradePhase.RollbackClaimed &&
+                HasOutstandingRollback(claim.IdempotencyKey))
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions.")));
+            }
+            var existing = entries
+                .Where(entry =>
+                    entry.Upgrade?.IdempotencyKey == claim.IdempotencyKey &&
+                    entry.Upgrade.Phase == claim.Phase)
+                .OrderBy(static entry => entry.Ordinal)
+                .LastOrDefault();
+            if (existing?.Upgrade?.ClaimExpiresAt is { } expiresAt && expiresAt > claim.RecordedAt)
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false)));
+            }
+
+            return AppendClaimed(JournalEntry.ForUpgrade(entries.Count + 1L, identity, claim));
+        }
+    }
+
+    public Task<Result<JournalAppendClaim, JournalFailure>> RenewUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeOperationFence fence,
+        DateTimeOffset renewedAt,
+        DateTimeOffset expiresAt,
+        CancellationToken cancellationToken) =>
+        AppendFencedUpgrade(
+            identity,
+            fence,
+            new(
+                fence.IdempotencyKey,
+                fence.ReleaseId,
+                fence.ManifestDigest,
+                fence.ClaimPhase,
+                renewedAt,
+                "upgrade-transition-renewed",
+                $"The {fence.ClaimPhase} transition claim was renewed.",
+                fence.OperationId,
+                expiresAt,
+                0));
+
+    public Task<Result<JournalAppendClaim, JournalFailure>> CompleteUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent completion,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken) =>
+        AppendFencedUpgrade(identity, fence, completion);
+
     public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken)
     {
         lock (sync)
@@ -691,6 +1085,69 @@ public sealed class InMemoryJournal : INodeJournal
                 new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success(entries.ToArray()));
         }
     }
+
+    private Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimed(JournalEntry entry)
+    {
+        entries.Add(entry);
+        return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+            new Result<JournalAppendClaim, JournalFailure>.Success(new(entry, true)));
+    }
+
+    private Task<Result<JournalAppendClaim, JournalFailure>> AppendFencedUpgrade(
+        NodeDeviceIdentity identity,
+        UpgradeOperationFence fence,
+        UpgradeJournalEvent upgrade)
+    {
+        if (appendFailure is { } failure)
+        {
+            return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                new Result<JournalAppendClaim, JournalFailure>.Failure(failure));
+        }
+
+        lock (sync)
+        {
+            if (fence.ClaimPhase != UpgradePhase.RollbackClaimed &&
+                HasOutstandingRollback(fence.IdempotencyKey))
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions.")));
+            }
+            var currentClaim = entries
+                .Select(static entry => entry.Upgrade)
+                .OfType<UpgradeJournalEvent>()
+                .Where(eventValue =>
+                    eventValue.IdempotencyKey == fence.IdempotencyKey &&
+                    eventValue.Phase == fence.ClaimPhase)
+                .LastOrDefault();
+            return currentClaim is null ||
+                   currentClaim.OperationId != fence.OperationId ||
+                   currentClaim.Fence != fence.Fence
+                ? Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("upgrade-fence-lost", "The journal transition claim was superseded before this effect could be recorded.")))
+                : AppendClaimed(JournalEntry.ForUpgrade(entries.Count + 1L, identity, upgrade));
+        }
+    }
+
+    private bool HasOutstandingRollback(string idempotencyKey)
+    {
+        var upgrades = entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Where(upgrade => upgrade.IdempotencyKey == idempotencyKey)
+            .ToArray();
+        return upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RollbackClaimed) &&
+               !upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RolledBack);
+    }
+
+    private bool HasActivatedTerminal(string idempotencyKey) =>
+        entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Any(upgrade =>
+                upgrade.IdempotencyKey == idempotencyKey &&
+                upgrade.Phase == UpgradePhase.Activated);
 }
 
 internal sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore

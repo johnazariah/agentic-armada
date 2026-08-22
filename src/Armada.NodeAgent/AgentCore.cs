@@ -51,6 +51,7 @@ public sealed record AgentState(
     ImmutableDictionary<string, ProcessedCommand> ProcessedCommands,
     ImmutableDictionary<ResourceId, AttemptRuntime> Attempts,
     ImmutableDictionary<ResourceId, EvidenceObservation> Evidence,
+    ImmutableArray<UpgradeJournalEvent> Upgrades,
     long LastJournalOrdinal)
 {
     public static AgentState Empty(NodeDeviceIdentity identity) =>
@@ -61,6 +62,7 @@ public sealed record AgentState(
             ImmutableDictionary<string, ProcessedCommand>.Empty.WithComparers(StringComparer.Ordinal),
             ImmutableDictionary<ResourceId, AttemptRuntime>.Empty,
             ImmutableDictionary<ResourceId, EvidenceObservation>.Empty,
+            ImmutableArray<UpgradeJournalEvent>.Empty,
             0);
 
     public static Result<AgentState, JournalFailure> Replay(
@@ -220,6 +222,10 @@ public sealed record AgentState(
                     new(evidenceAttemptId, manifestDigest, outputDigest, entry.RecordedAt))
             };
         }
+        else if (entry.Type == JournalEntryType.ReleaseUpgrade && entry.Upgrade is { } upgrade)
+        {
+            nextState = nextState with { Upgrades = nextState.Upgrades.Add(upgrade) };
+        }
 
         return nextState;
     }
@@ -252,7 +258,7 @@ public static class CommandValidation
             return Reject(envelope, "invalid-envelope-identity", "Commands require non-empty message, correlation, and idempotency identities.");
         }
 
-        var payloadIdentity = ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey);
+        var payloadIdentity = JournalEntry.CommandClaimIdentity(envelope);
         if (state.ProcessedCommands.TryGetValue(envelope.IdempotencyKey, out var processed))
         {
             return processed.PayloadIdentity == payloadIdentity
