@@ -41,6 +41,25 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
     }
 
     [Fact]
+    public void Generic_hosting_port_and_preference_inputs_are_rejected_before_a_server_starts()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["http_ports"] = "5080",
+                ["https_ports"] = "5443",
+                ["preferHostingUrls"] = "true"
+            });
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => ControlPlaneHostBootstrap.Configure(builder, ControlPlaneConfigurationTests.ValidOptions()));
+
+        Assert.Contains("HTTP and HTTPS port configuration is prohibited", error.ToString());
+        Assert.Contains("Hosting URL preference is prohibited", error.ToString());
+    }
+
+    [Fact]
     public void Code_only_host_configuration_disables_json_reload()
     {
         var configuration = new ConfigurationManager();

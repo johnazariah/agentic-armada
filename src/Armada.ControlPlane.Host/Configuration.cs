@@ -246,6 +246,41 @@ public static class HostBindingConfiguration
                 "URL configuration is prohibited because the lab host configures only its validated loopback listener."));
         }
 
+        if (HasConfiguredValue(
+                configuration,
+                "http_ports",
+                "https_ports",
+                "ASPNETCORE_HTTP_PORTS",
+                "ASPNETCORE_HTTPS_PORTS",
+                "DOTNET_HTTP_PORTS",
+                "DOTNET_HTTPS_PORTS"))
+        {
+            failures.Add(new(
+                "configured-host-port",
+                "HTTP and HTTPS port configuration is prohibited because the lab host configures only its validated loopback listener."));
+        }
+
+        if (HasEnabledValue(
+                configuration,
+                "preferHostingUrls",
+                "ASPNETCORE_PREFERHOSTINGURLS",
+                "DOTNET_PREFERHOSTINGURLS"))
+        {
+            failures.Add(new(
+                "configured-prefer-hosting-urls",
+                "Hosting URL preference is prohibited because it can supersede the lab host's code-defined listener."));
+        }
+
         return failures.ToImmutable();
     }
+
+    private static bool HasConfiguredValue(IConfiguration configuration, params string[] keys) =>
+        keys.Any(key => !string.IsNullOrWhiteSpace(configuration[key]));
+
+    private static bool HasEnabledValue(IConfiguration configuration, params string[] keys) =>
+        keys
+            .Select(key => configuration[key])
+            .Any(static value =>
+                !string.IsNullOrWhiteSpace(value) &&
+                (!bool.TryParse(value, out var enabled) || enabled));
 }

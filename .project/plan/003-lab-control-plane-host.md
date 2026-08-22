@@ -12,10 +12,11 @@ node, transport, signing, installation, GitHub, or Copilot authority.
   `503` until lab mode, identity, loopback binding, PostgreSQL configuration,
   operator-owned schema management, verified content-addressed restore evidence,
   and PostgreSQL reachability pass.
-- The host rejects `Kestrel:Endpoints` and `urls` inputs, then configures only
-  the validated IP-loopback Kestrel listener; conflicting configuration stops
-  startup before a server can bind. Its JSON sources do not reload, so Kestrel
-  cannot dynamically add endpoints later.
+- The host rejects `Kestrel:Endpoints`, `urls`, generic HTTP/HTTPS port inputs,
+  and enabled hosting-URL preference inputs, then configures only the validated
+  IP-loopback Kestrel listener; conflicting configuration stops startup before
+  a server can bind. Its JSON sources do not reload, so Kestrel cannot
+  dynamically add endpoints later.
 - Restore evidence is an absolute-path regular local artifact plus its exact
   SHA-256 digest. On macOS the final path is opened with no-follow semantics,
   the opened descriptor is validated as regular, and those bytes are hashed.

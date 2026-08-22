@@ -29,9 +29,10 @@ public base URL, so it is not reachable from WSL or any network peer.
 
 ## Safety boundaries
 
-Do not expose the listener beyond loopback, set `Kestrel:Endpoints` or `urls`,
-point it at shared or production PostgreSQL, treat liveness as readiness, run
-migrations from this host, or attach the WSL node by ad hoc networking. No
+Do not expose the listener beyond loopback, set `Kestrel:Endpoints`, `urls`,
+generic HTTP/HTTPS port values, or `preferHostingUrls`, point it at shared or
+production PostgreSQL, treat liveness as readiness, run migrations from this
+host, or attach the WSL node by ad hoc networking. No
 mTLS/node enrolment, GitHub App or OAuth credential, Copilot adapter,
 signer/key custody, installer, package download, live session control, workload
 execution, or scientific authority is approved by this baseline.

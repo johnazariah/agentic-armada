@@ -21,8 +21,9 @@ ASPNETCORE_ENVIRONMENT=Lab dotnet run --project src/Armada.ControlPlane.Host
 
 The host remains not-ready until explicit lab mode, loopback identity/binding,
 operator-applied schema management, verified local restore evidence, and
-PostgreSQL reachability all pass. It rejects `Kestrel:Endpoints` and `urls`
-configuration and configures only its validated loopback listener. It never
+PostgreSQL reachability all pass. It rejects `Kestrel:Endpoints`, `urls`,
+generic HTTP/HTTPS port settings, and enabled hosting-URL preference
+configuration, then configures only its validated loopback listener. It never
 runs migrations automatically. Its JSON configuration sources do not reload, so
 endpoint changes cannot add listeners after startup.
 
