@@ -45,6 +45,18 @@ public sealed class ResourceApplicationTests
     }
 
     [Fact]
+    public void Generic_creation_rejects_admission_decision_authority()
+    {
+        var workload = Fixture.Workload();
+
+        var result = ResourceCommandDecisions.Create(Fixture.Create(Fixture.AdmissionDecision(workload)));
+
+        Assert.Equal(
+            "admission-decision-requires-admission-command",
+            Assert.IsType<Result<ResourceCommit, ResourceCommandFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
     public async Task Concurrent_updates_allow_exactly_one_matching_CAS_write()
     {
         var repository = new InMemoryResourceRepository();
@@ -125,6 +137,27 @@ public sealed class ResourceApplicationTests
         Assert.Equal(
             "idempotency-key-reused",
             Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Failure>(replay).Error.Code);
+    }
+
+    [Fact]
+    public async Task Replay_returns_the_original_update_after_later_updates()
+    {
+        var repository = new InMemoryResourceRepository();
+        var service = new ResourceApplicationService(repository);
+        var resource = Fixture.Project();
+        await service.CreateAsync(Fixture.Create(resource), CancellationToken.None);
+        var first = Fixture.Update(resource.Metadata.Uid, new ResourceVersion("1"), 1);
+
+        await service.UpdateSpecAsync(first, CancellationToken.None);
+        await service.UpdateSpecAsync(
+            Fixture.Update(resource.Metadata.Uid, new ResourceVersion("2"), 2),
+            CancellationToken.None);
+        var replay = await service.UpdateSpecAsync(first, CancellationToken.None);
+
+        var original = Assert.IsType<ResourceStoreResult.AlreadyApplied>(
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Success>(replay).Value).Commit;
+        Assert.Equal("2", original.Resource.ResourceVersion.Value);
+        Assert.Equal("3", repository.Resources[resource.Metadata.Uid].ResourceVersion.Value);
     }
 
     [Theory]
@@ -368,6 +401,32 @@ public sealed class ResourceApplicationTests
         Assert.Equal("admission-workload-binding-mismatch", failure.Error.Code);
     }
 
+    [Fact]
+    public void Admission_rejects_each_mismatched_workload_authority_constraint()
+    {
+        var workload = Fixture.Workload();
+        var decision = Fixture.AdmissionDecision(workload);
+        var cases = new (string Code, AdmissionDecision Decision)[]
+        {
+            ("admission-bundle-mismatch", decision with { Spec = decision.Spec with { BundleDigest = Fixture.OtherDigest() } }),
+            ("admission-policy-mismatch", decision with { Spec = decision.Spec with { PolicyDigest = Fixture.OtherDigest() } }),
+            ("admission-session-authority-mismatch", decision with { Spec = decision.Spec with { SessionAuthority = SessionAuthority.IssueMasterWithChildren } }),
+            ("admission-isolation-profile-mismatch", decision with { Spec = decision.Spec with { IsolationProfile = IsolationProfile.IsolatedContainer } }),
+            ("admission-resource-limits-mismatch", decision with { Spec = decision.Spec with { ResourceLimits = new ResourceRequirements(101, 0, 1024, 1024) } }),
+            ("admission-approved-actions-mismatch", decision with { Spec = decision.Spec with { ApprovedActions = ["unapproved-action"] } })
+        };
+
+        foreach (var testCase in cases)
+        {
+            var result = AdmissionDecisions.Decide(
+                new(workload, testCase.Decision, new ActorId("admission-controller"), Guid.NewGuid(), null, Fixture.Now));
+
+            Assert.Equal(
+                testCase.Code,
+                Assert.IsType<Result<CreateResourceCommand, AdmissionCommandFailure>.Failure>(result).Error.Code);
+        }
+    }
+
     private sealed class FailingPolicy : IAdmissionPolicy
     {
         public Task<Result<AdmissionDecision, PolicyFailure>> EvaluateAsync(
@@ -566,4 +625,7 @@ internal static class Fixture
 
     private static Sha256Digest Digest() =>
         ((Result<Sha256Digest, ContractValidationError>.Success)Sha256Digest.Parse($"sha256:{new string('a', 64)}")).Value;
+
+    public static Sha256Digest OtherDigest() =>
+        ((Result<Sha256Digest, ContractValidationError>.Success)Sha256Digest.Parse($"sha256:{new string('b', 64)}")).Value;
 }

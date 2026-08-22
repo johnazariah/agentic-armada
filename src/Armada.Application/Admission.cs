@@ -40,6 +40,36 @@ public static class AdmissionDecisions
             return Failure("admission-workload-binding-mismatch", "The decision must bind the exact workload generation.");
         }
 
+        if (command.Decision.Spec.BundleDigest != command.Workload.Spec.BundleDigest)
+        {
+            return Failure("admission-bundle-mismatch", "The decision must bind the workload bundle digest.");
+        }
+
+        if (command.Decision.Spec.PolicyDigest != command.Workload.Spec.PolicyDigest)
+        {
+            return Failure("admission-policy-mismatch", "The decision must bind the workload policy digest.");
+        }
+
+        if (command.Decision.Spec.SessionAuthority != command.Workload.Spec.SessionAuthority)
+        {
+            return Failure("admission-session-authority-mismatch", "The decision must bind the workload session authority.");
+        }
+
+        if (command.Decision.Spec.IsolationProfile != command.Workload.Spec.IsolationProfile)
+        {
+            return Failure("admission-isolation-profile-mismatch", "The decision must bind the workload isolation profile.");
+        }
+
+        if (command.Decision.Spec.ResourceLimits != command.Workload.Spec.Scheduling.Resources)
+        {
+            return Failure("admission-resource-limits-mismatch", "The decision must bind the workload resource requirements.");
+        }
+
+        if (!command.Decision.Spec.ApprovedActions.IsSubsetOf(command.Workload.Spec.ActionSchemas))
+        {
+            return Failure("admission-approved-actions-mismatch", "The decision cannot approve actions absent from the workload.");
+        }
+
         if (command.Decision.Status.Decision is AdmissionVerdict.Pending or AdmissionVerdict.Expired ||
             command.Decision.Spec.ExpiresAt <= command.OccurredAt)
         {
@@ -89,7 +119,7 @@ public sealed class AdmissionApplicationService(IAdmissionPolicy policy, IResour
             return new Result<ResourceStoreResult, AdmissionCommandFailure>.Failure(failed.Error);
         }
 
-        var creation = ResourceCommandDecisions.Create(
+        var creation = ResourceCommandDecisions.CreateAdmissionDecision(
             ((Result<CreateResourceCommand, AdmissionCommandFailure>.Success)decision).Value);
         if (creation is Result<ResourceCommit, ResourceCommandFailure>.Failure invalid)
         {

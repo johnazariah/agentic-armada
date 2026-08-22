@@ -172,6 +172,29 @@ public static class ResourceCommandDecisions
     {
         ArgumentNullException.ThrowIfNull(command);
 
+        if (command.Resource is AdmissionDecision)
+        {
+            return Failure(
+                "admission-decision-requires-admission-command",
+                "Admission decisions may only be created by the admission command.");
+        }
+
+        return CreateCore(command);
+    }
+
+    public static Result<ResourceCommit, ResourceCommandFailure> CreateAdmissionDecision(CreateResourceCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(command);
+
+        return command.Resource is AdmissionDecision
+            ? CreateCore(command)
+            : Failure(
+                "invalid-admission-command",
+                "The admission command requires an AdmissionDecision resource.");
+    }
+
+    private static Result<ResourceCommit, ResourceCommandFailure> CreateCore(CreateResourceCommand command)
+    {
         var persisted = ResourceDocuments.TryFrom(command.Resource);
         if (persisted is Result<PersistedResource, ResourceCommandFailure>.Failure serialisationFailure)
         {

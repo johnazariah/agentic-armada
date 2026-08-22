@@ -39,7 +39,8 @@ public static class PostgresSchema
                 causation_id UUID NULL,
                 idempotency_key TEXT NOT NULL UNIQUE,
                 occurred_at TIMESTAMPTZ NOT NULL,
-                payload JSONB NOT NULL
+                payload JSONB NOT NULL,
+                commit_snapshot JSONB NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS armada_outbox (
@@ -78,5 +79,12 @@ public static class PostgresResourceSql
             document = CAST(@document AS jsonb),
             updated_at = @updatedAt
         WHERE uid = @uid AND resource_version = @expectedVersion;
+        """;
+
+    public const string FindCommitByIdempotency =
+        """
+        SELECT commit_snapshot::text
+        FROM armada_event_ledger
+        WHERE idempotency_key = @idempotencyKey;
         """;
 }

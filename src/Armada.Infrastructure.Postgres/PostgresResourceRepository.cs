@@ -127,14 +127,14 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
         await using (var ledger = new NpgsqlCommand(
             """
             INSERT INTO armada_event_ledger
-                (event_id, resource_id, event_type, actor, correlation_id, causation_id, idempotency_key, occurred_at, payload)
+                (event_id, resource_id, event_type, actor, correlation_id, causation_id, idempotency_key, occurred_at, payload, commit_snapshot)
             VALUES
-                (@eventId, @resourceId, @eventType, @actor, @correlationId, @causationId, @idempotencyKey, @occurredAt, CAST(@payload AS jsonb));
+                (@eventId, @resourceId, @eventType, @actor, @correlationId, @causationId, @idempotencyKey, @occurredAt, CAST(@payload AS jsonb), CAST(@commitSnapshot AS jsonb));
             """,
             connection,
             transaction))
         {
-            AddLedgerParameters(ledger, commit.LedgerEvent);
+            AddLedgerParameters(ledger, commit);
             await ledger.ExecuteNonQueryAsync(cancellationToken);
         }
 
@@ -161,17 +161,7 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
         CancellationToken cancellationToken)
     {
         await using var command = new NpgsqlCommand(
-            """
-            SELECT r.uid, r.kind, r.organisation_id, r.project_id, r.name, r.generation, r.resource_version,
-                   r.document::text, r.created_at, r.updated_at,
-                   e.event_id, e.resource_id, e.event_type, e.actor, e.correlation_id, e.causation_id,
-                   e.idempotency_key, e.occurred_at, e.payload::text,
-                   o.message_id, o.message_type, o.idempotency_key, o.occurred_at, o.payload::text
-            FROM armada_event_ledger e
-            JOIN armada_current_resources r ON r.uid = e.resource_id
-            JOIN armada_outbox o ON o.event_id = e.event_id
-            WHERE e.idempotency_key = @idempotencyKey;
-            """,
+            PostgresResourceSql.FindCommitByIdempotency,
             connection,
             transaction);
         command.Parameters.AddWithValue("idempotencyKey", idempotencyKey);
@@ -182,25 +172,8 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
             return null;
         }
 
-        var resource = ReadResource(reader);
-        var payload = JsonDocument.Parse(reader.GetString(18)).RootElement.Clone();
-        var ledger = new LedgerEvent(
-            reader.GetGuid(10),
-            new(reader.GetGuid(11)),
-            reader.GetString(12),
-            new(reader.GetString(13)),
-            reader.GetGuid(14),
-            reader.IsDBNull(15) ? null : reader.GetGuid(15),
-            reader.GetString(16),
-            reader.GetFieldValue<DateTimeOffset>(17),
-            payload);
-        var outbox = new OutboxMessage(
-            reader.GetGuid(19),
-            reader.GetString(20),
-            reader.GetString(21),
-            reader.GetFieldValue<DateTimeOffset>(22),
-            JsonDocument.Parse(reader.GetString(23)).RootElement.Clone());
-        return new(resource, ledger, outbox);
+        return JsonSerializer.Deserialize<ResourceCommit>(reader.GetString(0))
+            ?? throw new InvalidOperationException("The immutable commit snapshot could not be deserialised.");
     }
 
     private static async Task<ResourceVersion?> GetVersionAsync(
@@ -232,8 +205,9 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
         command.Parameters.AddWithValue("updatedAt", resource.UpdatedAt);
     }
 
-    private static void AddLedgerParameters(NpgsqlCommand command, LedgerEvent ledgerEvent)
+    private static void AddLedgerParameters(NpgsqlCommand command, ResourceCommit commit)
     {
+        var ledgerEvent = commit.LedgerEvent;
         command.Parameters.AddWithValue("eventId", ledgerEvent.Id);
         command.Parameters.AddWithValue("resourceId", ledgerEvent.ResourceId.Value);
         command.Parameters.AddWithValue("eventType", ledgerEvent.Type);
@@ -243,6 +217,7 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
         command.Parameters.AddWithValue("idempotencyKey", ledgerEvent.IdempotencyKey);
         command.Parameters.AddWithValue("occurredAt", ledgerEvent.OccurredAt);
         command.Parameters.AddWithValue("payload", ledgerEvent.Payload.GetRawText());
+        command.Parameters.AddWithValue("commitSnapshot", JsonSerializer.Serialize(commit));
     }
 
     private static PersistedResource ReadResource(NpgsqlDataReader reader) =>

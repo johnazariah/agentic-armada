@@ -24,6 +24,7 @@ public sealed class PostgresSchemaTests
         Assert.Contains("CREATE TABLE IF NOT EXISTS armada_outbox", sql, StringComparison.Ordinal);
         Assert.Contains("event_id UUID NOT NULL UNIQUE REFERENCES armada_event_ledger(event_id)", sql, StringComparison.Ordinal);
         Assert.Contains("idempotency_key TEXT NOT NULL UNIQUE", sql, StringComparison.Ordinal);
+        Assert.Contains("commit_snapshot JSONB NOT NULL", sql, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -44,5 +45,15 @@ public sealed class PostgresSchemaTests
         Assert.Contains("WHERE uid = @uid AND resource_version = @expectedVersion", sql, StringComparison.Ordinal);
         Assert.Contains("resource_version = @resourceVersion", sql, StringComparison.Ordinal);
         Assert.Contains("document = CAST(@document AS jsonb)", sql, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Replay_lookup_uses_the_immutable_commit_snapshot_not_current_resource_state()
+    {
+        var sql = PostgresResourceSql.FindCommitByIdempotency;
+
+        Assert.Contains("SELECT commit_snapshot::text", sql, StringComparison.Ordinal);
+        Assert.Contains("FROM armada_event_ledger", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("armada_current_resources", sql, StringComparison.Ordinal);
     }
 }
