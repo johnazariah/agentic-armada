@@ -500,12 +500,12 @@ public sealed class ReleaseDistributionTests
     {
         var fixture = new ReleaseFixture();
         var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
-        var staging = new DelayedStageStaging(TimeSpan.FromMilliseconds(30));
+        var staging = new DelayedStageStaging(TimeSpan.FromMilliseconds(100));
         var coordinator = new NodeUpgradeCoordinator(
             new InMemoryJournal(),
             staging,
             new FixedClock(fixture.Now),
-            TimeSpan.FromMilliseconds(10));
+            TimeSpan.FromMilliseconds(5));
 
         var result = await coordinator.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
 
