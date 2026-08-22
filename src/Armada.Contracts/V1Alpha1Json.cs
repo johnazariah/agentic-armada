@@ -35,7 +35,10 @@ public static class V1Alpha1Json
                 new("GitHubCopilot", project.Spec.SessionProfile.ProfileDigest.Value),
                 project.Spec.PolicyBundleDigest.Value,
                 project.Spec.BudgetLimit),
-            ToWire(project.Status.Common));
+            new(
+                project.Status.Common.ObservedGeneration,
+                project.Status.Common.Conditions.Select(ToWire).ToArray(),
+                project.Status.BudgetObserved));
 
     public static V1Alpha1WorkloadWire ToWire(Workload workload) =>
         new(
@@ -60,7 +63,8 @@ public static class V1Alpha1Json
                     workload.Spec.Evidence.Archive.Repository.Value,
                     workload.Spec.Evidence.RetentionClass)),
             new(
-                ToWire(workload.Status.Common),
+                workload.Status.Common.ObservedGeneration,
+                workload.Status.Common.Conditions.Select(ToWire).ToArray(),
                 LifecycleValue(workload.Status.Lifecycle),
                 workload.Status.AttemptReference?.ToString(),
                 workload.Status.Owner?.Value,
@@ -76,6 +80,11 @@ public static class V1Alpha1Json
         if (wire.ApiVersion != ArmadaApi.V1Alpha1 || wire.Kind != "Project")
         {
             return Failure<Project>("invalid-project-envelope", "Expected an armada.io/v1alpha1 Project envelope.");
+        }
+        if (wire.Metadata is null || wire.Spec is null || wire.Status is null ||
+            wire.Spec.Github is null || wire.Spec.EvidenceArchive is null || wire.Spec.SessionProfile is null)
+        {
+            return Failure<Project>("missing-required-section", "Project metadata, spec, status, and provider profiles are required.");
         }
 
         var metadata = Metadata(wire.Metadata);
@@ -99,6 +108,12 @@ public static class V1Alpha1Json
             return Failure<Project>("unsupported-provider-profile", "Project provider profiles must be GitHubRelease and GitHubCopilot.");
         }
 
+        var status = Status(wire.Status.ObservedGeneration, wire.Status.Conditions);
+        if (status is Result<ResourceStatus, ContractValidationError>.Failure statusFailure)
+        {
+            return new Result<Project, ContractValidationError>.Failure(statusFailure.Error);
+        }
+
         return new Result<Project, ContractValidationError>.Success(
             new(
                 metadataSuccess.Value,
@@ -108,7 +123,7 @@ public static class V1Alpha1Json
                     new GitHubCopilotSessionProfile(sessionSuccess.Value),
                     policySuccess.Value,
                     wire.Spec.BudgetLimit),
-                new ProjectStatus(FromWire(wire.Status), null)));
+                new ProjectStatus(((Result<ResourceStatus, ContractValidationError>.Success)status).Value, wire.Status.BudgetObserved)));
     }
 
     public static Result<Workload, ContractValidationError> FromWire(V1Alpha1WorkloadWire wire)
@@ -116,6 +131,11 @@ public static class V1Alpha1Json
         if (wire.ApiVersion != ArmadaApi.V1Alpha1 || wire.Kind != "Workload")
         {
             return Failure<Workload>("invalid-workload-envelope", "Expected an armada.io/v1alpha1 Workload envelope.");
+        }
+        if (wire.Metadata is null || wire.Spec is null || wire.Status is null ||
+            wire.Spec.GithubIssue is null || wire.Spec.Scheduling is null || wire.Spec.Evidence is null)
+        {
+            return Failure<Workload>("missing-required-section", "Workload metadata, spec, status, issue, scheduling, and evidence sections are required.");
         }
 
         if (wire.Spec.SourceProvider != "GitHub" ||
@@ -134,6 +154,8 @@ public static class V1Alpha1Json
         var authority = ParseEnum<SessionAuthority>(wire.Spec.SessionAuthority, "invalid-session-authority");
         var isolation = ParseEnum<IsolationProfile>(wire.Spec.IsolationProfile, "invalid-isolation-profile");
         var lifecycle = ParseLifecycle(wire.Status.Lifecycle);
+        var scheduling = Scheduling(wire.Spec.Scheduling);
+        var status = Status(wire.Status.ObservedGeneration, wire.Status.Conditions);
 
         if (metadata is not Result<ResourceMetadata, ContractValidationError>.Success metadataSuccess ||
             bundleDigest is not Result<Sha256Digest, ContractValidationError>.Success bundleSuccess ||
@@ -155,6 +177,14 @@ public static class V1Alpha1Json
                 authority,
                 isolation,
                 lifecycle);
+        }
+        if (scheduling is Result<SchedulingRequirements, ContractValidationError>.Failure schedulingFailure)
+        {
+            return new Result<Workload, ContractValidationError>.Failure(schedulingFailure.Error);
+        }
+        if (status is Result<ResourceStatus, ContractValidationError>.Failure statusFailure)
+        {
+            return new Result<Workload, ContractValidationError>.Failure(statusFailure.Error);
         }
 
         var attemptReference = OptionalResourceId(wire.Status.AttemptRef);
@@ -178,12 +208,12 @@ public static class V1Alpha1Json
                     authoritySuccess.Value,
                     isolationSuccess.Value,
                     new GitHubIssue(wire.Spec.GithubIssue.Number, wire.Spec.GithubIssue.NodeId),
-                    FromWire(wire.Spec.Scheduling),
+                    ((Result<SchedulingRequirements, ContractValidationError>.Success)scheduling).Value,
                     new WorkloadEvidenceRequirement(
                         new GitHubReleaseEvidenceArchiveProfile(archiveSuccess.Value),
                         wire.Spec.Evidence.RetentionClass)),
                 new(
-                    FromWire(wire.Status.Common),
+                    ((Result<ResourceStatus, ContractValidationError>.Success)status).Value,
                     lifecycleSuccess.Value,
                     attemptSuccess.Value,
                     wire.Status.Owner is null ? null : new ActorId(wire.Status.Owner),
@@ -198,10 +228,19 @@ public static class V1Alpha1Json
     private static Result<T, ContractValidationError> Deserialize<TWire, T>(
         string json,
         Func<TWire, Result<T, ContractValidationError>> mapper)
-        where TWire : class =>
-        JsonSerializer.Deserialize<TWire>(json, Options) is { } wire
-            ? mapper(wire)
-            : Failure<T>("invalid-json", "The resource JSON cannot be empty.");
+        where TWire : class
+    {
+        try
+        {
+            return JsonSerializer.Deserialize<TWire>(json, Options) is { } wire
+                ? mapper(wire)
+                : Failure<T>("invalid-json", "The resource JSON cannot be empty.");
+        }
+        catch (JsonException exception)
+        {
+            return Failure<T>("invalid-json", exception.Message);
+        }
+    }
 
     private static V1Alpha1MetadataWire ToWire(ResourceMetadata metadata) =>
         new(
@@ -256,9 +295,6 @@ public static class V1Alpha1Json
                 wire.DeletionRequestedAt));
     }
 
-    private static V1Alpha1ResourceStatusWire ToWire(ResourceStatus status) =>
-        new(status.ObservedGeneration, status.Conditions.Select(ToWire).ToArray());
-
     private static V1Alpha1ConditionWire ToWire(Condition condition) =>
         new(
             condition.Type,
@@ -277,8 +313,34 @@ public static class V1Alpha1Json
                     escalation.Deadline)
                 : null);
 
-    private static ResourceStatus FromWire(V1Alpha1ResourceStatusWire wire) =>
-        new(wire.ObservedGeneration, ImmutableArray<Condition>.Empty);
+    private static Result<ResourceStatus, ContractValidationError> Status(
+        long observedGeneration,
+        IEnumerable<V1Alpha1ConditionWire>? conditions)
+    {
+        var values = ImmutableArray.CreateBuilder<Condition>();
+        foreach (var wire in conditions ?? [])
+        {
+            if (!Enum.TryParse<ConditionStatus>(wire.Status, false, out var conditionStatus))
+            {
+                return Failure<ResourceStatus>("invalid-condition-status", $"Unknown condition status '{wire.Status}'.");
+            }
+            BlockedEscalation? escalation = null;
+            if (wire.Escalation is { } escalationWire)
+            {
+                if (BlockedEscalation.Create(escalationWire.ExactBlocker, new ActorId(escalationWire.Actor), escalationWire.RequiredAction, escalationWire.Location, new ActorId(escalationWire.Successor), escalationWire.Deadline) is not Result<BlockedEscalation, ContractValidationError>.Success escalationSuccess)
+                {
+                    return Failure<ResourceStatus>("invalid-blocked-escalation", "Condition escalation is invalid.");
+                }
+                escalation = escalationSuccess.Value;
+            }
+            if (Condition.Create(wire.Type, conditionStatus, wire.Reason, wire.Message, wire.ObservedGeneration, wire.LastTransitionTime, escalation) is not Result<Condition, ContractValidationError>.Success conditionSuccess)
+            {
+                return Failure<ResourceStatus>("invalid-condition", "Condition is invalid.");
+            }
+            values.Add(conditionSuccess.Value);
+        }
+        return Success(new ResourceStatus(observedGeneration, values.ToImmutable()));
+    }
 
     private static V1Alpha1SchedulingWire ToWire(SchedulingRequirements scheduling) =>
         new(
@@ -298,23 +360,30 @@ public static class V1Alpha1Json
             scheduling.MaximumEstimatedCost,
             scheduling.CheckpointMode);
 
-    private static SchedulingRequirements FromWire(V1Alpha1SchedulingWire wire) =>
-        new(
+    private static Result<SchedulingRequirements, ContractValidationError> Scheduling(V1Alpha1SchedulingWire wire)
+    {
+        if (wire.Resources is null)
+        {
+            return Failure<SchedulingRequirements>("missing-required-section", "Scheduling resources are required.");
+        }
+        var tolerations = ImmutableArray.CreateBuilder<Toleration>();
+        foreach (var toleration in wire.Tolerations ?? [])
+        {
+            if (!Enum.TryParse<TaintEffect>(toleration.Effect, false, out var effect))
+            {
+                return Failure<SchedulingRequirements>("invalid-taint-effect", $"Unknown taint effect '{toleration.Effect}'.");
+            }
+            tolerations.Add(new Toleration(toleration.Key, toleration.Operator, toleration.Value, effect));
+        }
+        return Success(new SchedulingRequirements(
             wire.HostSelector is null ? null : new LabelSelector(wire.HostSelector.MatchLabels ?? ImmutableDictionary<string, string>.Empty),
-            (wire.Tolerations ?? []).Select(static toleration => new Toleration(
-                toleration.Key,
-                toleration.Operator,
-                toleration.Value,
-                Enum.Parse<TaintEffect>(toleration.Effect))).ToImmutableArray(),
+            tolerations.ToImmutable(),
             wire.Affinity is null ? null : new LabelSelector(wire.Affinity.MatchLabels ?? ImmutableDictionary<string, string>.Empty),
             wire.AntiAffinity is null ? null : new LabelSelector(wire.AntiAffinity.MatchLabels ?? ImmutableDictionary<string, string>.Empty),
-            new(
-                wire.Resources.CpuMillicores,
-                wire.Resources.GpuCount,
-                wire.Resources.MemoryBytes,
-                wire.Resources.StorageBytes),
+            new(wire.Resources.CpuMillicores, wire.Resources.GpuCount, wire.Resources.MemoryBytes, wire.Resources.StorageBytes),
             wire.MaximumEstimatedCost,
-            wire.CheckpointMode);
+            wire.CheckpointMode));
+    }
 
     private static string LifecycleValue(WorkloadLifecycleState state) =>
         state switch
@@ -403,16 +472,16 @@ public static class V1Alpha1Json
 public sealed record V1Alpha1ProjectWire(
     string ApiVersion,
     string Kind,
-    V1Alpha1MetadataWire Metadata,
-    V1Alpha1ProjectSpecWire Spec,
-    V1Alpha1ResourceStatusWire Status);
+    V1Alpha1MetadataWire? Metadata,
+    V1Alpha1ProjectSpecWire? Spec,
+    V1Alpha1ProjectStatusWire? Status);
 
 public sealed record V1Alpha1WorkloadWire(
     string ApiVersion,
     string Kind,
-    V1Alpha1MetadataWire Metadata,
-    V1Alpha1WorkloadSpecWire Spec,
-    V1Alpha1WorkloadStatusWire Status);
+    V1Alpha1MetadataWire? Metadata,
+    V1Alpha1WorkloadSpecWire? Spec,
+    V1Alpha1WorkloadStatusWire? Status);
 
 public sealed record V1Alpha1MetadataWire(
     string Uid,
@@ -430,19 +499,19 @@ public sealed record V1Alpha1MetadataWire(
     DateTimeOffset? DeletionRequestedAt);
 
 public sealed record V1Alpha1OwnerReferenceWire(string Kind, string Uid);
-public sealed record V1Alpha1ResourceStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions);
+public sealed record V1Alpha1ProjectStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, decimal? BudgetObserved);
 public sealed record V1Alpha1ConditionWire(string Type, string Status, string Reason, string Message, long ObservedGeneration, DateTimeOffset LastTransitionTime, V1Alpha1BlockedEscalationWire? Escalation);
 public sealed record V1Alpha1BlockedEscalationWire(string ExactBlocker, string Actor, string RequiredAction, string Location, string Successor, DateTimeOffset Deadline);
-public sealed record V1Alpha1ProjectSpecWire(V1Alpha1GitHubWire Github, V1Alpha1EvidenceArchiveWire EvidenceArchive, V1Alpha1SessionProfileWire SessionProfile, string PolicyBundleDigest, decimal? BudgetLimit);
+public sealed record V1Alpha1ProjectSpecWire(V1Alpha1GitHubWire? Github, V1Alpha1EvidenceArchiveWire? EvidenceArchive, V1Alpha1SessionProfileWire? SessionProfile, string PolicyBundleDigest, decimal? BudgetLimit);
 public sealed record V1Alpha1GitHubWire(IReadOnlyList<string>? Repositories);
 public sealed record V1Alpha1EvidenceArchiveWire(string Provider, string Repository);
 public sealed record V1Alpha1SessionProfileWire(string Provider, string ProfileDigest);
-public sealed record V1Alpha1WorkloadSpecWire(string BundleDigest, string PolicyDigest, string SourceProvider, string Repository, string SourceRevision, string ConfigDigest, IReadOnlyList<string>? ActionSchemas, string SessionProvider, string SessionAuthority, string IsolationProfile, V1Alpha1GitHubIssueWire GithubIssue, V1Alpha1SchedulingWire Scheduling, V1Alpha1WorkloadEvidenceWire Evidence);
+public sealed record V1Alpha1WorkloadSpecWire(string BundleDigest, string PolicyDigest, string SourceProvider, string Repository, string SourceRevision, string ConfigDigest, IReadOnlyList<string>? ActionSchemas, string SessionProvider, string SessionAuthority, string IsolationProfile, V1Alpha1GitHubIssueWire? GithubIssue, V1Alpha1SchedulingWire? Scheduling, V1Alpha1WorkloadEvidenceWire? Evidence);
 public sealed record V1Alpha1GitHubIssueWire(int Number, string? NodeId);
 public sealed record V1Alpha1WorkloadEvidenceWire(string ArchiveProvider, string ArchiveRepository, string RetentionClass);
-public sealed record V1Alpha1SchedulingWire(V1Alpha1LabelSelectorWire? HostSelector, IReadOnlyList<V1Alpha1TolerationWire>? Tolerations, V1Alpha1LabelSelectorWire? Affinity, V1Alpha1LabelSelectorWire? AntiAffinity, V1Alpha1ResourceRequirementsWire Resources, decimal? MaximumEstimatedCost, string? CheckpointMode);
+public sealed record V1Alpha1SchedulingWire(V1Alpha1LabelSelectorWire? HostSelector, IReadOnlyList<V1Alpha1TolerationWire>? Tolerations, V1Alpha1LabelSelectorWire? Affinity, V1Alpha1LabelSelectorWire? AntiAffinity, V1Alpha1ResourceRequirementsWire? Resources, decimal? MaximumEstimatedCost, string? CheckpointMode);
 public sealed record V1Alpha1LabelSelectorWire(ImmutableDictionary<string, string>? MatchLabels);
 public sealed record V1Alpha1TolerationWire(string Key, string Operator, string? Value, string Effect);
 public sealed record V1Alpha1ResourceRequirementsWire(int CpuMillicores, int GpuCount, long MemoryBytes, long StorageBytes);
-public sealed record V1Alpha1WorkloadStatusWire(V1Alpha1ResourceStatusWire Common, string Lifecycle, string? AttemptRef, string? Owner, string? Successor, DateTimeOffset? ExpectedNextEventAt, DateTimeOffset? ProgressDeadlineAt, V1Alpha1GitHubPullRequestWire? GithubPullRequest);
+public sealed record V1Alpha1WorkloadStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, string Lifecycle, string? AttemptRef, string? Owner, string? Successor, DateTimeOffset? ExpectedNextEventAt, DateTimeOffset? ProgressDeadlineAt, V1Alpha1GitHubPullRequestWire? GithubPullRequest);
 public sealed record V1Alpha1GitHubPullRequestWire(int Number, string? NodeId);

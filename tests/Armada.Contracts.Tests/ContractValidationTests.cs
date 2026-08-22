@@ -96,6 +96,23 @@ public sealed class ContractValidationTests
     public void Project_round_trips_as_a_v1alpha1_schema_shaped_envelope()
     {
         var repository = Repository("johnazariah/agentic-armada");
+        var escalation = Assert.IsType<Result<BlockedEscalation, ContractValidationError>.Success>(
+            BlockedEscalation.Create(
+                "certificate epoch expired",
+                new ActorId("node-identity-controller"),
+                "approve rotation",
+                "NodeIdentity/identity-1",
+                new ActorId("control-plane-operator"),
+                DateTimeOffset.Parse("2026-08-22T00:15:00Z"))).Value;
+        var blocked = Assert.IsType<Result<Condition, ContractValidationError>.Success>(
+            Condition.Create(
+                "Blocked",
+                ConditionStatus.True,
+                "CertificateExpired",
+                "The node identity requires intervention.",
+                1,
+                DateTimeOffset.Parse("2026-08-22T00:00:00Z"),
+                escalation)).Value;
         var project = new Project(
             Metadata(projectId: null),
             new ProjectSpec(
@@ -104,7 +121,7 @@ public sealed class ContractValidationTests
                 new GitHubCopilotSessionProfile(Digest('a')),
                 Digest('b'),
                 100m),
-            new ProjectStatus(Status(), null));
+            new ProjectStatus(new ResourceStatus(1, [blocked]), 37m));
 
         var json = V1Alpha1Json.Serialize(project);
         using var document = JsonDocument.Parse(json);
@@ -116,9 +133,12 @@ public sealed class ContractValidationTests
         Assert.Equal(JsonValueKind.String, root.GetProperty("metadata").GetProperty("uid").ValueKind);
         Assert.Equal("GitHubRelease", root.GetProperty("spec").GetProperty("evidenceArchive").GetProperty("provider").GetString());
         Assert.Equal("GitHubCopilot", root.GetProperty("spec").GetProperty("sessionProfile").GetProperty("provider").GetString());
+        var projectRoundTrip = Assert.IsType<Result<Project, ContractValidationError>.Success>(roundTrip).Value;
         Assert.Equal(
             project.Spec.GitHubRepositories,
-            Assert.IsType<Result<Project, ContractValidationError>.Success>(roundTrip).Value.Spec.GitHubRepositories);
+            projectRoundTrip.Spec.GitHubRepositories);
+        Assert.Equal(37m, projectRoundTrip.Status.BudgetObserved);
+        Assert.Equal("certificate epoch expired", projectRoundTrip.Status.Common.Conditions.Single().Escalation!.ExactBlocker);
     }
 
     [Fact]
@@ -172,6 +192,26 @@ public sealed class ContractValidationTests
         Assert.Equal(
             workload.Spec.BundleDigest,
             Assert.IsType<Result<Workload, ContractValidationError>.Success>(roundTrip).Value.Spec.BundleDigest);
+
+        var invalidEnum = V1Alpha1Json.DeserializeWorkload(json.Replace("IsolatedContainer", "UnsupportedIsolation", StringComparison.Ordinal));
+
+        Assert.Equal(
+            "invalid-isolation-profile",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(invalidEnum).Error.Code);
+    }
+
+    [Fact]
+    public void Parseable_workload_missing_required_sections_returns_a_typed_failure()
+    {
+        const string json = """{"apiVersion":"armada.io/v1alpha1","kind":"Workload","metadata":null,"spec":null,"status":null}""";
+
+        var exception = Record.Exception(() => V1Alpha1Json.DeserializeWorkload(json));
+        var result = V1Alpha1Json.DeserializeWorkload(json);
+
+        Assert.Null(exception);
+        Assert.Equal(
+            "missing-required-section",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
     }
 
     private static Sha256Digest Digest(char character) =>
