@@ -12,7 +12,8 @@ public sealed record CreateSessionRequest(
     AdmissionDecision Admission,
     CapabilityEnvelope Envelope,
     Guid CorrelationId,
-    DateTimeOffset OccurredAt);
+    DateTimeOffset OccurredAt,
+    ResourceId? ReplacesSessionReference = null);
 
 public sealed record SessionOperationRequest(
     AgentSession Session,
@@ -59,8 +60,9 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
 {
     private readonly object gate = new();
     private readonly Dictionary<ResourceId, SessionRuntime> sessions = [];
-    private readonly Dictionary<string, ResourceId> parentIdempotency = new(StringComparer.Ordinal);
+    private readonly Dictionary<ParentSessionIdempotencyKey, ParentSessionReplay> parentIdempotency = [];
     private readonly Dictionary<ChildSessionIdempotencyKey, AgentSession> childIdempotency = [];
+    private readonly Dictionary<ResourceId, ResourceId> successors = [];
     private readonly List<SessionObservation> observations = [];
 
     public ImmutableArray<SessionObservation> Observations
@@ -71,6 +73,32 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
             {
                 return observations.ToImmutableArray();
             }
+        }
+    }
+
+    public ImmutableDictionary<ResourceId, ResourceId> Successors
+    {
+        get
+        {
+            lock (gate)
+            {
+                return successors.ToImmutableDictionary();
+            }
+        }
+    }
+
+    public Result<SessionRuntime, SessionAdapterFailure> MarkDisappearedForReconciliation(AgentSession session)
+    {
+        lock (gate)
+        {
+            if (!sessions.TryGetValue(session.Metadata.Uid, out var runtime))
+            {
+                return Failure<SessionRuntime>("session-not-found", "The requested session is not known by this adapter.");
+            }
+
+            var disappeared = runtime with { Liveness = SessionLiveness.Disappeared };
+            sessions[session.Metadata.Uid] = disappeared;
+            return Success(disappeared);
         }
     }
 
@@ -89,14 +117,56 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
                 return Task.FromResult(Failure<SessionRuntime>(failure.Error.Code, failure.Error.Message));
             }
 
-            if (parentIdempotency.TryGetValue(request.Session.Spec.IdempotencyKey, out var existingId))
+            var key = new ParentSessionIdempotencyKey(
+                request.Session.Spec.AttemptReference,
+                request.Session.Spec.IdempotencyKey,
+                request.ReplacesSessionReference);
+            var replay = new ParentSessionReplay(
+                request.Session,
+                request.Attempt.Metadata.Uid,
+                request.Envelope,
+                request.ReplacesSessionReference);
+            if (parentIdempotency.TryGetValue(key, out var existing))
             {
-                return Task.FromResult(Success(sessions[existingId]));
+                if (existing != replay)
+                {
+                    return Task.FromResult(Failure<SessionRuntime>(
+                        "parent-idempotency-key-reused",
+                        "A parent idempotency key was already used with different session, attempt, capability envelope, or replacement bindings."));
+                }
+
+                var replayedRuntime = sessions[existing.Session.Metadata.Uid];
+                return replayedRuntime.Liveness is SessionLiveness.Active or SessionLiveness.Idle &&
+                       !replayedRuntime.Session.Status.ArchiveComplete
+                    ? Task.FromResult(Success(replayedRuntime))
+                    : Task.FromResult(Failure<SessionRuntime>(
+                        "parent-idempotency-key-not-eligible",
+                        "The prior Issue Master is no longer eligible for replay; an authorised replacement must name it explicitly."));
+            }
+
+            if (request.ReplacesSessionReference is { } replaces)
+            {
+                if (!sessions.TryGetValue(replaces, out var replaced) ||
+                    replaced.Liveness != SessionLiveness.Disappeared ||
+                    replaced.Session.Spec.AttemptReference != request.Session.Spec.AttemptReference ||
+                    replaced.Session.Spec.NodeReference != request.Session.Spec.NodeReference ||
+                    replaced.Session.Metadata.ProjectId != request.Session.Metadata.ProjectId ||
+                    replaced.Session.Metadata.OrganisationId != request.Session.Metadata.OrganisationId ||
+                    replaced.Session.Spec.Provider.ProfileDigest != request.Session.Spec.Provider.ProfileDigest)
+                {
+                    return Task.FromResult(Failure<SessionRuntime>(
+                        "invalid-session-replacement",
+                        "A replacement must name a disappeared Issue Master with exact attempt, node, project, organisation, and provider bindings."));
+                }
             }
 
             var runtime = new SessionRuntime(request.Session, SessionLiveness.Idle, request.Session.Metadata.CreatedAt);
             sessions.Add(request.Session.Metadata.Uid, runtime);
-            parentIdempotency.Add(request.Session.Spec.IdempotencyKey, request.Session.Metadata.Uid);
+            parentIdempotency.Add(key, replay);
+            if (request.ReplacesSessionReference is { } replacedSession)
+            {
+                successors.Add(replacedSession, request.Session.Metadata.Uid);
+            }
             return Task.FromResult(Success(runtime));
         }
     }
@@ -377,6 +447,17 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
         ResourceId ParentSessionReference,
         ResourceId AttemptReference,
         string IdempotencyKey);
+
+    private sealed record ParentSessionIdempotencyKey(
+        ResourceId AttemptReference,
+        string IdempotencyKey,
+        ResourceId? ReplacesSessionReference);
+
+    private sealed record ParentSessionReplay(
+        AgentSession Session,
+        ResourceId AttemptReference,
+        CapabilityEnvelope Envelope,
+        ResourceId? ReplacesSessionReference);
 }
 
 public sealed record SupportedCopilotIntegration(

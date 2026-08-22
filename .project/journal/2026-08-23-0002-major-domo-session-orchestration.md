@@ -26,6 +26,10 @@
   expired execution admission once the control plane has verified the receipt;
   child creation now requires exact parent/attempt/node/project/provider
   bindings and a durable `(parent, attempt, idempotency key)` replay identity.
+- Parent Issue Master replay now distinguishes the base workload key from an
+  authorised replacement key. A replacement names the disappeared owner,
+  records its durable successor mapping, and rejects conflicting replay
+  payloads.
 
 ## Quality evidence
 

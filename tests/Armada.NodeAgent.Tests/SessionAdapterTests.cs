@@ -177,6 +177,31 @@ public sealed class SessionAdapterTests
     }
 
     [Fact]
+    public async Task Disappeared_parent_is_replaced_once_with_durable_successor_replay()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        Value(await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None));
+        Value(adapter.MarkDisappearedForReconciliation(fixture.Parent));
+
+        var replacement = fixture.Parent with { Metadata = fixture.Metadata("replacement") };
+        var request = fixture.Create(replacement, replaces: fixture.Parent.Metadata.Uid);
+        var created = Value(await adapter.CreateParentAsync(request, CancellationToken.None));
+        var replay = Value(await adapter.CreateParentAsync(request, CancellationToken.None));
+
+        Assert.Equal(replacement.Metadata.Uid, created.Session.Metadata.Uid);
+        Assert.Equal(created, replay);
+        Assert.Equal(replacement.Metadata.Uid, adapter.Successors[fixture.Parent.Metadata.Uid]);
+
+        var conflicting = replacement with { Metadata = fixture.Metadata("replacement-conflict") };
+        Assert.Equal(
+            "parent-idempotency-key-reused",
+            Failure(await adapter.CreateParentAsync(
+                fixture.Create(conflicting, replaces: fixture.Parent.Metadata.Uid),
+                CancellationToken.None)).Code);
+    }
+
+    [Fact]
     public async Task Durable_observations_bind_session_attempt_correlation_and_envelope()
     {
         var fixture = new AdapterFixture();
@@ -267,8 +292,9 @@ public sealed class SessionAdapterTests
             AgentSession session,
             SessionAuthority authority = SessionAuthority.IssueMasterWithChildren,
             Attempt? attempt = null,
-            AdmissionDecision? admission = null) =>
-            new(session, attempt ?? Attempt, admission ?? Admission, Envelope with { SessionAuthority = authority }, Guid.NewGuid(), now);
+            AdmissionDecision? admission = null,
+            ResourceId? replaces = null) =>
+            new(session, attempt ?? Attempt, admission ?? Admission, Envelope with { SessionAuthority = authority }, Guid.NewGuid(), now, replaces);
 
         public SessionOperationRequest Operation(AgentSession session, EvidenceReceipt? evidence = null) =>
             new(session, Attempt, Admission, Envelope, Guid.NewGuid(), "test operation", now, evidence ?? Evidence());
