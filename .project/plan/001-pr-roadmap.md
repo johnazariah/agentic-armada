@@ -77,3 +77,29 @@ Contracts test project also excludes only
 `src/Armada.Contracts/obj/**/Resources.cs`, the protobuf compiler output; the
 versioned source `.proto` remains build-validated and the generated file
 contains no hand-written production logic.
+
+## PR 2: Authoritative control plane foundation
+
+**Scope:** add `Armada.Application` resource/admission command ports and the
+`Armada.Infrastructure.Postgres` authoritative current-state, append-only-ledger
+and transactional-outbox schema/repository boundary. HTTP, node, session and
+GitHub adapters remain deferred.
+
+**Acceptance evidence:**
+
+- Resource creation and spec updates validate the typed v1 envelope, use
+  resource-version CAS and write the current resource, ledger event and outbox
+  message as one repository commit.
+- Admission policy remains a port. Only an unexpired typed decision bound to the
+  exact workload generation may be persisted.
+- PostgreSQL schema records current JSON state separately from an append-only
+  ledger and idempotent outbox; the ledger rejects updates and deletes.
+- The local environment has Docker installed but no reachable daemon/socket and
+  no local PostgreSQL instance. Deterministic in-memory port tests cover CAS
+  contention, replay and no-partial-write laws; SQL contract tests cover the
+  migration constraints. The two direct Npgsql execution adapters have narrow,
+  documented coverage exclusions until the real PostgreSQL integration suite can
+  run in a supported environment.
+
+**Compatibility:** consumes existing `armada.io/v1alpha1` contracts without
+introducing a provider or consumer `.armada/` configuration.
