@@ -28,6 +28,7 @@ public sealed record WorkloadLifecycle(
     SessionAuthority? AdmittedSessionAuthority,
     Sha256Digest? AdmittedBundleDigest,
     Sha256Digest? AdmittedPolicyDigest,
+    ImmutableArray<Sha256Digest> AdmittedCapabilityGrantDigests,
     DateTimeOffset? AdmissionExpiresAt,
     ResourceId? AssignedNodeReference,
     ResourceId? AttemptReference,
@@ -50,6 +51,7 @@ public sealed record WorkloadLifecycle(
             null,
             null,
             null,
+            ImmutableArray<Sha256Digest>.Empty,
             null,
             null,
             null,
@@ -238,6 +240,7 @@ public static class WorkloadLifecycleTransitions
             admittedSessionAuthority: decision.Spec.SessionAuthority,
             admittedBundleDigest: decision.Spec.BundleDigest,
             admittedPolicyDigest: decision.Spec.PolicyDigest,
+            admittedCapabilityGrantDigests: decision.Spec.CredentialGrantDigests,
             admissionExpiresAt: decision.Spec.ExpiresAt);
     }
 
@@ -283,11 +286,12 @@ public static class WorkloadLifecycleTransitions
             attempt.Spec.NodeReference != lifecycle.AssignedNodeReference ||
             attempt.Spec.AdmissionDecisionReference != lifecycle.AdmissionDecisionReference ||
             attempt.Spec.BundleDigest != lifecycle.AdmittedBundleDigest ||
-            attempt.Spec.PolicyDigest != lifecycle.AdmittedPolicyDigest)
+            attempt.Spec.PolicyDigest != lifecycle.AdmittedPolicyDigest ||
+            !lifecycle.AdmittedCapabilityGrantDigests.Contains(attempt.Spec.CapabilityGrantDigest))
         {
             return Failure(
                 "invalid-attempt-binding",
-                "Claim requires an attempt bound to the workload generation, selected node, admitted decision, bundle, and policy.");
+                "Claim requires an attempt bound to the workload generation, selected node, admitted decision, bundle, policy, and approved capability grant.");
         }
 
         return Succeed(
@@ -311,6 +315,7 @@ public static class WorkloadLifecycleTransitions
             lifecycle.AssignedNodeReference is null ||
             lifecycle.AdmissionExpiresAt is null ||
             lifecycle.AdmissionExpiresAt <= command.EvaluatedAt ||
+            lease.Spec.ExpiresAt > lifecycle.AdmissionExpiresAt ||
             lease.Spec.AttemptReference != lifecycle.AttemptReference ||
             lease.Spec.NodeReference != lifecycle.AssignedNodeReference ||
             lease.Spec.ExpiresAt <= command.EvaluatedAt ||
@@ -361,6 +366,7 @@ public static class WorkloadLifecycleTransitions
         if (lifecycle.LeaseReference is null ||
             lifecycle.AdmissionExpiresAt is null ||
             lifecycle.AdmissionExpiresAt <= command.EvaluatedAt ||
+            lease.Spec.ExpiresAt > lifecycle.AdmissionExpiresAt ||
             lease.Metadata.Uid != lifecycle.LeaseReference ||
             lease.Spec.AttemptReference != lifecycle.AttemptReference ||
             lease.Spec.NodeReference != lifecycle.AssignedNodeReference ||
@@ -440,6 +446,7 @@ public static class WorkloadLifecycleTransitions
         SessionAuthority? admittedSessionAuthority = null,
         Sha256Digest? admittedBundleDigest = null,
         Sha256Digest? admittedPolicyDigest = null,
+        ImmutableArray<Sha256Digest>? admittedCapabilityGrantDigests = null,
         DateTimeOffset? admissionExpiresAt = null,
         ResourceId? assignedNodeReference = null,
         ResourceId? attemptReference = null,
@@ -456,6 +463,7 @@ public static class WorkloadLifecycleTransitions
                 AdmittedSessionAuthority = admittedSessionAuthority ?? lifecycle.AdmittedSessionAuthority,
                 AdmittedBundleDigest = admittedBundleDigest ?? lifecycle.AdmittedBundleDigest,
                 AdmittedPolicyDigest = admittedPolicyDigest ?? lifecycle.AdmittedPolicyDigest,
+                AdmittedCapabilityGrantDigests = admittedCapabilityGrantDigests ?? lifecycle.AdmittedCapabilityGrantDigests,
                 AdmissionExpiresAt = admissionExpiresAt ?? lifecycle.AdmissionExpiresAt,
                 AssignedNodeReference = assignedNodeReference ?? lifecycle.AssignedNodeReference,
                 AttemptReference = attemptReference ?? lifecycle.AttemptReference,

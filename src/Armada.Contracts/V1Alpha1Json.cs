@@ -270,7 +270,7 @@ public static class V1Alpha1Json
         var owners = new List<OwnerReference>();
         foreach (var owner in wire.OwnerReferences ?? [])
         {
-            if (!Guid.TryParse(owner.Uid, out var ownerId))
+            if (owner is null || !Guid.TryParse(owner.Uid, out var ownerId))
             {
                 return Failure<ResourceMetadata>("invalid-owner-reference", "Owner reference IDs must be UUID strings.");
             }
@@ -320,6 +320,10 @@ public static class V1Alpha1Json
         var values = ImmutableArray.CreateBuilder<Condition>();
         foreach (var wire in conditions ?? [])
         {
+            if (wire is null)
+            {
+                return Failure<ResourceStatus>("invalid-condition", "Condition array entries cannot be null.");
+            }
             if (!Enum.TryParse<ConditionStatus>(wire.Status, false, out var conditionStatus))
             {
                 return Failure<ResourceStatus>("invalid-condition-status", $"Unknown condition status '{wire.Status}'.");
@@ -369,6 +373,10 @@ public static class V1Alpha1Json
         var tolerations = ImmutableArray.CreateBuilder<Toleration>();
         foreach (var toleration in wire.Tolerations ?? [])
         {
+            if (toleration is null)
+            {
+                return Failure<SchedulingRequirements>("invalid-toleration", "Toleration array entries cannot be null.");
+            }
             if (!Enum.TryParse<TaintEffect>(toleration.Effect, false, out var effect))
             {
                 return Failure<SchedulingRequirements>("invalid-taint-effect", $"Unknown taint effect '{toleration.Effect}'.");
@@ -421,7 +429,7 @@ public static class V1Alpha1Json
         var repositories = ImmutableHashSet.CreateBuilder<RepositoryName>();
         foreach (var value in values ?? [])
         {
-            if (RepositoryName.Parse(value) is not Result<RepositoryName, ContractValidationError>.Success success)
+            if (value is null || RepositoryName.Parse(value) is not Result<RepositoryName, ContractValidationError>.Success success)
             {
                 return Failure<ImmutableHashSet<RepositoryName>>(
                     "invalid-repository-name",

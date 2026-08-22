@@ -139,6 +139,13 @@ public sealed class ContractValidationTests
             projectRoundTrip.Spec.GitHubRepositories);
         Assert.Equal(37m, projectRoundTrip.Status.BudgetObserved);
         Assert.Equal("certificate epoch expired", projectRoundTrip.Status.Common.Conditions.Single().Escalation!.ExactBlocker);
+
+        var nullOwner = V1Alpha1Json.DeserializeProject(
+            json.Replace("\"ownerReferences\":[]", "\"ownerReferences\":[null]", StringComparison.Ordinal));
+
+        Assert.Equal(
+            "invalid-owner-reference",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(nullOwner).Error.Code);
     }
 
     [Fact]

@@ -106,6 +106,28 @@ public sealed class WorkloadLifecycleTests
             Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
     }
 
+    [Fact]
+    public void Claim_rejects_a_capability_grant_not_approved_by_admission()
+    {
+        var fixture = new LifecycleFixture();
+        var desired = fixture.Desired();
+        var admitted = Apply(desired, fixture.Admit(desired));
+        var assigned = Apply(admitted, fixture.Assign(admitted));
+        var claim = fixture.Claim(assigned) with
+        {
+            Attempt = fixture.Claim(assigned).Attempt with
+            {
+                Spec = fixture.Claim(assigned).Attempt.Spec with { CapabilityGrantDigest = fixture.AlternateDigest }
+            }
+        };
+
+        var result = WorkloadLifecycleTransitions.Apply(assigned, claim);
+
+        Assert.Equal(
+            "invalid-attempt-binding",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -170,6 +192,28 @@ public sealed class WorkloadLifecycleTests
         var claimed = Apply(assigned, fixture.Claim(assigned));
 
         var result = WorkloadLifecycleTransitions.Apply(claimed, fixture.Approve(claimed));
+
+        Assert.Equal(
+            "invalid-lease-binding",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Start_approval_rejects_a_lease_horizon_beyond_admission_expiry()
+    {
+        var fixture = new LifecycleFixture();
+        var desired = fixture.Desired();
+        var admitted = Apply(
+            desired,
+            fixture.Admit(
+                desired,
+                expiresAt: DateTimeOffset.Parse("2029-06-01T00:00:00Z")));
+        var assigned = Apply(admitted, fixture.Assign(admitted));
+        var claimed = Apply(assigned, fixture.Claim(assigned));
+
+        var result = WorkloadLifecycleTransitions.Apply(
+            claimed,
+            fixture.Approve(claimed));
 
         Assert.Equal(
             "invalid-lease-binding",
@@ -280,7 +324,7 @@ internal sealed class LifecycleFixture
                     sessionAuthority,
                     IsolationProfile.IsolatedContainer,
                     new ResourceRequirements(1000, 0, 1024, 1024),
-                    ImmutableArray<Sha256Digest>.Empty,
+                    [Digest],
                     ImmutableHashSet<string>.Empty,
                     Digest,
                     expiresAt ?? DateTimeOffset.Parse("2030-01-01T00:00:00Z")),
