@@ -1,11 +1,27 @@
 using System.Collections.Immutable;
 using Armada.Contracts;
 using Armada.Domain;
+using FsCheck.Xunit;
 
 namespace Armada.Domain.Tests;
 
 public sealed class WorkloadLifecycleTests
 {
+    [Property(MaxTest = 50)]
+    public void Terminal_states_remain_closed_under_further_lifecycle_commands(bool chooseCompleted)
+    {
+        var fixture = new LifecycleFixture();
+        var terminalOutcome = chooseCompleted ? TerminalOutcome.Completed : TerminalOutcome.Failed;
+        var pending = fixture.ProgressToTerminalPending(terminalOutcome);
+        var terminal = Apply(pending, fixture.Finalise(pending, terminalOutcome, fixture.Evidence(verified: true)));
+
+        var result = WorkloadLifecycleTransitions.Apply(terminal, fixture.SubmitTerminal(terminal, terminalOutcome));
+
+        Assert.Equal(
+            "invalid-predecessor",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
+    }
+
     [Fact]
     public void Valid_lifecycle_reaches_completed_only_after_verified_evidence()
     {

@@ -56,3 +56,12 @@ accepted v1 GitHub/GitHubCopilot/GitHubRelease profiles and no consumer
 `.armada/` configuration.
 
 **Relies on:** ADR 0002, ADR 0003, ADR 0004 and ADR 0005. It supersedes none.
+
+**Quality gate:** local and CI validation run:
+
+```text
+dotnet test Armada.slnx --no-restore /p:CollectCoverage=true /p:CoverletOutputFormat=json /p:Threshold=85 /p:ThresholdType=line /p:ThresholdStat=total
+```
+
+The command collects deterministic Coverlet/MSBuild line coverage for the
+affected production projects and fails below the 85% floor.
