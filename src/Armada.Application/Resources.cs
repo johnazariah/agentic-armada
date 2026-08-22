@@ -418,11 +418,7 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
         var prior = await repository.FindByIdempotencyKeyAsync(command.IdempotencyKey.ToString(), cancellationToken);
         if (prior is not null)
         {
-            return IsMatchingReplay(prior, command)
-                ? new Result<ResourceStoreResult, ResourceCommandFailure>.Success(
-                    new ResourceStoreResult.AlreadyApplied(prior))
-                : new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
-                    new("idempotency-key-reused", "The transition identity was already used for a different update."));
+            return ReplayResult(prior, command);
         }
 
         var current = await repository.GetAsync(command.ResourceId, cancellationToken);
@@ -430,6 +426,12 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
         {
             return new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
                 new("resource-not-found", "The resource does not exist."));
+        }
+
+        var afterRead = await repository.FindByIdempotencyKeyAsync(command.IdempotencyKey.ToString(), cancellationToken);
+        if (afterRead is not null)
+        {
+            return ReplayResult(afterRead, command);
         }
 
         var decision = ResourceCommandDecisions.UpdateSpec(current, command);
@@ -462,6 +464,15 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
             _ => new Result<ResourceStoreResult, ResourceCommandFailure>.Success(persisted)
         };
     }
+
+    private static Result<ResourceStoreResult, ResourceCommandFailure> ReplayResult(
+        ResourceCommit prior,
+        UpdateResourceSpecCommand command) =>
+        IsMatchingReplay(prior, command)
+            ? new Result<ResourceStoreResult, ResourceCommandFailure>.Success(
+                new ResourceStoreResult.AlreadyApplied(prior))
+            : new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
+                new("idempotency-key-reused", "The transition identity was already used for a different update."));
 
     private static bool IsMatchingReplay(ResourceCommit prior, UpdateResourceSpecCommand command)
     {
