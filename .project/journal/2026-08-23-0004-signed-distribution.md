@@ -20,7 +20,9 @@ threat model 001 and security-review package 002.
   phase claims and completions allocate their journal ordinal atomically under
   the shared journal lock. Claims precede effects; restart recovery queries
   platform status after a stale stage, health, activation, or rollback claim
-  and never blindly repeats activation.
+  and never blindly repeats activation. Each staging operation observes a
+  renewable monotonic fence; once a successor takes an expired claim, the
+  superseded operation cannot stage or record completion.
 - Added compatibility, release-process, and security-review gate records under
   `.project/releases/`.
 
@@ -30,7 +32,8 @@ Focused contracts and node-agent tests cover canonical ordering, manifest
 tampering, signature verification failure, exact-byte mismatch, semantic
 protocol ordering (`alpha10` versus `alpha2`), compatibility, channel pinning,
 revocation, replay/downgrade/anchor refusal, atomic journal claims, recovery
-after each claimed effect boundary, health-gated activation, failed activation
+after each claimed effect boundary, expired in-flight fencing, hostile
+null-shaped manifests/signatures, health-gated activation, failed activation
 rollback, and journal replay.
 
 ## Remaining blockers

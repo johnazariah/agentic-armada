@@ -82,9 +82,13 @@ public static class ReleaseVerification
         SignedRelease? release,
         IReleaseManifestVerifier? verifier)
     {
-        if (release is null || verifier is null)
+        if (release is null ||
+            verifier is null ||
+            release.Manifest is null ||
+            release.ManifestDigest is null ||
+            release.Signature is null)
         {
-            return Failure("release-verifier-unavailable", "A signed release and configured verifier are required.");
+            return Failure("invalid-signed-release", "A signed release requires a manifest, manifest digest, signature, and configured verifier.");
         }
 
         if (ReleaseManifestContract.Validate(release.Manifest) is Result<bool, ReleaseValidationFailure>.Failure validationFailure)
@@ -115,7 +119,8 @@ public static class ReleaseVerification
 
         if (release.Artifacts.Length != release.Manifest.Artifacts.Length ||
             release.Artifacts.Any(static payload =>
-                payload.Artifact is null ||
+            payload is null ||
+            payload.Artifact is null ||
                 payload.Bytes.IsDefault ||
                 ReleaseManifestContract.Digest(payload.Bytes) != payload.Artifact.Digest) ||
             release.Manifest.Artifacts.Any(artifact =>
@@ -224,7 +229,17 @@ public sealed record UpgradeJournalEvent(
     string Code,
     string Message,
     Guid OperationId,
-    DateTimeOffset? ClaimExpiresAt);
+    DateTimeOffset? ClaimExpiresAt,
+    long Fence);
+
+public sealed record UpgradeOperationFence(
+    string IdempotencyKey,
+    string ReleaseId,
+    Sha256Digest ManifestDigest,
+    UpgradePhase ClaimPhase,
+    Guid OperationId,
+    long Fence,
+    DateTimeOffset ExpiresAt);
 
 public enum UpgradePlatformStatus
 {
@@ -241,13 +256,30 @@ public interface IUpgradeStaging
         UpgradePlan plan,
         CancellationToken cancellationToken);
 
-    Task<Result<bool, UpgradeFailure>> StageAsync(UpgradePlan plan, CancellationToken cancellationToken);
+    Task<Result<bool, UpgradeFailure>> RenewFenceAsync(
+        UpgradePlan plan,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
 
-    Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(UpgradePlan plan, CancellationToken cancellationToken);
+    Task<Result<bool, UpgradeFailure>> StageAsync(
+        UpgradePlan plan,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
 
-    Task<Result<bool, UpgradeFailure>> ActivateAsync(UpgradePlan plan, CancellationToken cancellationToken);
+    Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(
+        UpgradePlan plan,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
 
-    Task<Result<bool, UpgradeFailure>> RollbackAsync(UpgradePlan plan, CancellationToken cancellationToken);
+    Task<Result<bool, UpgradeFailure>> ActivateAsync(
+        UpgradePlan plan,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
+
+    Task<Result<bool, UpgradeFailure>> RollbackAsync(
+        UpgradePlan plan,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
 }
 
 public sealed record UpgradeExecutionResult(
@@ -259,9 +291,12 @@ public sealed record UpgradeExecutionResult(
 public sealed class NodeUpgradeCoordinator(
     INodeJournal journal,
     IUpgradeStaging staging,
-    IClock clock)
+    IClock clock,
+    TimeSpan? claimDuration = null)
 {
-    private static readonly TimeSpan ClaimDuration = TimeSpan.FromMinutes(5);
+    private readonly TimeSpan claimDuration = claimDuration is { } configured && configured > TimeSpan.Zero
+        ? configured
+        : TimeSpan.FromMinutes(5);
 
     public async Task<Result<UpgradeExecutionResult, UpgradeFailure>> ExecuteAsync(
         NodeDeviceIdentity identity,
@@ -319,10 +354,11 @@ public sealed class NodeUpgradeCoordinator(
         }
 
         var claim = await ClaimAsync(identity, plan, UpgradePhase.StageClaimed, cancellationToken);
-        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        if (claim is Result<UpgradeOperationFence, UpgradeFailure>.Failure claimFailure)
         {
             return Failure<bool>(claimFailure.Error);
         }
+        var fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)claim).Value;
 
         var status = await staging.GetStatusAsync(plan, cancellationToken);
         if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
@@ -332,11 +368,17 @@ public sealed class NodeUpgradeCoordinator(
 
         if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value == UpgradePlatformStatus.NotStaged)
         {
-            var stage = await staging.StageAsync(plan, cancellationToken);
-            if (!Succeeded(stage, out var stageFailure))
+            var stage = await RunFencedEffectAsync(
+                identity,
+                plan,
+                fence,
+                staging.StageAsync,
+                cancellationToken);
+            if (stage is Result<UpgradeOperationFence, UpgradeFailure>.Failure stageFailure)
             {
-                return Failure<bool>(stageFailure);
+                return Failure<bool>(stageFailure.Error);
             }
+            fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)stage).Value;
         }
 
         return await CompleteAsync(
@@ -345,6 +387,7 @@ public sealed class NodeUpgradeCoordinator(
             UpgradePhase.Staged,
             "upgrade-staged",
             "Signed artifacts were staged.",
+            fence,
             cancellationToken);
     }
 
@@ -366,10 +409,11 @@ public sealed class NodeUpgradeCoordinator(
         }
 
         var claim = await ClaimAsync(identity, plan, UpgradePhase.HealthClaimed, cancellationToken);
-        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        if (claim is Result<UpgradeOperationFence, UpgradeFailure>.Failure claimFailure)
         {
             return Failure<bool>(claimFailure.Error);
         }
+        var fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)claim).Value;
 
         var status = await staging.GetStatusAsync(plan, cancellationToken);
         if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
@@ -379,11 +423,17 @@ public sealed class NodeUpgradeCoordinator(
 
         if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value == UpgradePlatformStatus.Staged)
         {
-            var health = await staging.ConfirmHealthAsync(plan, cancellationToken);
-            if (!Succeeded(health, out var healthFailure))
+            var health = await RunFencedEffectAsync(
+                identity,
+                plan,
+                fence,
+                staging.ConfirmHealthAsync,
+                cancellationToken);
+            if (health is Result<UpgradeOperationFence, UpgradeFailure>.Failure healthFailure)
             {
-                return Failure<bool>(healthFailure);
+                return Failure<bool>(healthFailure.Error);
             }
+            fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)health).Value;
         }
 
         return await CompleteAsync(
@@ -392,6 +442,7 @@ public sealed class NodeUpgradeCoordinator(
             UpgradePhase.HealthConfirmed,
             "upgrade-health-confirmed",
             "Staged artifacts passed health confirmation.",
+            fence,
             cancellationToken);
     }
 
@@ -413,10 +464,11 @@ public sealed class NodeUpgradeCoordinator(
         }
 
         var claim = await ClaimAsync(identity, plan, UpgradePhase.ActivationClaimed, cancellationToken);
-        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        if (claim is Result<UpgradeOperationFence, UpgradeFailure>.Failure claimFailure)
         {
             return Failure<bool>(claimFailure.Error);
         }
+        var fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)claim).Value;
 
         var status = await staging.GetStatusAsync(plan, cancellationToken);
         if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
@@ -426,11 +478,17 @@ public sealed class NodeUpgradeCoordinator(
 
         if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value == UpgradePlatformStatus.Healthy)
         {
-            var activation = await staging.ActivateAsync(plan, cancellationToken);
-            if (!Succeeded(activation, out var activationFailure))
+            var activation = await RunFencedEffectAsync(
+                identity,
+                plan,
+                fence,
+                staging.ActivateAsync,
+                cancellationToken);
+            if (activation is Result<UpgradeOperationFence, UpgradeFailure>.Failure activationFailure)
             {
-                return Failure<bool>(activationFailure);
+                return Failure<bool>(activationFailure.Error);
             }
+            fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)activation).Value;
         }
         else if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value != UpgradePlatformStatus.Activated)
         {
@@ -445,6 +503,7 @@ public sealed class NodeUpgradeCoordinator(
             UpgradePhase.Activated,
             "upgrade-activated",
             "The verified and healthy release was atomically activated.",
+            fence,
             cancellationToken);
     }
 
@@ -455,10 +514,11 @@ public sealed class NodeUpgradeCoordinator(
         CancellationToken cancellationToken)
     {
         var claim = await ClaimAsync(identity, plan, UpgradePhase.RollbackClaimed, cancellationToken);
-        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        if (claim is Result<UpgradeOperationFence, UpgradeFailure>.Failure claimFailure)
         {
             return Failure(claimFailure.Error);
         }
+        var fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)claim).Value;
 
         var status = await staging.GetStatusAsync(plan, cancellationToken);
         if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
@@ -468,11 +528,17 @@ public sealed class NodeUpgradeCoordinator(
 
         if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value != UpgradePlatformStatus.RolledBack)
         {
-            var rollback = await staging.RollbackAsync(plan, cancellationToken);
-            if (!Succeeded(rollback, out var rollbackFailure))
+            var rollback = await RunFencedEffectAsync(
+                identity,
+                plan,
+                fence,
+                staging.RollbackAsync,
+                cancellationToken);
+            if (rollback is Result<UpgradeOperationFence, UpgradeFailure>.Failure rollbackFailure)
             {
-                return Failure(rollbackFailure);
+                return Failure(rollbackFailure.Error);
             }
+            fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)rollback).Value;
         }
 
         var completion = await CompleteAsync(
@@ -481,6 +547,7 @@ public sealed class NodeUpgradeCoordinator(
             UpgradePhase.RolledBack,
             failure.Code,
             failure.Message,
+            fence,
             cancellationToken);
         return completion is Result<bool, UpgradeFailure>.Failure completionFailure
             ? Failure(completionFailure.Error)
@@ -488,7 +555,7 @@ public sealed class NodeUpgradeCoordinator(
                 new(false, true, failure.Code, failure.Message));
     }
 
-    private async Task<Result<bool, UpgradeFailure>> ClaimAsync(
+    private async Task<Result<UpgradeOperationFence, UpgradeFailure>> ClaimAsync(
         NodeDeviceIdentity identity,
         UpgradePlan plan,
         UpgradePhase phase,
@@ -504,19 +571,21 @@ public sealed class NodeUpgradeCoordinator(
             "upgrade-transition-claimed",
             $"The {phase} transition is durably claimed.",
             Guid.NewGuid(),
-            now.Add(ClaimDuration));
+            now.Add(claimDuration),
+            0);
         var result = await journal.ClaimUpgradeTransitionAsync(identity, claim, cancellationToken);
         return result switch
         {
-            Result<JournalAppendClaim, JournalFailure>.Success { Value.Added: true } =>
-                Success(true),
+            Result<JournalAppendClaim, JournalFailure>.Success { Value.Added: true } success =>
+                new Result<UpgradeOperationFence, UpgradeFailure>.Success(
+                    ToFence(success.Value.Entry.Upgrade!)),
             Result<JournalAppendClaim, JournalFailure>.Success =>
-                Failure<bool>(new(
+                Failure<UpgradeOperationFence>(new(
                     "upgrade-transition-in-progress",
                     $"The {phase} transition is claimed by another coordinator until its durable claim expires.")),
             Result<JournalAppendClaim, JournalFailure>.Failure journalFailure =>
-                Failure<bool>(new(journalFailure.Error.Code, journalFailure.Error.Message)),
-            _ => Failure<bool>(new("journal-write-failed", "The journal claim returned an unsupported result."))
+                Failure<UpgradeOperationFence>(new(journalFailure.Error.Code, journalFailure.Error.Message)),
+            _ => Failure<UpgradeOperationFence>(new("journal-write-failed", "The journal claim returned an unsupported result."))
         };
     }
 
@@ -526,6 +595,7 @@ public sealed class NodeUpgradeCoordinator(
         UpgradePhase phase,
         string code,
         string message,
+        UpgradeOperationFence fence,
         CancellationToken cancellationToken)
     {
         var completed = new UpgradeJournalEvent(
@@ -536,11 +606,13 @@ public sealed class NodeUpgradeCoordinator(
             clock.UtcNow,
             code,
             message,
-            Guid.Empty,
-            null);
-        var result = await journal.AppendClaimedAsync(
-            JournalEntry.UpgradeClaimIdentity(completed),
-            ordinal => JournalEntry.ForUpgrade(ordinal, identity, completed),
+            fence.OperationId,
+            null,
+            fence.Fence);
+        var result = await journal.CompleteUpgradeTransitionAsync(
+            identity,
+            completed,
+            fence,
             cancellationToken);
         return result switch
         {
@@ -550,6 +622,86 @@ public sealed class NodeUpgradeCoordinator(
             _ => Failure<bool>(new("journal-write-failed", "The journal completion returned an unsupported result."))
         };
     }
+
+    private async Task<Result<UpgradeOperationFence, UpgradeFailure>> RunFencedEffectAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        UpgradeOperationFence fence,
+        Func<UpgradePlan, UpgradeOperationFence, CancellationToken, Task<Result<bool, UpgradeFailure>>> effect,
+        CancellationToken cancellationToken)
+    {
+        var renewed = await journal.RenewUpgradeTransitionAsync(
+            identity,
+            fence,
+            clock.UtcNow,
+            clock.UtcNow.Add(claimDuration),
+            cancellationToken);
+        if (renewed is not Result<JournalAppendClaim, JournalFailure>.Success renewal)
+        {
+            return renewed is Result<JournalAppendClaim, JournalFailure>.Failure renewalFailure
+                ? Failure<UpgradeOperationFence>(new(renewalFailure.Error.Code, renewalFailure.Error.Message))
+                : Failure<UpgradeOperationFence>(new("upgrade-fence-lost", "The upgrade fence could not be renewed before an effect."));
+        }
+
+        var renewedFence = ToFence(renewal.Value.Entry.Upgrade!);
+        var observed = await staging.RenewFenceAsync(plan, renewedFence, cancellationToken);
+        if (!Succeeded(observed, out var observedFailure))
+        {
+            return Failure<UpgradeOperationFence>(observedFailure);
+        }
+
+        var currentFence = renewedFence;
+        var effectTask = effect(plan, currentFence, cancellationToken);
+        while (!effectTask.IsCompleted)
+        {
+            var completed = await Task.WhenAny(
+                effectTask,
+                Task.Delay(TimeSpan.FromTicks(Math.Max(1, claimDuration.Ticks / 2)), cancellationToken));
+            if (completed == effectTask)
+            {
+                break;
+            }
+
+            var leaseRenewal = await journal.RenewUpgradeTransitionAsync(
+                identity,
+                currentFence,
+                clock.UtcNow,
+                clock.UtcNow.Add(claimDuration),
+                cancellationToken);
+            if (leaseRenewal is not Result<JournalAppendClaim, JournalFailure>.Success renewedClaim)
+            {
+                return leaseRenewal is Result<JournalAppendClaim, JournalFailure>.Failure renewalFailure
+                    ? Failure<UpgradeOperationFence>(new(renewalFailure.Error.Code, renewalFailure.Error.Message))
+                    : Failure<UpgradeOperationFence>(new("upgrade-fence-lost", "The upgrade fence could not be renewed while an effect was in flight."));
+            }
+
+            currentFence = ToFence(renewedClaim.Value.Entry.Upgrade!);
+            var renewedObservation = await staging.RenewFenceAsync(plan, currentFence, cancellationToken);
+            if (!Succeeded(renewedObservation, out var renewedObservationFailure))
+            {
+                return Failure<UpgradeOperationFence>(renewedObservationFailure);
+            }
+        }
+
+        var result = await effectTask;
+        return result is Result<bool, UpgradeFailure>.Failure effectFailure
+            ? Failure<UpgradeOperationFence>(effectFailure.Error)
+            : result is Result<bool, UpgradeFailure>.Success { Value: false }
+                ? Failure<UpgradeOperationFence>(new(
+                    "upgrade-operation-refused",
+                    "The platform staging boundary refused the requested fenced operation."))
+                : new Result<UpgradeOperationFence, UpgradeFailure>.Success(currentFence);
+    }
+
+    private static UpgradeOperationFence ToFence(UpgradeJournalEvent value) =>
+        new(
+            value.IdempotencyKey,
+            value.ReleaseId,
+            value.ManifestDigest,
+            value.Phase,
+            value.OperationId,
+            value.Fence,
+            value.ClaimExpiresAt ?? throw new InvalidOperationException("Transition claims require an expiry."));
 
     private async Task<Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>> ReadHistoryAsync(
         UpgradePlan plan,

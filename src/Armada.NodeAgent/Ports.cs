@@ -30,6 +30,19 @@ public interface INodeJournal
         UpgradeJournalEvent claim,
         CancellationToken cancellationToken);
 
+    Task<Result<JournalAppendClaim, JournalFailure>> RenewUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeOperationFence fence,
+        DateTimeOffset renewedAt,
+        DateTimeOffset expiresAt,
+        CancellationToken cancellationToken);
+
+    Task<Result<JournalAppendClaim, JournalFailure>> CompleteUpgradeTransitionAsync(
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent completion,
+        UpgradeOperationFence fence,
+        CancellationToken cancellationToken);
+
     Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(
         CancellationToken cancellationToken);
 }

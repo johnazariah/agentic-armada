@@ -39,6 +39,27 @@ public sealed class ReleaseDistributionTests
     }
 
     [Fact]
+    public void Verification_rejects_hostile_null_record_shapes_without_throwing()
+    {
+        var fixture = new ReleaseFixture();
+        var missingSignature = fixture.Release with { Signature = null! };
+        var missingVersion = fixture.Release with
+        {
+            Manifest = fixture.Release.Manifest with { Version = null! }
+        };
+
+        var signatureException = Record.Exception(() => ReleaseVerification.Verify(missingSignature, fixture.Signer));
+        var versionException = Record.Exception(() => ReleaseVerification.Verify(missingVersion, fixture.Signer));
+        var signatureResult = ReleaseVerification.Verify(missingSignature, fixture.Signer);
+        var versionResult = ReleaseVerification.Verify(missingVersion, fixture.Signer);
+
+        Assert.Null(signatureException);
+        Assert.Null(versionException);
+        Assert.Equal("invalid-signed-release", Failure(signatureResult).Code);
+        Assert.Equal("invalid-release-manifest", Failure(versionResult).Code);
+    }
+
+    [Fact]
     public void Valid_compatible_channel_pinned_release_plans_the_matching_platform_installer()
     {
         var fixture = new ReleaseFixture();
@@ -132,8 +153,11 @@ public sealed class ReleaseDistributionTests
         Assert.Equal(
             [
                 UpgradePhase.StageClaimed,
+                UpgradePhase.StageClaimed,
                 UpgradePhase.Staged,
                 UpgradePhase.HealthClaimed,
+                UpgradePhase.HealthClaimed,
+                UpgradePhase.RollbackClaimed,
                 UpgradePhase.RollbackClaimed,
                 UpgradePhase.RolledBack
             ],
@@ -159,9 +183,12 @@ public sealed class ReleaseDistributionTests
         Assert.Equal(
             [
                 UpgradePhase.StageClaimed,
+                UpgradePhase.StageClaimed,
                 UpgradePhase.Staged,
                 UpgradePhase.HealthClaimed,
+                UpgradePhase.HealthClaimed,
                 UpgradePhase.HealthConfirmed,
+                UpgradePhase.ActivationClaimed,
                 UpgradePhase.ActivationClaimed,
                 UpgradePhase.Activated
             ],
@@ -374,13 +401,34 @@ public sealed class ReleaseDistributionTests
                 fixture.Identity,
                 claim with { OperationId = Guid.NewGuid() },
                 CancellationToken.None);
+            var initialFence = Fence(Success(transition).Entry.Upgrade!);
+            var renewal = await journal.RenewUpgradeTransitionAsync(
+                fixture.Identity,
+                initialFence,
+                fixture.Now.AddMinutes(1),
+                fixture.Now.AddMinutes(6),
+                CancellationToken.None);
+            var renewedFence = Fence(Success(renewal).Entry.Upgrade!);
+            var completion = Success(transition).Entry.Upgrade! with
+            {
+                Phase = UpgradePhase.Staged,
+                ClaimExpiresAt = null,
+                Fence = renewedFence.Fence
+            };
+            var activated = await journal.CompleteUpgradeTransitionAsync(
+                fixture.Identity,
+                completion,
+                renewedFence,
+                CancellationToken.None);
             var entries = Success(await journal.ReadAsync(CancellationToken.None));
 
             Assert.True(Success(first).Added);
             Assert.False(Success(duplicate).Added);
             Assert.True(Success(transition).Added);
             Assert.False(Success(alreadyClaimed).Added);
-            Assert.Equal([1L, 2L], entries.Select(static entry => entry.Ordinal));
+            Assert.True(Success(renewal).Added);
+            Assert.True(Success(activated).Added);
+            Assert.Equal([1L, 2L, 3L, 4L], entries.Select(static entry => entry.Ordinal));
         }
         finally
         {
@@ -389,8 +437,84 @@ public sealed class ReleaseDistributionTests
         }
     }
 
+    [Fact]
+    public async Task Expired_in_flight_claim_is_fenced_when_a_second_coordinator_takes_over()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var firstClaim = Transition(
+            fixture,
+            plan,
+            UpgradePhase.StageClaimed,
+            fixture.Now,
+            fixture.Now.AddMinutes(5));
+        var first = Success(await journal.ClaimUpgradeTransitionAsync(fixture.Identity, firstClaim, CancellationToken.None));
+        var secondClaim = firstClaim with
+        {
+            OperationId = Guid.NewGuid(),
+            RecordedAt = fixture.Now.AddMinutes(6),
+            ClaimExpiresAt = fixture.Now.AddMinutes(11)
+        };
+        var second = Success(await journal.ClaimUpgradeTransitionAsync(fixture.Identity, secondClaim, CancellationToken.None));
+        var firstFence = Fence(first.Entry.Upgrade!);
+        var secondFence = Fence(second.Entry.Upgrade!);
+        var staging = new RecordingStaging();
+        var completion = first.Entry.Upgrade! with
+        {
+            Phase = UpgradePhase.Staged,
+            ClaimExpiresAt = null
+        };
+
+        Assert.True(Success(await staging.RenewFenceAsync(plan, firstFence, CancellationToken.None)));
+        Assert.True(Success(await staging.RenewFenceAsync(plan, secondFence, CancellationToken.None)));
+        Assert.Equal("upgrade-fence-stale", Failure(await staging.StageAsync(plan, firstFence, CancellationToken.None)).Code);
+        Assert.Equal(
+            "upgrade-fence-lost",
+            Failure(await journal.CompleteUpgradeTransitionAsync(
+                fixture.Identity,
+                completion,
+                firstFence,
+                CancellationToken.None)).Code);
+        Assert.True(Success(await staging.StageAsync(plan, secondFence, CancellationToken.None)));
+        Assert.True(Success(await journal.CompleteUpgradeTransitionAsync(
+            fixture.Identity,
+            completion with
+            {
+                OperationId = secondFence.OperationId,
+                Fence = secondFence.Fence
+            },
+            secondFence,
+            CancellationToken.None)).Added);
+        Assert.Equal(["stage"], staging.Operations);
+    }
+
+    [Fact]
+    public async Task Long_running_effect_renews_its_fence_before_the_claim_expires()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var staging = new DelayedStageStaging(TimeSpan.FromMilliseconds(30));
+        var coordinator = new NodeUpgradeCoordinator(
+            new InMemoryJournal(),
+            staging,
+            new FixedClock(fixture.Now),
+            TimeSpan.FromMilliseconds(10));
+
+        var result = await coordinator.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.True(Success(result).Activated);
+        Assert.True(staging.Renewals > 3);
+    }
+
     private static T Success<T, TFailure>(Result<T, TFailure> result) =>
-        Assert.IsType<Result<T, TFailure>.Success>(result).Value;
+        result switch
+        {
+            Result<T, TFailure>.Success success => success.Value,
+            Result<T, TFailure>.Failure { Error: UpgradeFailure failure } =>
+                throw new Xunit.Sdk.XunitException($"{failure.Code}: {failure.Message}"),
+            _ => Assert.IsType<Result<T, TFailure>.Success>(result).Value
+        };
 
     private static TFailure Failure<T, TFailure>(Result<T, TFailure> result) =>
         Assert.IsType<Result<T, TFailure>.Failure>(result).Error;
@@ -413,7 +537,18 @@ public sealed class ReleaseDistributionTests
             "test-transition",
             "Deterministic test transition.",
             Guid.NewGuid(),
-            expiresAt);
+            expiresAt,
+            0);
+
+    private static UpgradeOperationFence Fence(UpgradeJournalEvent value) =>
+        new(
+            value.IdempotencyKey,
+            value.ReleaseId,
+            value.ManifestDigest,
+            value.Phase,
+            value.OperationId,
+            value.Fence,
+            value.ClaimExpiresAt!.Value);
 
     private static async Task SeedClaimAsync(
         INodeJournal journal,
@@ -584,6 +719,8 @@ public sealed class ReleaseDistributionTests
     {
         private UpgradePlatformStatus status = initialStatus;
         private readonly Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = statusResult;
+        private long currentFence;
+        private Guid currentOperationId;
         public List<string> Operations { get; } = [];
 
         public Task<Result<UpgradePlatformStatus, UpgradeFailure>> GetStatusAsync(
@@ -591,8 +728,29 @@ public sealed class ReleaseDistributionTests
             CancellationToken cancellationToken) =>
             Task.FromResult(statusResult ?? Success<UpgradePlatformStatus, UpgradeFailure>(status));
 
-        public Task<Result<bool, UpgradeFailure>> StageAsync(UpgradePlan plan, CancellationToken cancellationToken)
+        public Task<Result<bool, UpgradeFailure>> RenewFenceAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
         {
+            if (fence.Fence <= currentFence)
+            {
+                return Task.FromResult(Failure<bool>("upgrade-fence-stale", "The staging adapter rejected a stale fencing token."));
+            }
+            currentFence = fence.Fence;
+            currentOperationId = fence.OperationId;
+            return Task.FromResult(Success<bool, UpgradeFailure>(true));
+        }
+
+        public Task<Result<bool, UpgradeFailure>> StageAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
+        {
+            if (fence.OperationId != currentOperationId)
+            {
+                return Task.FromResult(Failure<bool>("upgrade-fence-stale", "The staging adapter rejected a stale fencing token."));
+            }
             Operations.Add("stage");
             var result = stage ?? Success<bool, UpgradeFailure>(true);
             if (result is Result<bool, UpgradeFailure>.Success { Value: true })
@@ -602,8 +760,15 @@ public sealed class ReleaseDistributionTests
             return Task.FromResult(result);
         }
 
-        public Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(UpgradePlan plan, CancellationToken cancellationToken)
+        public Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
         {
+            if (fence.OperationId != currentOperationId)
+            {
+                return Task.FromResult(Failure<bool>("upgrade-fence-stale", "The staging adapter rejected a stale fencing token."));
+            }
             Operations.Add("health");
             var result = health ?? Success<bool, UpgradeFailure>(true);
             if (result is Result<bool, UpgradeFailure>.Success { Value: true })
@@ -613,8 +778,15 @@ public sealed class ReleaseDistributionTests
             return Task.FromResult(result);
         }
 
-        public Task<Result<bool, UpgradeFailure>> ActivateAsync(UpgradePlan plan, CancellationToken cancellationToken)
+        public Task<Result<bool, UpgradeFailure>> ActivateAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
         {
+            if (fence.OperationId != currentOperationId)
+            {
+                return Task.FromResult(Failure<bool>("upgrade-fence-stale", "The staging adapter rejected a stale fencing token."));
+            }
             Operations.Add("activate");
             var result = activation ?? Success<bool, UpgradeFailure>(true);
             if (result is Result<bool, UpgradeFailure>.Success { Value: true })
@@ -624,8 +796,15 @@ public sealed class ReleaseDistributionTests
             return Task.FromResult(result);
         }
 
-        public Task<Result<bool, UpgradeFailure>> RollbackAsync(UpgradePlan plan, CancellationToken cancellationToken)
+        public Task<Result<bool, UpgradeFailure>> RollbackAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
         {
+            if (fence.OperationId != currentOperationId)
+            {
+                return Task.FromResult(Failure<bool>("upgrade-fence-stale", "The staging adapter rejected a stale fencing token."));
+            }
             Operations.Add("rollback");
             var result = rollback ?? Success<bool, UpgradeFailure>(true);
             if (result is Result<bool, UpgradeFailure>.Success { Value: true })
@@ -663,12 +842,75 @@ public sealed class ReleaseDistributionTests
             CancellationToken cancellationToken) =>
             inner.ClaimUpgradeTransitionAsync(identity, claim, cancellationToken);
 
+        public Task<Result<JournalAppendClaim, JournalFailure>> RenewUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeOperationFence fence,
+            DateTimeOffset renewedAt,
+            DateTimeOffset expiresAt,
+            CancellationToken cancellationToken) =>
+            inner.RenewUpgradeTransitionAsync(identity, fence, renewedAt, expiresAt, cancellationToken);
+
+        public Task<Result<JournalAppendClaim, JournalFailure>> CompleteUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeJournalEvent completion,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken) =>
+            inner.CompleteUpgradeTransitionAsync(identity, completion, fence, cancellationToken);
+
         public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
             reads++ >= failAfterReads
                 ? Task.FromResult<Result<IReadOnlyList<JournalEntry>, JournalFailure>>(
                     new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure(
                         new("journal-read-failed", "The deterministic journal read failed.")))
                 : inner.ReadAsync(cancellationToken);
+    }
+
+    private sealed class DelayedStageStaging(TimeSpan stageDelay) : IUpgradeStaging
+    {
+        private readonly RecordingStaging inner = new();
+
+        public int Renewals { get; private set; }
+
+        public Task<Result<UpgradePlatformStatus, UpgradeFailure>> GetStatusAsync(
+            UpgradePlan plan,
+            CancellationToken cancellationToken) =>
+            inner.GetStatusAsync(plan, cancellationToken);
+
+        public Task<Result<bool, UpgradeFailure>> RenewFenceAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
+        {
+            Renewals++;
+            return inner.RenewFenceAsync(plan, fence, cancellationToken);
+        }
+
+        public async Task<Result<bool, UpgradeFailure>> StageAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken)
+        {
+            await Task.Delay(stageDelay, cancellationToken);
+            return await inner.StageAsync(plan, fence, cancellationToken);
+        }
+
+        public Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken) =>
+            inner.ConfirmHealthAsync(plan, fence, cancellationToken);
+
+        public Task<Result<bool, UpgradeFailure>> ActivateAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken) =>
+            inner.ActivateAsync(plan, fence, cancellationToken);
+
+        public Task<Result<bool, UpgradeFailure>> RollbackAsync(
+            UpgradePlan plan,
+            UpgradeOperationFence fence,
+            CancellationToken cancellationToken) =>
+            inner.RollbackAsync(plan, fence, cancellationToken);
     }
 
     private sealed class DeterministicVerifier(AuthorityVerification result) : IAuthorityVerifier

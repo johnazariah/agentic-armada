@@ -19,15 +19,18 @@ threat model 001 and assurance package 002.
   stage, health, activation, and rollback transition in the existing journal.
   Claims precede effects and expire for explicit restart recovery; recovery
   queries the narrow staging-status port rather than blindly repeating an
-  effect. It never activates before verified health; failed health or
-  activation triggers rollback through a narrow staging port.
+  effect. Every effect receives a renewable monotonic journal fencing token;
+  a superseded operation cannot stage or complete a transition. It never
+  activates before verified health; failed health or activation triggers
+  rollback through a narrow staging port.
 - Templates remain platform abstractions only. No package, installer, release,
   download, shell, package manager, deployment, or node-enrolment effect exists.
 - Deterministic tests cover canonical digest/signature tampering, semantic
   `alpha10`/`alpha2` protocol comparison, compatibility, revocation,
   replay/downgrade/channel/anchor refusal, atomic journal claims, restart after
-  stage/health/activation boundaries, failed staging/health/activation,
-  rollback, health-first activation, and journal replay.
+  stage/health/activation boundaries, expired in-flight fencing, hostile
+  null-shaped release records, failed staging/health/activation, rollback,
+  health-first activation, and journal replay.
 - The tracked `dotnet msbuild eng/Verify.proj /t:Verify` gate passes with no
   broad coverage exclusions and the PostgreSQL CI service required by the
   repository workflow.

@@ -185,16 +185,17 @@ public static class ReleaseManifestContract
         if (manifest is null ||
             manifest.SchemaVersion != SchemaVersion ||
             string.IsNullOrWhiteSpace(manifest.ReleaseId) ||
+            manifest.Version is null ||
             string.IsNullOrWhiteSpace(manifest.SignerKeyId) ||
             manifest.CreatedAt == default ||
+            manifest.Compatibility is null ||
+            manifest.Revocation is null ||
             manifest.Artifacts.IsDefaultOrEmpty)
         {
             return Failure("invalid-release-manifest", "A release manifest requires its schema, identity, signer, creation time, and artifacts.");
         }
 
-        if (manifest.Compatibility is null ||
-            !manifest.Compatibility.Supports(manifest.Compatibility.MinimumNodeProtocol, manifest.Compatibility.MinimumControlPlaneProtocol) ||
-            manifest.Revocation is null ||
+        if (!manifest.Compatibility.Supports(manifest.Compatibility.MinimumNodeProtocol, manifest.Compatibility.MinimumControlPlaneProtocol) ||
             (manifest.Revocation.IsRevoked && (manifest.Revocation.RevokedAt is null || string.IsNullOrWhiteSpace(manifest.Revocation.Reason))) ||
             (manifest.Rollback is not null &&
              (string.IsNullOrWhiteSpace(manifest.Rollback.RollbackReleaseId) || manifest.Rollback.RollbackManifestDigest is null)))
