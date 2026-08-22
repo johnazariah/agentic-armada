@@ -75,6 +75,20 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
         Assert.Equal("evidence-provenance-signature-invalid", result.Code);
     }
 
+    [Fact]
+    public async Task Rejects_malformed_release_manifest_content_without_throwing()
+    {
+        var fixture = EvidenceFixture.Create(
+            manifestContent: System.Text.Encoding.UTF8.GetBytes("""{"Provider":null}"""));
+
+        var exception = await Record.ExceptionAsync(() => fixture.Adapter.VerifyAsync(fixture.Expectation, CancellationToken.None));
+        var result = await fixture.Adapter.VerifyAsync(fixture.Expectation, CancellationToken.None);
+
+        Assert.Null(exception);
+        Assert.False(result.IsVerified);
+        Assert.Equal("evidence-provenance-mismatch", result.Code);
+    }
+
     private static Sha256Digest Digest(string text) =>
         ParseDigest($"sha256:{Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(text)))}");
 
@@ -92,23 +106,24 @@ public sealed class GitHubReleaseEvidenceArchiveAdapterTests
             bool includeManifest = true,
             bool tamperEvidence = false,
             Sha256Digest? provenanceDigest = null,
-            bool provenanceValid = true)
+            bool provenanceValid = true,
+            byte[]? manifestContent = null)
         {
             var archive = new GitHubReleaseEvidenceArchiveProfile(ParseRepository("octo/evidence"));
             var evidenceBytes = System.Text.Encoding.UTF8.GetBytes("retained evidence");
             var evidenceDigest = Digest("retained evidence");
             var expectedProvenance = Digest("provenance");
-            var manifest = JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                Provider = "GitHub",
-                Repository = archive.Repository.Value,
-                ReleaseId = "release-17",
-                AssetName = "evidence.tar",
-                AssetDigest = evidenceDigest.Value,
-                ProvenanceAssetName = "provenance.sig",
-                ProvenanceDigest = (provenanceDigest ?? expectedProvenance).Value,
-                TrustedSigner = "armada-evidence-signer"
-            });
+            var manifest = manifestContent ?? JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    Provider = "GitHub",
+                    Repository = archive.Repository.Value,
+                    ReleaseId = "release-17",
+                    AssetName = "evidence.tar",
+                    AssetDigest = evidenceDigest.Value,
+                    ProvenanceAssetName = "provenance.sig",
+                    ProvenanceDigest = (provenanceDigest ?? expectedProvenance).Value,
+                    TrustedSigner = "armada-evidence-signer"
+                });
             var manifestDigest = ParseDigest(
                 $"sha256:{Convert.ToHexStringLower(SHA256.HashData(manifest))}");
             var receipt = new EvidenceReceipt(

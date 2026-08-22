@@ -239,6 +239,44 @@ public sealed class JournalAndProcessTests
         }
     }
 
+    [Fact]
+    public async Task Interrupted_rollback_anchor_advance_fails_closed_on_subsequent_reconciliation()
+    {
+        var fixture = new NodeAgentFixture();
+        var path = Path.Combine(Path.GetTempPath(), $"armada-journal-{Guid.NewGuid():N}.log");
+        var journal = new EncryptedFileJournal(
+            path,
+            new AesGcmJournalProtector(RandomNumberGenerator.GetBytes(32)),
+            new FailSecondRollbackAnchorAdvance());
+        var first = JournalEntry.ForEvidence(
+            1,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('a'), fixture.Digest('b'), fixture.Now));
+        var second = JournalEntry.ForEvidence(
+            2,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('c'), fixture.Digest('d'), fixture.Now.AddSeconds(1)));
+
+        try
+        {
+            await journal.AppendAsync(first, CancellationToken.None);
+            var interrupted = await journal.AppendAsync(second, CancellationToken.None);
+            var recovery = await journal.ReadAsync(CancellationToken.None);
+
+            Assert.Equal(
+                "rollback-anchor-interrupted",
+                Assert.IsType<Result<JournalEntry, JournalFailure>.Failure>(interrupted).Error.Code);
+            Assert.Equal(
+                "journal-rollback-detected",
+                Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure>(recovery).Error.Code);
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.anchor");
+        }
+    }
+
     [Theory]
     [InlineData("""{"encrypted":{"nonce":null,"tag":null,"ciphertext":null},"previousHash":null,"entryHash":null}""")]
     [InlineData("""{"encrypted":{"nonce":"AA==","tag":"AA==","ciphertext":"AA=="},"previousHash":"0000000000000000000000000000000000000000000000000000000000000000","entryHash":"0000000000000000000000000000000000000000000000000000000000000000"}""")]
@@ -437,4 +475,29 @@ internal sealed class MismatchingRollbackAnchorStore : IRollbackAnchorStore
         CancellationToken cancellationToken) =>
         Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
             new Result<RollbackAnchor, JournalFailure>.Success(RollbackAnchor.Empty));
+}
+
+internal sealed class FailSecondRollbackAnchorAdvance : IRollbackAnchorStore
+{
+    private RollbackAnchor anchor = RollbackAnchor.Empty;
+
+    public Task<Result<RollbackAnchor, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+            new Result<RollbackAnchor, JournalFailure>.Success(anchor));
+
+    public Task<Result<RollbackAnchor, JournalFailure>> AdvanceAsync(
+        RollbackAnchor next,
+        CancellationToken cancellationToken)
+    {
+        if (next.Ordinal == 2)
+        {
+            return Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+                new Result<RollbackAnchor, JournalFailure>.Failure(
+                    new("rollback-anchor-interrupted", "The external rollback anchor did not confirm the next checkpoint.")));
+        }
+
+        anchor = next;
+        return Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+            new Result<RollbackAnchor, JournalFailure>.Success(anchor));
+    }
 }
