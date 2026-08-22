@@ -53,6 +53,7 @@ execution, and production/scientific authority remain unavailable.
 | Operator error/recovery event | least-privileged RBAC, append-only audit, tested backup/restore and named recovery ceremony |
 | Accidental exposure of the lab baseline | explicit lab opt-in, validated IP-loopback Kestrel binding, rejection of configured endpoint/URL/port/hosting-preference overrides, liveness/readiness separation, no authority endpoint, and a secret-free checked-in template |
 | Kestrel configuration reload adds a listener | code-only Kestrel configuration and non-reloadable JSON sources; listener changes require a reviewed process restart |
+| Empty-builder host cannot serve liveness | explicit Kestrel server registration before the validated code-only listener is configured; a loopback process-level test starts, queries, and stops that exact bootstrap path |
 | Forged or changed restore evidence | exact SHA-256 verification of a regular local artifact; missing, directory, symlink, unreadable, and tampered artifacts fail readiness |
 | Evidence path replacement between inspection and read | macOS `O_NOFOLLOW`, `fstat` validation of the opened descriptor, and hashing from that descriptor; unsupported platforms fail closed |
 | Readiness mistaken for deployment approval | readiness checks configuration, the byte identity of a local restore artifact, and PostgreSQL reachability; the runbook prohibits node attachment or workload operation |

@@ -27,6 +27,7 @@ public static class ControlPlaneHostBootstrap
             throw new InvalidOperationException("The lab host requires a validated loopback listener.");
         }
 
+        builder.WebHost.UseKestrel();
         builder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(listenEndpoint.Address, listenEndpoint.Port));
     }
 }

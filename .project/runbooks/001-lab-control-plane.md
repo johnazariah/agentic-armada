@@ -27,6 +27,11 @@ public base URL, so it is not reachable from WSL or any network peer.
 5. Query `/health/live` and `/health/ready` over loopback. A `503` readiness
    response is the safe state; do not bypass it by relaxing configuration.
 
+The lab bootstrap registers Kestrel explicitly because it uses ASP.NET Core's
+empty builder. It still configures the sole listener in code from the validated
+loopback binding; no hosting defaults or configuration-derived endpoints are
+enabled.
+
 ## Safety boundaries
 
 Do not expose the listener beyond loopback, set `Kestrel:Endpoints`, `urls`,
