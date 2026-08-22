@@ -14,9 +14,10 @@ node, transport, signing, installation, GitHub, or Copilot authority.
   and PostgreSQL reachability pass.
 - The host rejects `Kestrel:Endpoints`, `urls`, generic HTTP/HTTPS port inputs,
   and enabled hosting-URL preference inputs, then configures only the validated
-  IP-loopback Kestrel listener; conflicting configuration stops startup before
-  a server can bind. Its JSON sources do not reload, so Kestrel cannot
-  dynamically add endpoints later.
+  IP-loopback Kestrel listener. The empty-builder bootstrap explicitly registers
+  Kestrel before configuring that listener; conflicting configuration stops
+  startup before a server can bind. Its JSON sources do not reload, so Kestrel
+  cannot dynamically add endpoints later.
 - Restore evidence is an absolute-path regular local artifact plus its exact
   SHA-256 digest. On macOS the final path is opened with no-follow semantics,
   the opened descriptor is validated as regular, and those bytes are hashed.
@@ -29,8 +30,8 @@ node, transport, signing, installation, GitHub, or Copilot authority.
   creates another resource/ledger/admission authority.
 - A checked-in example is secret-free. The copied local lab configuration is
   ignored by Git.
-- Deterministic unit and in-process host tests cover configuration and health
-  semantics at the repository coverage floor.
+- Deterministic unit and process-level loopback Kestrel tests cover configuration,
+  startup, clean shutdown, and health semantics at the repository coverage floor.
 
 ## Lab topology and prerequisites
 
