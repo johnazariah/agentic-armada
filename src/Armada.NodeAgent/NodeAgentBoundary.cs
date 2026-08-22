@@ -59,7 +59,8 @@ public sealed class NodeAgentBoundary
                 inventory,
                 health,
                 state.Attempts.Values.OrderBy(static attempt => attempt.AttemptId.Value).ToImmutableArray(),
-                state.Evidence.Values.OrderBy(static evidence => evidence.AttemptId.Value).ToImmutableArray()));
+                state.Evidence.Values.OrderBy(static evidence => evidence.AttemptId.Value).ToImmutableArray(),
+                state.Upgrades));
         }
         finally
         {

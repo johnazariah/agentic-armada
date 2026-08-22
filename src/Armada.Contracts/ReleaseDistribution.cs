@@ -172,9 +172,13 @@ public static class ReleaseManifestContract
             manifest.Artifacts.Select(static artifact => (artifact.Component, artifact.Platform, artifact.Name))
                 .Distinct()
                 .Count() != manifest.Artifacts.Length ||
-            !manifest.Artifacts.Any(static artifact => artifact.Component == ReleaseComponent.ControlPlane) ||
-            !manifest.Artifacts.Any(static artifact => artifact.Component == ReleaseComponent.NodeAgent) ||
-            !manifest.Artifacts.Any(static artifact => artifact.Component == ReleaseComponent.Installer))
+            manifest.Artifacts.Count(static artifact => artifact.Component == ReleaseComponent.ControlPlane) != 1 ||
+            manifest.Artifacts.Count(static artifact => artifact.Component == ReleaseComponent.NodeAgent) != 1 ||
+            !manifest.Artifacts.Any(static artifact => artifact.Component == ReleaseComponent.Installer) ||
+            manifest.Artifacts
+                .Where(static artifact => artifact.Component == ReleaseComponent.Installer)
+                .GroupBy(static artifact => artifact.Platform)
+                .Any(static platformArtifacts => platformArtifacts.Count() != 1))
         {
             return Failure("invalid-release-artifact", "Releases require unique, content-addressed control-plane, node-agent, and platform installer artifacts.");
         }

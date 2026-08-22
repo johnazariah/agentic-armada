@@ -1,0 +1,397 @@
+using System.Collections.Immutable;
+using System.Security.Cryptography;
+using Armada.Contracts;
+
+namespace Armada.NodeAgent;
+
+public sealed record UpgradeFailure(string Code, string Message);
+
+public interface IProductionReleaseKeyProvider
+{
+    Result<ReleaseSignature, ReleaseValidationFailure> Sign(
+        ReleaseManifest manifest,
+        ImmutableArray<byte> canonicalManifest);
+
+    Result<ReleaseSignatureVerification, ReleaseValidationFailure> Verify(
+        ReleaseManifest manifest,
+        ImmutableArray<byte> canonicalManifest,
+        ReleaseSignature signature);
+}
+
+public sealed class ProductionReleaseSigner(IProductionReleaseKeyProvider? keys) : IReleaseManifestSigner
+{
+    public Result<ReleaseSignature, ReleaseValidationFailure> Sign(
+        ReleaseManifest manifest,
+        ImmutableArray<byte> canonicalManifest) =>
+        keys is null
+            ? Failure<ReleaseSignature>("trusted-key-source-unavailable", "Production release signing requires a configured trusted-key source.")
+            : keys.Sign(manifest, canonicalManifest);
+
+    private static Result<T, ReleaseValidationFailure> Failure<T>(string code, string message) =>
+        new Result<T, ReleaseValidationFailure>.Failure(new(code, message));
+}
+
+public sealed class ProductionReleaseVerifier(IProductionReleaseKeyProvider? keys) : IReleaseManifestVerifier
+{
+    public Result<ReleaseSignatureVerification, ReleaseValidationFailure> Verify(
+        ReleaseManifest manifest,
+        ImmutableArray<byte> canonicalManifest,
+        ReleaseSignature signature) =>
+        keys is null
+            ? Failure<ReleaseSignatureVerification>(
+                "trusted-key-source-unavailable",
+                "Production release verification requires a configured trusted-key source.")
+            : keys.Verify(manifest, canonicalManifest, signature);
+
+    private static Result<T, ReleaseValidationFailure> Failure<T>(string code, string message) =>
+        new Result<T, ReleaseValidationFailure>.Failure(new(code, message));
+}
+
+internal sealed class DeterministicTestReleaseSigner(string keyId, byte[] key) : IReleaseManifestSigner, IReleaseManifestVerifier
+{
+    public Result<ReleaseSignature, ReleaseValidationFailure> Sign(
+        ReleaseManifest manifest,
+        ImmutableArray<byte> canonicalManifest) =>
+        manifest.SignerKeyId != keyId
+            ? Failure<ReleaseSignature>("signer-key-mismatch", "The test signer does not own the manifest key identity.")
+            : new Result<ReleaseSignature, ReleaseValidationFailure>.Success(
+                new(keyId, HMACSHA256.HashData(key, canonicalManifest.AsSpan()).ToImmutableArray()));
+
+    public Result<ReleaseSignatureVerification, ReleaseValidationFailure> Verify(
+        ReleaseManifest manifest,
+        ImmutableArray<byte> canonicalManifest,
+        ReleaseSignature signature) =>
+        signature.KeyId == keyId &&
+        CryptographicOperations.FixedTimeEquals(
+            signature.Value.AsSpan(),
+            HMACSHA256.HashData(key, canonicalManifest.AsSpan()))
+            ? new Result<ReleaseSignatureVerification, ReleaseValidationFailure>.Success(
+                ReleaseSignatureVerification.Verified)
+            : new Result<ReleaseSignatureVerification, ReleaseValidationFailure>.Success(
+                new(false, "invalid-signature", "The release signature does not match the canonical manifest."));
+
+    private static Result<T, ReleaseValidationFailure> Failure<T>(string code, string message) =>
+        new Result<T, ReleaseValidationFailure>.Failure(new(code, message));
+}
+
+public sealed record VerifiedRelease(SignedRelease Value);
+
+public static class ReleaseVerification
+{
+    public static Result<VerifiedRelease, UpgradeFailure> Verify(
+        SignedRelease? release,
+        IReleaseManifestVerifier? verifier)
+    {
+        if (release is null || verifier is null)
+        {
+            return Failure("release-verifier-unavailable", "A signed release and configured verifier are required.");
+        }
+
+        if (ReleaseManifestContract.Validate(release.Manifest) is Result<bool, ReleaseValidationFailure>.Failure validationFailure)
+        {
+            return Failure(validationFailure.Error.Code, validationFailure.Error.Message);
+        }
+
+        var canonical = ReleaseManifestContract.CanonicalBytes(release.Manifest);
+        if (release.ManifestDigest != ReleaseManifestContract.Digest(canonical))
+        {
+            return Failure("manifest-digest-mismatch", "The manifest digest does not match its canonical bytes.");
+        }
+        if (release.Signature.KeyId != release.Manifest.SignerKeyId || release.Signature.Value.IsDefaultOrEmpty)
+        {
+            return Failure("release-signature-identity-mismatch", "The signature must name the manifest signer and contain bytes.");
+        }
+
+        var signature = verifier.Verify(release.Manifest, canonical, release.Signature);
+        if (signature is Result<ReleaseSignatureVerification, ReleaseValidationFailure>.Failure signatureFailure)
+        {
+            return Failure(signatureFailure.Error.Code, signatureFailure.Error.Message);
+        }
+        var signatureValue = ((Result<ReleaseSignatureVerification, ReleaseValidationFailure>.Success)signature).Value;
+        if (!signatureValue.IsValid)
+        {
+            return Failure(signatureValue.Code, signatureValue.Message);
+        }
+
+        if (release.Artifacts.Length != release.Manifest.Artifacts.Length ||
+            release.Artifacts.Any(static payload =>
+                payload.Artifact is null ||
+                payload.Bytes.IsDefault ||
+                ReleaseManifestContract.Digest(payload.Bytes) != payload.Artifact.Digest) ||
+            release.Manifest.Artifacts.Any(artifact =>
+                !release.Artifacts.Any(payload => payload.Artifact == artifact)) ||
+            release.Artifacts.Select(static payload => payload.Artifact).Distinct().Count() != release.Artifacts.Length)
+        {
+            return Failure("release-artifact-digest-mismatch", "Release artifact bytes must exactly match each signed manifest digest.");
+        }
+
+        return new Result<VerifiedRelease, UpgradeFailure>.Success(new(release));
+    }
+
+    private static Result<VerifiedRelease, UpgradeFailure> Failure(string code, string message) =>
+        new Result<VerifiedRelease, UpgradeFailure>.Failure(new(code, message));
+}
+
+public sealed record UpgradeRollbackAnchor(
+    string ReleaseId,
+    ReleaseVersion Version,
+    Sha256Digest ManifestDigest);
+
+public sealed record NodeUpgradeState(
+    SupportedPlatform Platform,
+    string NodeProtocol,
+    string ControlPlaneProtocol,
+    ReleaseChannel PinnedChannel,
+    string ActiveReleaseId,
+    ReleaseVersion ActiveVersion,
+    Sha256Digest ActiveManifestDigest,
+    UpgradeRollbackAnchor? RollbackAnchor,
+    ImmutableHashSet<Sha256Digest> SeenManifestDigests);
+
+public sealed record UpgradePlan(
+    string IdempotencyKey,
+    VerifiedRelease Release,
+    ReleaseArtifact NodeAgentArtifact,
+    ReleaseArtifact InstallerArtifact,
+    UpgradeRollbackAnchor RollbackAnchor);
+
+public static class UpgradePlanning
+{
+    public static Result<UpgradePlan, UpgradeFailure> Plan(NodeUpgradeState state, VerifiedRelease release)
+    {
+        var manifest = release.Value.Manifest;
+        if (manifest.Revocation.IsRevoked)
+        {
+            return Failure("release-revoked", "The selected release is explicitly revoked.");
+        }
+        if (manifest.Channel != state.PinnedChannel)
+        {
+            return Failure("release-channel-not-pinned", "The selected release does not match the node's pinned channel.");
+        }
+        if (!manifest.Compatibility.Supports(state.NodeProtocol, state.ControlPlaneProtocol))
+        {
+            return Failure("release-incompatible", "The release is incompatible with the node or control-plane protocol.");
+        }
+        if (state.SeenManifestDigests.Contains(release.Value.ManifestDigest))
+        {
+            return Failure("release-replay-refused", "The release manifest was already processed by this node.");
+        }
+        if (manifest.Version.CompareTo(state.ActiveVersion) <= 0)
+        {
+            return Failure("release-downgrade-refused", "The release version must be newer than the active version.");
+        }
+        if (state.RollbackAnchor is null)
+        {
+            return Failure("rollback-anchor-missing", "Upgrade activation requires a durable rollback anchor.");
+        }
+
+        var nodeAgent = manifest.Artifacts.SingleOrDefault(static artifact => artifact.Component == ReleaseComponent.NodeAgent);
+        var installer = manifest.Artifacts.SingleOrDefault(artifact =>
+            artifact.Component == ReleaseComponent.Installer && artifact.Platform == state.Platform);
+        return nodeAgent is null || installer is null
+            ? Failure("release-platform-unsupported", "The release has no signed node-agent and installer artifacts for this platform.")
+            : new Result<UpgradePlan, UpgradeFailure>.Success(
+                new(
+                    $"upgrade:{state.ActiveManifestDigest.Value}:{release.Value.ManifestDigest.Value}",
+                    release,
+                    nodeAgent,
+                    installer,
+                    state.RollbackAnchor));
+    }
+
+    private static Result<UpgradePlan, UpgradeFailure> Failure(string code, string message) =>
+        new Result<UpgradePlan, UpgradeFailure>.Failure(new(code, message));
+}
+
+public enum UpgradePhase
+{
+    Staged,
+    HealthConfirmed,
+    Activated,
+    RolledBack
+}
+
+public sealed record UpgradeJournalEvent(
+    string IdempotencyKey,
+    string ReleaseId,
+    Sha256Digest ManifestDigest,
+    UpgradePhase Phase,
+    DateTimeOffset RecordedAt,
+    string Code,
+    string Message);
+
+public interface IUpgradeStaging
+{
+    Task<Result<bool, UpgradeFailure>> StageAsync(UpgradePlan plan, CancellationToken cancellationToken);
+
+    Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(UpgradePlan plan, CancellationToken cancellationToken);
+
+    Task<Result<bool, UpgradeFailure>> ActivateAsync(UpgradePlan plan, CancellationToken cancellationToken);
+
+    Task<Result<bool, UpgradeFailure>> RollbackAsync(UpgradePlan plan, CancellationToken cancellationToken);
+}
+
+public sealed record UpgradeExecutionResult(
+    bool Activated,
+    bool RolledBack,
+    string Code,
+    string Message);
+
+public sealed class NodeUpgradeCoordinator(
+    INodeJournal journal,
+    IUpgradeStaging staging,
+    IClock clock)
+{
+    private readonly SemaphoreSlim operationGate = new(1, 1);
+
+    public async Task<Result<UpgradeExecutionResult, UpgradeFailure>> ExecuteAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        CancellationToken cancellationToken)
+    {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
+            var existing = await journal.ReadAsync(cancellationToken);
+            if (existing is Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure journalFailure)
+            {
+                return Failure(journalFailure.Error);
+            }
+
+            var entries = ((Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success)existing).Value;
+            var priorOutcome = entries.LastOrDefault(entry =>
+                entry.Upgrade?.IdempotencyKey == plan.IdempotencyKey &&
+                entry.Upgrade.Phase is UpgradePhase.Activated or UpgradePhase.RolledBack)?.Upgrade;
+            if (priorOutcome is not null)
+            {
+                return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
+                    new(
+                        priorOutcome.Phase == UpgradePhase.Activated,
+                        priorOutcome.Phase == UpgradePhase.RolledBack,
+                        priorOutcome.Code,
+                        priorOutcome.Message));
+            }
+
+            var staged = await staging.StageAsync(plan, cancellationToken);
+            if (!Succeeded(staged, out var stageFailure))
+            {
+                return Failure(stageFailure);
+            }
+            if (await RecordAsync(entries, identity, plan, UpgradePhase.Staged, "upgrade-staged", "Signed artifacts were staged.", cancellationToken) is { } stagedJournalFailure)
+            {
+                return await RollbackAfterFailureAsync(entries, identity, plan, stagedJournalFailure, cancellationToken);
+            }
+            entries = await CurrentEntriesAsync(cancellationToken);
+            if (entries is null)
+            {
+                return new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(
+                    new("journal-read-failed", "The upgrade journal could not be re-read after staging."));
+            }
+
+            var health = await staging.ConfirmHealthAsync(plan, cancellationToken);
+            if (!Succeeded(health, out var healthFailure))
+            {
+                return await RollbackAfterFailureAsync(entries, identity, plan, healthFailure, cancellationToken);
+            }
+            if (await RecordAsync(entries, identity, plan, UpgradePhase.HealthConfirmed, "upgrade-health-confirmed", "Staged artifacts passed health confirmation.", cancellationToken) is { } healthJournalFailure)
+            {
+                return await RollbackAfterFailureAsync(entries, identity, plan, healthJournalFailure, cancellationToken);
+            }
+            entries = await CurrentEntriesAsync(cancellationToken);
+            if (entries is null)
+            {
+                return new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(
+                    new("journal-read-failed", "The upgrade journal could not be re-read after health confirmation."));
+            }
+
+            var activation = await staging.ActivateAsync(plan, cancellationToken);
+            if (!Succeeded(activation, out var activationFailure))
+            {
+                return await RollbackAfterFailureAsync(entries, identity, plan, activationFailure, cancellationToken);
+            }
+            if (await RecordAsync(entries, identity, plan, UpgradePhase.Activated, "upgrade-activated", "The verified and healthy release was atomically activated.", cancellationToken) is { } activationJournalFailure)
+            {
+                return await RollbackAfterFailureAsync(entries, identity, plan, activationJournalFailure, cancellationToken);
+            }
+
+            return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
+                new(true, false, "upgrade-activated", "The verified and healthy release was atomically activated."));
+        }
+        finally
+        {
+            operationGate.Release();
+        }
+    }
+
+    private async Task<Result<UpgradeExecutionResult, UpgradeFailure>> RollbackAfterFailureAsync(
+        IReadOnlyList<JournalEntry> entries,
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        UpgradeFailure failure,
+        CancellationToken cancellationToken)
+    {
+        var rollback = await staging.RollbackAsync(plan, cancellationToken);
+        if (!Succeeded(rollback, out var rollbackFailure))
+        {
+            return Failure(rollbackFailure);
+        }
+        if (await RecordAsync(entries, identity, plan, UpgradePhase.RolledBack, failure.Code, failure.Message, cancellationToken) is { } journalFailure)
+        {
+            return Failure(journalFailure);
+        }
+
+        return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
+            new(false, true, failure.Code, failure.Message));
+    }
+
+    private async Task<UpgradeFailure?> RecordAsync(
+        IReadOnlyList<JournalEntry> entries,
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        UpgradePhase phase,
+        string code,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        var upgrade = new UpgradeJournalEvent(
+            plan.IdempotencyKey,
+            plan.Release.Value.Manifest.ReleaseId,
+            plan.Release.Value.ManifestDigest,
+            phase,
+            clock.UtcNow,
+            code,
+            message);
+        var result = await journal.AppendAsync(
+            JournalEntry.ForUpgrade(entries.Count + 1L, identity, upgrade),
+            cancellationToken);
+        return result is Result<JournalEntry, JournalFailure>.Failure failure
+            ? new UpgradeFailure(failure.Error.Code, failure.Error.Message)
+            : null;
+    }
+
+    private async Task<IReadOnlyList<JournalEntry>?> CurrentEntriesAsync(CancellationToken cancellationToken) =>
+        await journal.ReadAsync(cancellationToken) is Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success success
+            ? success.Value
+            : null;
+
+    private static bool Succeeded(
+        Result<bool, UpgradeFailure> result,
+        out UpgradeFailure failure)
+    {
+        failure = result switch
+        {
+            Result<bool, UpgradeFailure>.Failure rejected => rejected.Error,
+            Result<bool, UpgradeFailure>.Success { Value: false } => new(
+                "upgrade-operation-refused",
+                "The platform staging boundary refused the requested upgrade operation."),
+            _ => new("not-applicable", "No failure occurred.")
+        };
+        return result is Result<bool, UpgradeFailure>.Success { Value: true };
+    }
+
+    private static Result<UpgradeExecutionResult, UpgradeFailure> Failure(JournalFailure failure) =>
+        new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(new(failure.Code, failure.Message));
+
+    private static Result<UpgradeExecutionResult, UpgradeFailure> Failure(UpgradeFailure failure) =>
+        new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(failure);
+}

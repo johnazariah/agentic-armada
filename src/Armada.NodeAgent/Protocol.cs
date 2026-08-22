@@ -169,7 +169,8 @@ public sealed record FullReconciliationSnapshot(
     InventoryObservation Inventory,
     HealthObservation Health,
     ImmutableArray<AttemptRuntime> Attempts,
-    ImmutableArray<EvidenceObservation> Evidence);
+    ImmutableArray<EvidenceObservation> Evidence,
+    ImmutableArray<UpgradeJournalEvent> Upgrades);
 
 internal static class ProtocolIdentity
 {

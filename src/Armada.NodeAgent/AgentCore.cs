@@ -51,6 +51,7 @@ public sealed record AgentState(
     ImmutableDictionary<string, ProcessedCommand> ProcessedCommands,
     ImmutableDictionary<ResourceId, AttemptRuntime> Attempts,
     ImmutableDictionary<ResourceId, EvidenceObservation> Evidence,
+    ImmutableArray<UpgradeJournalEvent> Upgrades,
     long LastJournalOrdinal)
 {
     public static AgentState Empty(NodeDeviceIdentity identity) =>
@@ -61,6 +62,7 @@ public sealed record AgentState(
             ImmutableDictionary<string, ProcessedCommand>.Empty.WithComparers(StringComparer.Ordinal),
             ImmutableDictionary<ResourceId, AttemptRuntime>.Empty,
             ImmutableDictionary<ResourceId, EvidenceObservation>.Empty,
+            ImmutableArray<UpgradeJournalEvent>.Empty,
             0);
 
     public static Result<AgentState, JournalFailure> Replay(
@@ -219,6 +221,10 @@ public sealed record AgentState(
                     evidenceAttemptId,
                     new(evidenceAttemptId, manifestDigest, outputDigest, entry.RecordedAt))
             };
+        }
+        else if (entry.Type == JournalEntryType.ReleaseUpgrade && entry.Upgrade is { } upgrade)
+        {
+            nextState = nextState with { Upgrades = nextState.Upgrades.Add(upgrade) };
         }
 
         return nextState;

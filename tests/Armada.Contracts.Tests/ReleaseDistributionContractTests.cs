@@ -2,6 +2,7 @@ using System.Collections.Immutable;
 using System.Security.Cryptography;
 using System.Text;
 using Armada.Contracts;
+using FsCheck;
 using FsCheck.Xunit;
 
 namespace Armada.Contracts.Tests;

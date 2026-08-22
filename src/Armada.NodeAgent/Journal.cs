@@ -9,7 +9,8 @@ public enum JournalEntryType
 {
     CommandDecision,
     AttemptStarted,
-    EvidenceObservation
+    EvidenceObservation,
+    ReleaseUpgrade
 }
 
 public sealed record JournalEntry(
@@ -41,7 +42,8 @@ public sealed record JournalEntry(
     Sha256Digest? ReleaseDigest,
     Sha256Digest? ManifestDigest,
     Sha256Digest? OutputDigest,
-    DateTimeOffset RecordedAt)
+    DateTimeOffset RecordedAt,
+    UpgradeJournalEvent? Upgrade = null)
 {
     public static JournalEntry ForCommand(
         long ordinal,
@@ -165,6 +167,42 @@ public sealed record JournalEntry(
             null,
             null,
             recordedAt);
+
+    public static JournalEntry ForUpgrade(
+        long ordinal,
+        NodeDeviceIdentity identity,
+        UpgradeJournalEvent upgrade) =>
+        new(
+            ordinal,
+            JournalEntryType.ReleaseUpgrade,
+            identity.NodeId,
+            identity.IdentityEpoch,
+            0,
+            0,
+            Guid.Empty,
+            Guid.Empty,
+            upgrade.IdempotencyKey,
+            ProtocolIdentity.Join(upgrade.ReleaseId, upgrade.ManifestDigest.Value, upgrade.Phase.ToString()),
+            true,
+            false,
+            upgrade.Code,
+            upgrade.Message,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            upgrade.RecordedAt,
+            upgrade);
 }
 
 public sealed record EncryptedJournalRecord(string Nonce, string Tag, string Ciphertext);
