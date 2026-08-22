@@ -100,6 +100,41 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Concurrent_conflicting_update_replay_never_acknowledges_the_other_specification()
+    {
+        await ResetAsync();
+        var project = Project();
+        var service = new ResourceApplicationService(Repository);
+        Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Success>(
+            await service.CreateAsync(
+                new CreateResourceCommand(project, new ActorId("api-user"), Guid.NewGuid(), null, Now),
+                CancellationToken.None));
+        var key = TransitionId.New();
+        var first = UpdateCommand(project.Metadata.Uid, new ResourceVersion("1"), 1, key);
+        var conflicting = UpdateCommand(project.Metadata.Uid, new ResourceVersion("1"), 2, key);
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deliveries = new[]
+        {
+            DeliverAsync(service, first, start.Task),
+            DeliverAsync(service, conflicting, start.Task)
+        };
+
+        start.SetResult();
+        var results = await Task.WhenAll(deliveries);
+
+        Assert.Equal(
+            1,
+            results.Count(static result => result is Result<ResourceStoreResult, ResourceCommandFailure>.Success
+            {
+                Value: ResourceStoreResult.Committed
+            }));
+        Assert.Equal(
+            "idempotency-key-reused",
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Failure>(
+                Assert.Single(results, static result => result is Result<ResourceStoreResult, ResourceCommandFailure>.Failure)).Error.Code);
+    }
+
+    [Fact]
     public async Task Idempotency_lookup_returns_the_original_snapshot_after_later_updates()
     {
         await ResetAsync();
@@ -161,6 +196,30 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
                 null,
                 Now.AddMinutes(budget)))
         .AsSuccess();
+
+    private static UpdateResourceSpecCommand UpdateCommand(
+        ResourceId id,
+        ResourceVersion version,
+        int budget,
+        TransitionId idempotencyKey) =>
+        new(
+            id,
+            version,
+            idempotencyKey,
+            ProjectSpec(budget),
+            new ActorId("api-user"),
+            Guid.NewGuid(),
+            null,
+            Now.AddMinutes(budget));
+
+    private static async Task<Result<ResourceStoreResult, ResourceCommandFailure>> DeliverAsync(
+        ResourceApplicationService service,
+        UpdateResourceSpecCommand command,
+        Task start)
+    {
+        await start;
+        return await service.UpdateSpecAsync(command, CancellationToken.None);
+    }
 
     private static Project Project() =>
         new(

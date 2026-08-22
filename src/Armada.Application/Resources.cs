@@ -438,9 +438,28 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
             Result<ResourceCommit, ResourceCommandFailure>.Failure failure =>
                 new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(failure.Error),
             Result<ResourceCommit, ResourceCommandFailure>.Success success =>
-                new Result<ResourceStoreResult, ResourceCommandFailure>.Success(
-                    await repository.CompareAndSwapAsync(success.Value, command.ExpectedResourceVersion, cancellationToken)),
+                await ToValidatedUpdateResultAsync(success.Value, command, cancellationToken),
             _ => throw new InvalidOperationException("Unsupported resource command decision.")
+        };
+    }
+
+    private async Task<Result<ResourceStoreResult, ResourceCommandFailure>> ToValidatedUpdateResultAsync(
+        ResourceCommit commit,
+        UpdateResourceSpecCommand command,
+        CancellationToken cancellationToken)
+    {
+        var persisted = await repository.CompareAndSwapAsync(
+            commit,
+            command.ExpectedResourceVersion,
+            cancellationToken);
+        return persisted switch
+        {
+            ResourceStoreResult.AlreadyApplied replay when IsMatchingReplay(replay.Commit, command) =>
+                new Result<ResourceStoreResult, ResourceCommandFailure>.Success(replay),
+            ResourceStoreResult.AlreadyApplied =>
+                new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
+                    new("idempotency-key-reused", "The transition identity was already used for a different update.")),
+            _ => new Result<ResourceStoreResult, ResourceCommandFailure>.Success(persisted)
         };
     }
 
