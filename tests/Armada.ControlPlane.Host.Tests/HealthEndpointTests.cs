@@ -40,6 +40,16 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
         Assert.Contains("Kestrel endpoint configuration is prohibited", error.ToString());
     }
 
+    [Fact]
+    public void Code_only_host_configuration_disables_json_reload()
+    {
+        var configuration = new ConfigurationManager();
+
+        ControlPlaneHostConfiguration.AddSources(configuration, "Development", []);
+
+        Assert.False(ControlPlaneHostConfiguration.HasReloadableJsonSource(configuration));
+    }
+
     public sealed class UnconfiguredHostFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)

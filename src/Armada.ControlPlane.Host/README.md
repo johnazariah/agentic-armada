@@ -23,4 +23,10 @@ The host remains not-ready until explicit lab mode, loopback identity/binding,
 operator-applied schema management, verified local restore evidence, and
 PostgreSQL reachability all pass. It rejects `Kestrel:Endpoints` and `urls`
 configuration and configures only its validated loopback listener. It never
-runs migrations automatically.
+runs migrations automatically. Its JSON configuration sources do not reload, so
+endpoint changes cannot add listeners after startup.
+
+The local artifact verifier is intentionally macOS-only: it opens the final
+path with `O_NOFOLLOW`, validates the opened descriptor is a regular file, and
+hashes that same descriptor. Unsupported platforms, including Windows, fail
+closed; cross-platform evidence opening is deferred.

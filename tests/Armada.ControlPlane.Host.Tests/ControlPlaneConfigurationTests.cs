@@ -99,11 +99,12 @@ public sealed class ControlPlaneConfigurationTests
                 new Dictionary<string, string?>
                 {
                     ["Kestrel:Endpoints:public:Url"] = "http://0.0.0.0:5080",
-                    ["urls"] = "http://0.0.0.0:5081"
+                    ["urls"] = "http://0.0.0.0:5081",
+                    ["ASPNETCORE_URLS"] = "http://0.0.0.0:5082"
                 })
             .Build();
 
-        var failures = HostBindingConfiguration.Validate(configuration, "http://0.0.0.0:5082");
+        var failures = HostBindingConfiguration.Validate(configuration, "http://0.0.0.0:5083");
 
         Assert.Contains(failures, static failure => failure.Code == "configured-kestrel-endpoint");
         Assert.Contains(failures, static failure => failure.Code == "configured-host-url");

@@ -1,10 +1,20 @@
 using Armada.ControlPlane.Host;
 
-var builder = WebApplication.CreateBuilder(args);
+var environmentName = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
+    ?? Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
+    ?? Environments.Production;
+var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions
+{
+    Args = args,
+    EnvironmentName = environmentName
+});
+ControlPlaneHostConfiguration.AddSources(builder.Configuration, builder.Environment.EnvironmentName, args);
 var options = builder.Configuration.GetSection(ControlPlaneOptions.SectionName).Get<ControlPlaneOptions>()
     ?? new ControlPlaneOptions();
 
 ControlPlaneHostBootstrap.Configure(builder, options);
+
+builder.Services.AddRouting();
 builder.Services.AddSingleton(options);
 builder.Services.AddSingleton<IRestoreEvidenceVerifier, LocalRestoreEvidenceVerifier>();
 builder.Services.AddSingleton<IPostgresReadinessProbe, PostgresReadinessProbe>();

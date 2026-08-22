@@ -14,10 +14,13 @@ node, transport, signing, installation, GitHub, or Copilot authority.
   and PostgreSQL reachability pass.
 - The host rejects `Kestrel:Endpoints` and `urls` inputs, then configures only
   the validated IP-loopback Kestrel listener; conflicting configuration stops
-  startup before a server can bind.
+  startup before a server can bind. Its JSON sources do not reload, so Kestrel
+  cannot dynamically add endpoints later.
 - Restore evidence is an absolute-path regular local artifact plus its exact
-  SHA-256 digest. Readiness re-hashes the opened artifact and rejects missing,
-  directory, symlink, and tampered files. This is a bounded lab verifier, not a
+  SHA-256 digest. On macOS the final path is opened with no-follow semantics,
+  the opened descriptor is validated as regular, and those bytes are hashed.
+  Missing, directory, symlink, and tampered files fail. Unsupported platforms,
+  including Windows, fail closed. This is a bounded lab verifier, not a
   production evidence archive or signer.
 - Configuration is immutable at the boundary and fails closed without logging
   the PostgreSQL connection string or its credentials.

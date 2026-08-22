@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Configuration.Json;
 
 namespace Armada.ControlPlane.Host;
 
@@ -26,5 +28,34 @@ public static class ControlPlaneHostBootstrap
         }
 
         builder.WebHost.ConfigureKestrel(kestrel => kestrel.Listen(listenEndpoint.Address, listenEndpoint.Port));
+    }
+}
+
+public static class ControlPlaneHostConfiguration
+{
+    public static void AddSources(
+        ConfigurationManager configuration,
+        string environmentName,
+        string[] arguments)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        ArgumentException.ThrowIfNullOrWhiteSpace(environmentName);
+        ArgumentNullException.ThrowIfNull(arguments);
+
+        configuration.Sources.Clear();
+        configuration
+            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+            .AddJsonFile($"appsettings.{environmentName}.json", optional: true, reloadOnChange: false)
+            .AddEnvironmentVariables()
+            .AddCommandLine(arguments);
+    }
+
+    public static bool HasReloadableJsonSource(ConfigurationManager configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        return configuration.Sources
+            .OfType<JsonConfigurationSource>()
+            .Any(static source => source.ReloadOnChange);
     }
 }

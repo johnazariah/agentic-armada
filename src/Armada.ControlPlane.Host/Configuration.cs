@@ -236,7 +236,10 @@ public static class HostBindingConfiguration
                 "Kestrel endpoint configuration is prohibited because the lab host configures only its validated loopback listener."));
         }
 
-        if (!string.IsNullOrWhiteSpace(configuration["urls"]) || !string.IsNullOrWhiteSpace(hostUrls))
+        if (!string.IsNullOrWhiteSpace(configuration["urls"]) ||
+            !string.IsNullOrWhiteSpace(configuration["ASPNETCORE_URLS"]) ||
+            !string.IsNullOrWhiteSpace(configuration["DOTNET_URLS"]) ||
+            !string.IsNullOrWhiteSpace(hostUrls))
         {
             failures.Add(new(
                 "configured-host-url",

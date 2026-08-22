@@ -36,6 +36,10 @@ mTLS/node enrolment, GitHub App or OAuth credential, Copilot adapter,
 signer/key custody, installer, package download, live session control, workload
 execution, or scientific authority is approved by this baseline.
 
+The host deliberately does not reload JSON configuration; restart it through a
+reviewed lab procedure after a configuration change. The local evidence opener
+is macOS-only and fails closed on Windows or another unsupported platform.
+
 Stopping the process changes no workload state because this host has no
 workload endpoint. PostgreSQL backup and restore remain an operator-owned
 prerequisite; a readiness check records neither a backup nor a restore result.

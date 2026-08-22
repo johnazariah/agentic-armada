@@ -1,4 +1,6 @@
 using System.Collections.Immutable;
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using Npgsql;
 
@@ -21,6 +23,11 @@ public interface IPostgresReadinessProbe
 public interface IRestoreEvidenceVerifier
 {
     Task<bool> IsVerifiedAsync(LocalRestoreEvidenceReference evidence, CancellationToken cancellationToken);
+}
+
+public interface IRestoreEvidenceArtifactOpener
+{
+    ValueTask<Stream?> TryOpenRegularFileAsync(string artifactPath, CancellationToken cancellationToken);
 }
 
 public sealed class ControlPlaneReadiness(
@@ -83,25 +90,28 @@ public sealed class PostgresReadinessProbe(ControlPlaneOptions options) : IPostg
 
 public sealed class LocalRestoreEvidenceVerifier : IRestoreEvidenceVerifier
 {
+    private readonly IRestoreEvidenceArtifactOpener opener;
+
+    public LocalRestoreEvidenceVerifier()
+        : this(new MacNoFollowRestoreEvidenceArtifactOpener())
+    {
+    }
+
+    public LocalRestoreEvidenceVerifier(IRestoreEvidenceArtifactOpener opener)
+    {
+        this.opener = opener ?? throw new ArgumentNullException(nameof(opener));
+    }
+
     public async Task<bool> IsVerifiedAsync(LocalRestoreEvidenceReference evidence, CancellationToken cancellationToken)
     {
-        var file = new FileInfo(evidence.ArtifactPath);
-        if (!file.Exists ||
-            (file.Attributes & FileAttributes.Directory) != 0 ||
-            file.LinkTarget is not null)
+        await using var stream = await opener.TryOpenRegularFileAsync(evidence.ArtifactPath, cancellationToken);
+        if (stream is null)
         {
             return false;
         }
 
         try
         {
-            await using var stream = new FileStream(
-                file.FullName,
-                FileMode.Open,
-                FileAccess.Read,
-                FileShare.Read,
-                bufferSize: 4096,
-                FileOptions.Asynchronous | FileOptions.SequentialScan);
             var hash = await SHA256.HashDataAsync(stream, cancellationToken);
             return string.Equals(
                 $"sha256:{Convert.ToHexStringLower(hash)}",
@@ -117,4 +127,75 @@ public sealed class LocalRestoreEvidenceVerifier : IRestoreEvidenceVerifier
             return false;
         }
     }
+}
+
+public sealed class MacNoFollowRestoreEvidenceArtifactOpener : IRestoreEvidenceArtifactOpener
+    {
+        private const int OpenReadOnly = 0;
+        private const int OpenNonBlocking = 0x0004;
+        private const int OpenNoFollow = 0x0100;
+        private const int OpenCloseOnExec = 0x01000000;
+        private const ushort FileTypeMask = 0xf000;
+        private const ushort RegularFileType = 0x8000;
+
+        public ValueTask<Stream?> TryOpenRegularFileAsync(string artifactPath, CancellationToken cancellationToken)
+        {
+            if (!OperatingSystem.IsMacOS() || cancellationToken.IsCancellationRequested)
+            {
+                return ValueTask.FromResult<Stream?>(null);
+            }
+
+            var fileDescriptor = Open(
+                artifactPath,
+                OpenReadOnly | OpenNonBlocking | OpenNoFollow | OpenCloseOnExec);
+            if (fileDescriptor < 0)
+            {
+                return ValueTask.FromResult<Stream?>(null);
+            }
+
+            var handle = new SafeFileHandle((nint)fileDescriptor, ownsHandle: true);
+            if (GetFileStatus(fileDescriptor, out var status) != 0 ||
+                (status.Mode & FileTypeMask) != RegularFileType)
+            {
+                handle.Dispose();
+                return ValueTask.FromResult<Stream?>(null);
+            }
+
+            return ValueTask.FromResult<Stream?>(
+                new FileStream(handle, FileAccess.Read, bufferSize: 4096, isAsync: false));
+        }
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "open", SetLastError = true)]
+        private static extern int Open(string path, int flags);
+
+        [DllImport("/usr/lib/libSystem.B.dylib", EntryPoint = "fstat", SetLastError = true)]
+        private static extern int GetFileStatus(int fileDescriptor, out MacFileStatus status);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MacFileStatus
+        {
+            public int Device;
+            public ushort Mode;
+            public ushort LinkCount;
+            public ulong Inode;
+            public uint UserId;
+            public uint GroupId;
+            public int DeviceType;
+            public long AccessSeconds;
+            public long AccessNanoseconds;
+            public long ModificationSeconds;
+            public long ModificationNanoseconds;
+            public long ChangeSeconds;
+            public long ChangeNanoseconds;
+            public long BirthSeconds;
+            public long BirthNanoseconds;
+            public long Size;
+            public long Blocks;
+            public int BlockSize;
+            public uint Flags;
+            public uint Generation;
+            public int Reserved;
+            public long SpareOne;
+            public long SpareTwo;
+        }
 }
