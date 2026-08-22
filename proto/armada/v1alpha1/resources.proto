@@ -1,0 +1,181 @@
+syntax = "proto3";
+
+package armada.v1alpha1;
+
+option csharp_namespace = "Armada.Contracts.V1Alpha1";
+
+import "google/protobuf/timestamp.proto";
+
+message ResourceEnvelope {
+  string api_version = 1;
+  string kind = 2;
+  oneof resource {
+    Project project = 10;
+    Node node = 11;
+    NodeIdentity node_identity = 12;
+    Capability capability = 13;
+    Workload workload = 14;
+    AdmissionDecision admission_decision = 15;
+    Attempt attempt = 16;
+    Lease lease = 17;
+    AgentSession agent_session = 18;
+    EvidenceReceipt evidence_receipt = 19;
+    Event event = 20;
+  }
+}
+
+message Metadata {
+  string uid = 1;
+  string organisation_id = 2;
+  optional string project_id = 3;
+  string name = 4;
+  string resource_version = 5;
+  int64 generation = 6;
+  map<string, string> labels = 7;
+  map<string, string> annotations = 8;
+  repeated OwnerReference owner_references = 9;
+  repeated string finalizers = 10;
+  google.protobuf.Timestamp created_at = 11;
+  google.protobuf.Timestamp updated_at = 12;
+  optional google.protobuf.Timestamp deletion_requested_at = 13;
+}
+
+message OwnerReference { string kind = 1; string uid = 2; }
+message Escalation {
+  string exact_blocker = 1;
+  string actor = 2;
+  string required_action = 3;
+  string location = 4;
+  string successor = 5;
+  google.protobuf.Timestamp deadline = 6;
+}
+message Condition {
+  string type = 1;
+  string status = 2;
+  string reason = 3;
+  string message = 4;
+  int64 observed_generation = 5;
+  google.protobuf.Timestamp last_transition_time = 6;
+  optional Escalation escalation = 7;
+}
+message Status { int64 observed_generation = 1; repeated Condition conditions = 2; }
+message ResourceRequirements { int32 cpu_millicores = 1; int32 gpu_count = 2; int64 memory_bytes = 3; int64 storage_bytes = 4; }
+// Exact base-10 decimal representation, preserving C# decimal precision.
+message DecimalValue { string value = 1; }
+message LabelSelector { map<string, string> match_labels = 1; }
+message Toleration { string key = 1; string operator = 2; optional string value = 3; string effect = 4; }
+message SchedulingRequirements {
+  optional LabelSelector host_selector = 1;
+  repeated Toleration tolerations = 2;
+  optional LabelSelector affinity = 3;
+  optional LabelSelector anti_affinity = 4;
+  ResourceRequirements resources = 5;
+  optional DecimalValue max_estimated_cost = 6;
+  optional string checkpoint_mode = 7;
+}
+message HeartbeatPolicy { int32 interval_seconds = 1; int32 timeout_seconds = 2; }
+message GitHubIssue { int32 number = 1; optional string node_id = 2; }
+message GitHubPullRequest { int32 number = 1; optional string node_id = 2; }
+message WorkloadEvidence { string archive_provider = 1; string archive_repository = 2; string retention_class = 3; }
+message BudgetLimit { DecimalValue amount = 1; }
+message SessionProfile { string provider = 1; string profile_digest = 2; }
+
+message Project {
+  Metadata metadata = 1;
+  ProjectSpec spec = 2;
+  ProjectStatus status = 3;
+}
+message ProjectSpec {
+  repeated string github_repositories = 1;
+  string evidence_archive_provider = 2;
+  string evidence_archive_repository = 3;
+  SessionProfile session_profile = 4;
+  string policy_bundle_digest = 5;
+  optional BudgetLimit budget_limit = 6;
+}
+message ProjectStatus { Status common = 1; optional DecimalValue budget_observed = 2; }
+
+message Node {
+  Metadata metadata = 1;
+  NodeSpec spec = 2;
+  NodeStatus status = 3;
+}
+message NodeSpec { string identity_ref = 1; NodeSchedulingCeiling scheduling = 2; string desired_operation = 3; repeated Taint taints = 4; }
+message NodeSchedulingCeiling { int32 max_concurrency = 1; int32 cpu_millicores = 2; int64 memory_bytes = 3; int64 storage_bytes = 4; }
+message Taint { string key = 1; optional string value = 2; string effect = 3; }
+message NodeStatus { Status common = 1; optional int64 observed_identity_epoch = 2; optional google.protobuf.Timestamp last_observed_at = 3; }
+
+message NodeIdentity {
+  Metadata metadata = 1;
+  NodeIdentitySpec spec = 2;
+  NodeIdentityStatus status = 3;
+}
+enum NodeAssurance {
+  NODE_ASSURANCE_UNSPECIFIED = 0;
+  NODE_ASSURANCE_DEVICE_KEY = 1;
+  NODE_ASSURANCE_TPM_HARDWARE_BOUND = 2;
+  NODE_ASSURANCE_PLATFORM_KEY_VERIFIED = 3;
+}
+message NodeIdentitySpec { string public_key_digest = 1; NodeAssurance requested_assurance = 2; int64 identity_epoch = 3; optional string attestation_digest = 4; }
+message NodeIdentityStatus { Status common = 1; optional string certificate_serial = 2; optional google.protobuf.Timestamp certificate_expires_at = 3; optional NodeAssurance assurance = 4; optional google.protobuf.Timestamp revoked_at = 5; }
+
+message Capability {
+  Metadata metadata = 1;
+  CapabilitySpec spec = 2;
+  CapabilityStatus status = 3;
+}
+message CapabilitySpec { string node_ref = 1; repeated string requested_scopes = 2; }
+message CapabilityStatus { Status common = 1; repeated string verified_scopes = 2; optional string inventory_digest = 3; optional google.protobuf.Timestamp verified_at = 4; }
+
+message Workload { Metadata metadata = 1; WorkloadSpec spec = 2; WorkloadStatus status = 3; }
+message WorkloadSpec {
+  string bundle_digest = 1;
+  string policy_digest = 2;
+  string source_provider = 3;
+  string repository = 4;
+  string source_revision = 5;
+  string config_digest = 6;
+  repeated string action_schemas = 7;
+  string session_provider = 8;
+  string session_authority = 9;
+  string isolation_profile = 10;
+  GitHubIssue github_issue = 11;
+  SchedulingRequirements scheduling = 12;
+  WorkloadEvidence evidence = 13;
+}
+message WorkloadStatus {
+  Status common = 1;
+  string lifecycle = 2;
+  optional string attempt_ref = 3;
+  optional string owner = 4;
+  optional string successor = 5;
+  optional google.protobuf.Timestamp expected_next_event_at = 6;
+  optional google.protobuf.Timestamp progress_deadline_at = 7;
+  HeartbeatPolicy heartbeat_policy = 8;
+  optional string watchdog = 9;
+  optional string evidence_receipt_ref = 10;
+  GitHubPullRequest github_pull_request = 11;
+}
+
+message AdmissionDecision { Metadata metadata = 1; AdmissionDecisionSpec spec = 2; AdmissionDecisionStatus status = 3; }
+message AdmissionDecisionSpec { string workload_ref = 1; int64 workload_generation = 2; string node_ref = 3; string bundle_digest = 4; string policy_digest = 5; repeated string approved_actions = 6; string session_authority = 7; string isolation_profile = 8; ResourceRequirements resource_limits = 9; repeated string credential_grant_digests = 10; repeated string network_scope = 11; string evidence_requirements_digest = 12; google.protobuf.Timestamp expires_at = 13; }
+message AdmissionDecisionStatus { Status common = 1; string decision = 2; optional string decision_digest = 3; }
+
+message Attempt { Metadata metadata = 1; AttemptSpec spec = 2; AttemptStatus status = 3; }
+message AttemptSpec { string workload_ref = 1; int64 workload_generation = 2; string node_ref = 3; string admission_decision_ref = 4; string bundle_digest = 5; string policy_digest = 6; string capability_grant_digest = 7; string environment_digest = 8; }
+message AttemptStatus { Status common = 1; optional string terminal_observation = 2; }
+
+message Lease { Metadata metadata = 1; LeaseSpec spec = 2; LeaseStatus status = 3; }
+message LeaseSpec { string attempt_ref = 1; string node_ref = 2; int64 holder_epoch = 3; google.protobuf.Timestamp expires_at = 4; }
+message LeaseStatus { Status common = 1; optional google.protobuf.Timestamp last_heartbeat_at = 2; optional google.protobuf.Timestamp revoked_at = 3; }
+
+message AgentSession { Metadata metadata = 1; AgentSessionSpec spec = 2; AgentSessionStatus status = 3; }
+message AgentSessionSpec { string attempt_ref = 1; string node_ref = 2; SessionProfile session_profile = 3; string role = 4; string idempotency_key = 5; optional string parent_session_ref = 6; }
+message AgentSessionStatus { Status common = 1; optional string owner = 2; optional string successor = 3; optional google.protobuf.Timestamp last_observed_at = 4; bool archive_complete = 5; }
+
+message EvidenceReceipt { Metadata metadata = 1; EvidenceReceiptSpec spec = 2; EvidenceReceiptStatus status = 3; }
+message EvidenceReceiptSpec { string attempt_ref = 1; string manifest_digest = 2; string archive_provider = 3; string archive_repository = 4; string release_id = 5; string asset_digest = 6; }
+message EvidenceReceiptStatus { Status common = 1; string verification = 2; optional google.protobuf.Timestamp verified_at = 3; }
+
+message Event { Metadata metadata = 1; EventSpec spec = 2; Status status = 3; }
+message EventSpec { string type = 1; google.protobuf.Timestamp occurred_at = 2; string actor = 3; string correlation_id = 4; optional string causation_id = 5; string payload_digest = 6; }

@@ -215,8 +215,18 @@
         "checkpointMode": { "enum": [ "Forbidden", "Preferred", "Required" ] }
       }
     },
+    "HeartbeatPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "intervalSeconds", "timeoutSeconds" ],
+      "properties": {
+        "intervalSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
     "Envelope": {
       "type": "object",
+      "additionalProperties": false,
       "required": [ "apiVersion", "kind", "metadata", "spec", "status" ],
       "properties": {
         "apiVersion": { "const": "armada.io/v1alpha1" },
@@ -279,8 +289,26 @@
                   }
                 },
                 "policyBundleDigest": { "$ref": "#/$defs/Sha256" },
-                "budgetLimit": { "type": "object" }
+                "budgetLimit": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "amount" ],
+                  "properties": {
+                    "amount": { "type": "number", "minimum": 0 }
+                  }
+                }
               }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "budgetObserved": { "type": "number", "minimum": 0 }
+                  }
+                }
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -324,7 +352,8 @@
                     "lastObservedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -356,11 +385,14 @@
                   "properties": {
                     "certificateSerial": { "type": "string" },
                     "certificateExpiresAt": { "$ref": "#/$defs/Timestamp" },
-                    "assurance": { "type": "string" },
+                    "assurance": {
+                      "enum": [ "DeviceKey", "TpmHardwareBound", "PlatformKeyVerified" ]
+                    },
                     "revokedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -395,7 +427,8 @@
                     "verifiedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -481,6 +514,9 @@
                     "successor": { "type": "string" },
                     "expectedNextEventAt": { "$ref": "#/$defs/Timestamp" },
                     "progressDeadlineAt": { "$ref": "#/$defs/Timestamp" },
+                    "heartbeatPolicy": { "$ref": "#/$defs/HeartbeatPolicy" },
+                    "watchdog": { "type": "string", "minLength": 1 },
+                    "evidenceReceiptRef": { "$ref": "#/$defs/Uid" },
                     "githubPullRequest": {
                       "type": "object",
                       "additionalProperties": false,
@@ -491,8 +527,39 @@
                       }
                     }
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "lifecycle": {
+                        "enum": [
+                          "claimed",
+                          "start-approved", "running", "terminal-pending"
+                        ]
+                      }
+                    },
+                    "required": [ "lifecycle" ]
+                  },
+                  "then": {
+                    "required": [
+                      "attemptRef", "owner", "successor", "expectedNextEventAt",
+                      "progressDeadlineAt", "heartbeatPolicy", "watchdog"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "lifecycle": {
+                        "enum": [ "completed", "failed", "cancelled", "expired" ]
+                      }
+                    },
+                    "required": [ "lifecycle" ]
+                  },
+                  "then": { "required": [ "evidenceReceiptRef" ] }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -538,13 +605,31 @@
                 "isolationProfile": {
                   "enum": [ "DedicatedNode", "IsolatedContainer", "EphemeralVm" ]
                 },
-                "resourceLimits": { "type": "object" },
+                "resourceLimits": { "$ref": "#/$defs/ResourceRequirements" },
                 "credentialGrantDigests": {
                   "type": "array",
                   "items": { "$ref": "#/$defs/Sha256" }
                 },
-                "networkScope": { "type": "object" },
-                "evidenceRequirements": { "type": "object" },
+                "networkScope": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "scopes" ],
+                  "properties": {
+                    "scopes": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "evidenceRequirements": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "digest" ],
+                  "properties": {
+                    "digest": { "$ref": "#/$defs/Sha256" }
+                  }
+                },
                 "expiresAt": { "$ref": "#/$defs/Timestamp" }
               }
             },
@@ -558,7 +643,8 @@
                     "decisionDigest": { "$ref": "#/$defs/Sha256" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -588,6 +674,23 @@
                 "capabilityGrantDigest": { "$ref": "#/$defs/Sha256" },
                 "environmentDigest": { "$ref": "#/$defs/Sha256" }
               }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "terminalObservation": {
+                      "enum": [
+                        "desired", "admitted", "assigned", "claimed",
+                        "start-approved", "running", "terminal-pending",
+                        "completed", "failed", "cancelled", "expired"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -610,6 +713,18 @@
                 "holderEpoch": { "type": "integer", "minimum": 1 },
                 "expiresAt": { "$ref": "#/$defs/Timestamp" }
               }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "lastHeartbeatAt": { "$ref": "#/$defs/Timestamp" },
+                    "revokedAt": { "$ref": "#/$defs/Timestamp" }
+                  }
+                }
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -625,14 +740,37 @@
             "spec": {
               "type": "object",
               "additionalProperties": false,
-              "required": [ "attemptRef", "nodeRef", "role", "idempotencyKey" ],
+              "required": [ "attemptRef", "nodeRef", "sessionProfile", "role", "idempotencyKey" ],
               "properties": {
                 "attemptRef": { "$ref": "#/$defs/Uid" },
                 "nodeRef": { "$ref": "#/$defs/Uid" },
+                "sessionProfile": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "provider", "profileDigest" ],
+                  "properties": {
+                    "provider": { "const": "GitHubCopilot" },
+                    "profileDigest": { "$ref": "#/$defs/Sha256" }
+                  }
+                },
                 "role": { "enum": [ "MajorDomo", "IssueMaster", "Child" ] },
                 "idempotencyKey": { "type": "string", "minLength": 1 },
                 "parentSessionRef": { "$ref": "#/$defs/Uid" }
               }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "owner": { "type": "string", "minLength": 1 },
+                    "successor": { "type": "string", "minLength": 1 },
+                    "lastObservedAt": { "$ref": "#/$defs/Timestamp" },
+                    "archiveComplete": { "type": "boolean" }
+                  }
+                }
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -649,12 +787,13 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "attemptRef", "manifestDigest", "archiveRepository",
+                "attemptRef", "manifestDigest", "archiveProvider", "archiveRepository",
                 "releaseId", "assetDigest"
               ],
               "properties": {
                 "attemptRef": { "$ref": "#/$defs/Uid" },
                 "manifestDigest": { "$ref": "#/$defs/Sha256" },
+                "archiveProvider": { "const": "GitHubRelease" },
                 "archiveRepository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
                 "releaseId": { "type": "string", "minLength": 1 },
                 "assetDigest": { "$ref": "#/$defs/Sha256" }
@@ -670,7 +809,8 @@
                     "verifiedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
