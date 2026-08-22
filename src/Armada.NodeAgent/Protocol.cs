@@ -173,9 +173,13 @@ public sealed record FullReconciliationSnapshot(
 
 internal static class ProtocolIdentity
 {
-    public static string Envelope(NodeCommand command, string idempotencyKey) =>
-        Join(idempotencyKey, command.CanonicalIdentity());
+    public static string Envelope(NodeCommand? command, string? idempotencyKey) =>
+        Join(idempotencyKey, command?.CanonicalIdentity());
 
-    public static string Join(params string[] values) =>
-        string.Concat(values.Select(static value => $"{value.Length}:{value};"));
+    public static string Join(params string?[] values) =>
+        string.Concat(values.Select(static value =>
+        {
+            var normalised = value ?? string.Empty;
+            return $"{normalised.Length}:{normalised};";
+        }));
 }

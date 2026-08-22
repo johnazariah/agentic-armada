@@ -163,3 +163,31 @@ session-adapter port with deterministic in-memory interpreter, and the typed
 **Compatibility:** consumes existing `armada.io/v1alpha1` resources and does
 not add GitHub projections, live Copilot orchestration, node process logic or
 consumer `.armada/` configuration.
+
+## PR 6: Simulator, chaos and security assurance
+
+**Scope:** add deterministic assurance scenarios over the existing pure,
+application, node/session, and GitHub boundaries. No live deployment or new
+runtime authority is introduced.
+
+**Acceptance evidence:**
+
+- Concurrent CAS/idempotency tests retain one durable commit and distinguish an
+  exact replay from a changed command.
+- Node restart/reconnect snapshots, replay windows, duplicate delivery,
+  cancellation, process-start expiry, local journal alteration/rollback, and
+  malformed command inputs are deterministic and return exact typed failures.
+- Major Domo/session tests retain one active Issue Master, require durable
+  disappearance handoff, preserve parent/child bindings, and reject
+  cross-project or cross-organisation operations.
+- Evidence and GitHub tests reject missing, substituted, tampered, malformed,
+  or untrusted release content; GitHub projections remain non-authoritative.
+- PFQE observation candidates preserve immutable evidence and cannot import
+  readiness or workload authority.
+- `.project/threat-model/002-assurance-security-review.md` maps tested threats
+  to evidence, records remaining blockers, and defines independent
+  pre-deployment review criteria. It does not approve deployment.
+
+**Compatibility:** exercises the accepted v1 GitHub/GitHubCopilot/GitHubRelease
+contracts only. Desired node operations remain typed contracts; no cordon,
+drain, revoke, or upgrade controller is added.

@@ -71,6 +71,28 @@ public sealed class NodeAgentBoundary
         OutboundEnvelope<NodeCommand> envelope,
         CancellationToken cancellationToken)
     {
+        if (envelope is null)
+        {
+            return new Result<NodeCommandAcknowledgement, NodeAgentFailure>.Failure(
+                new("invalid-envelope", "A node command envelope is required."));
+        }
+
+        if (envelope.Payload is null ||
+            string.IsNullOrWhiteSpace(envelope.IdempotencyKey) ||
+            envelope.MessageId == Guid.Empty ||
+            envelope.CorrelationId == Guid.Empty)
+        {
+            return new Result<NodeCommandAcknowledgement, NodeAgentFailure>.Success(
+                new(
+                    envelope.MessageId,
+                    envelope.CorrelationId,
+                    envelope.IdempotencyKey ?? string.Empty,
+                    Accepted: false,
+                    Duplicate: false,
+                    "invalid-envelope-identity",
+                    "Commands require a payload plus non-empty message, correlation, and idempotency identities."));
+        }
+
         await operationGate.WaitAsync(cancellationToken);
         try
         {

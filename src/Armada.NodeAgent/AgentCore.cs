@@ -240,6 +240,18 @@ public static class CommandValidation
         LocalIsolationCapabilities capabilities,
         DateTimeOffset now)
     {
+        if (envelope.Payload is null)
+        {
+            return Reject(envelope, "invalid-command-payload", "A node command payload is required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(envelope.IdempotencyKey) ||
+            envelope.MessageId == Guid.Empty ||
+            envelope.CorrelationId == Guid.Empty)
+        {
+            return Reject(envelope, "invalid-envelope-identity", "Commands require non-empty message, correlation, and idempotency identities.");
+        }
+
         var payloadIdentity = ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey);
         if (state.ProcessedCommands.TryGetValue(envelope.IdempotencyKey, out var processed))
         {
@@ -342,6 +354,10 @@ public static class CommandValidation
         if (command.LeaseReference.Value == Guid.Empty)
         {
             return Reject(envelope, "missing-authority-binding", "Cancellation commands require a lease binding.", advancesSequence: true);
+        }
+        if (string.IsNullOrWhiteSpace(command.Reason))
+        {
+            return Reject(envelope, "invalid-command-binding", "Cancellation commands require an exact reason.", advancesSequence: true);
         }
         if (!state.Attempts.TryGetValue(command.AttemptId, out var attempt) || attempt.ProjectId != command.ProjectId)
         {
