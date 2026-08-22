@@ -25,6 +25,9 @@ inputs, and enabled hosting-URL preference configuration are rejected before
 startup so they cannot add a public listener. Readiness requires explicit lab
 mode, local PostgreSQL configuration and reachability, operator-applied schema
 management, and a locally verified content-addressed restore-drill artifact.
+The published `ARMADA_` environment namespace maps to root application
+configuration sections while an independent raw environment snapshot remains available to
+reject unsafe `ASPNETCORE_` and `DOTNET_` hosting aliases.
 JSON configuration reload is disabled: the control plane uses code-only Kestrel
 endpoints. Restore artifacts are opened on macOS with no-follow semantics,
 validated from the opened descriptor as regular, and hashed from that same
@@ -52,6 +55,7 @@ execution, and production/scientific authority remain unavailable.
 | Cross-project leakage on a shared node | schedule only to an enforceable workload isolation profile: dedicated node, isolated container or ephemeral VM; no concurrent cross-project process-only execution |
 | Operator error/recovery event | least-privileged RBAC, append-only audit, tested backup/restore and named recovery ceremony |
 | Accidental exposure of the lab baseline | explicit lab opt-in, validated IP-loopback Kestrel binding, rejection of configured endpoint/URL/port/hosting-preference overrides, liveness/readiness separation, no authority endpoint, and a secret-free checked-in template |
+| Environment namespace correction hides a hosting override | prefix-scoped `ARMADA_` configuration binds documented application variables, while an independent raw environment snapshot rejects all endpoint, URL, port, and hosting-preference forms even when an `ARMADA_` value is empty |
 | Kestrel configuration reload adds a listener | code-only Kestrel configuration and non-reloadable JSON sources; listener changes require a reviewed process restart |
 | Empty-builder host cannot serve liveness | explicit Kestrel server registration before the validated code-only listener is configured; a loopback process-level test starts, queries, and stops that exact bootstrap path |
 | Forged or changed restore evidence | exact SHA-256 verification of a regular local artifact; missing, directory, symlink, unreadable, and tampered artifacts fail readiness |

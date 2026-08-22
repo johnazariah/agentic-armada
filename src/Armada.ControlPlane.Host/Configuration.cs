@@ -228,8 +228,15 @@ public static class HostBindingConfiguration
         ArgumentNullException.ThrowIfNull(configuration);
 
         var failures = ImmutableArray.CreateBuilder<HostBindingConfigurationFailure>();
+        var rawEnvironment = new ConfigurationBuilder()
+            .AddEnvironmentVariables()
+            .Build();
         var endpoints = configuration.GetSection("Kestrel:Endpoints");
-        if (!string.IsNullOrWhiteSpace(endpoints.Value) || endpoints.GetChildren().Any())
+        var rawEndpoints = rawEnvironment.GetSection("Kestrel:Endpoints");
+        if (!string.IsNullOrWhiteSpace(endpoints.Value) ||
+            endpoints.GetChildren().Any() ||
+            !string.IsNullOrWhiteSpace(rawEndpoints.Value) ||
+            rawEndpoints.GetChildren().Any())
         {
             failures.Add(new(
                 "configured-kestrel-endpoint",
@@ -239,6 +246,9 @@ public static class HostBindingConfiguration
         if (!string.IsNullOrWhiteSpace(configuration["urls"]) ||
             !string.IsNullOrWhiteSpace(configuration["ASPNETCORE_URLS"]) ||
             !string.IsNullOrWhiteSpace(configuration["DOTNET_URLS"]) ||
+            !string.IsNullOrWhiteSpace(rawEnvironment["urls"]) ||
+            !string.IsNullOrWhiteSpace(rawEnvironment["ASPNETCORE_URLS"]) ||
+            !string.IsNullOrWhiteSpace(rawEnvironment["DOTNET_URLS"]) ||
             !string.IsNullOrWhiteSpace(hostUrls))
         {
             failures.Add(new(
@@ -253,6 +263,14 @@ public static class HostBindingConfiguration
                 "ASPNETCORE_HTTP_PORTS",
                 "ASPNETCORE_HTTPS_PORTS",
                 "DOTNET_HTTP_PORTS",
+                "DOTNET_HTTPS_PORTS") ||
+            HasConfiguredValue(
+                rawEnvironment,
+                "http_ports",
+                "https_ports",
+                "ASPNETCORE_HTTP_PORTS",
+                "ASPNETCORE_HTTPS_PORTS",
+                "DOTNET_HTTP_PORTS",
                 "DOTNET_HTTPS_PORTS"))
         {
             failures.Add(new(
@@ -262,6 +280,11 @@ public static class HostBindingConfiguration
 
         if (HasEnabledValue(
                 configuration,
+                "preferHostingUrls",
+                "ASPNETCORE_PREFERHOSTINGURLS",
+                "DOTNET_PREFERHOSTINGURLS") ||
+            HasEnabledValue(
+                rawEnvironment,
                 "preferHostingUrls",
                 "ASPNETCORE_PREFERHOSTINGURLS",
                 "DOTNET_PREFERHOSTINGURLS"))

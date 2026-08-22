@@ -48,6 +48,7 @@ public static class ControlPlaneHostConfiguration
             .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
             .AddJsonFile($"appsettings.{environmentName}.json", optional: true, reloadOnChange: false)
             .AddEnvironmentVariables()
+            .AddEnvironmentVariables(prefix: "ARMADA_")
             .AddCommandLine(arguments);
     }
 

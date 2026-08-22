@@ -1,4 +1,5 @@
 using Armada.ControlPlane.Host;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 var environmentName = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")
     ?? Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT")
@@ -28,9 +29,9 @@ public static class ControlPlaneHostApplication
 
         builder.Services.AddRouting();
         builder.Services.AddSingleton(options);
-        builder.Services.AddSingleton<IRestoreEvidenceVerifier, LocalRestoreEvidenceVerifier>();
-        builder.Services.AddSingleton<IPostgresReadinessProbe, PostgresReadinessProbe>();
-        builder.Services.AddSingleton<IControlPlaneReadiness, ControlPlaneReadiness>();
+        builder.Services.TryAddSingleton<IRestoreEvidenceVerifier, LocalRestoreEvidenceVerifier>();
+        builder.Services.TryAddSingleton<IPostgresReadinessProbe, PostgresReadinessProbe>();
+        builder.Services.TryAddSingleton<IControlPlaneReadiness, ControlPlaneReadiness>();
 
         var app = builder.Build();
 
