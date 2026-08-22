@@ -5,7 +5,8 @@ unmerged private contract.
 
 1. **Contracts and lifecycle:** add `.project` records, schemas/protobuf,
    immutable domain types and state-machine tests for valid/invalid/replayed
-   transitions.
+   transitions. Establish the property-testing and 85% coverage gate from
+   `.project/spec/007-testing-and-quality.md`.
 2. **Control plane:** PostgreSQL migrations, CAS repository, ledger/outbox,
    API and deterministic admission/scheduler/lease/evidence controllers.
 3. **Node agent:** signed .NET agent, enrolment/mTLS, local journal,

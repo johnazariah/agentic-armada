@@ -27,6 +27,7 @@ records and delivery plans live here before corresponding implementation code.
 | `journal/` | Append-only product and design activity record |
 | `adr/` | Architecture decision records |
 | `spec/` | Normative requirements and protocol specifications |
+| `spec/007-testing-and-quality.md` | Required property-testing and coverage policy |
 | `threat-model/` | Assets, trust boundaries, threats and controls |
 | `migration/` | PFQE migration and evidence preservation records |
 | `plan/` | Reviewable PR decomposition and acceptance criteria |
