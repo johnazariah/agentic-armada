@@ -77,6 +77,8 @@ public sealed record GitHubSourceProfile(RepositoryName Repository);
 
 public sealed record GitHubCopilotSessionProfile(Sha256Digest ProfileDigest);
 
+public sealed record GitHubCopilotSessionProvider;
+
 public sealed record GitHubReleaseEvidenceArchiveProfile(RepositoryName Repository);
 
 public sealed record GitHubIssue(int Number, string? NodeId = null);
@@ -200,7 +202,7 @@ public sealed record WorkloadSpec(
     string SourceRevision,
     Sha256Digest ConfigDigest,
     ImmutableHashSet<string> ActionSchemas,
-    GitHubCopilotSessionProfile SessionProvider,
+    GitHubCopilotSessionProvider SessionProvider,
     SessionAuthority SessionAuthority,
     IsolationProfile IsolationProfile,
     GitHubIssue GitHubIssue,

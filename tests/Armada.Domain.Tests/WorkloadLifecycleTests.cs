@@ -138,6 +138,45 @@ public sealed class WorkloadLifecycleTests
     }
 
     [Fact]
+    public void Start_rejects_a_lease_that_outlives_admission_authority()
+    {
+        var fixture = new LifecycleFixture();
+        var lifecycle = fixture.ProgressToStartApproved() with
+        {
+            AdmissionExpiresAt = DateTimeOffset.Parse("2028-01-01T00:00:00Z")
+        };
+
+        var result = WorkloadLifecycleTransitions.Apply(
+            lifecycle,
+            fixture.Start(lifecycle, fixture.Lease(expiresAt: DateTimeOffset.Parse("2030-01-01T00:00:00Z"))));
+
+        Assert.Equal(
+            "invalid-lease-binding",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Start_approval_rejects_expired_admission_authority()
+    {
+        var fixture = new LifecycleFixture();
+        var desired = fixture.Desired();
+        var admitted = Apply(
+            desired,
+            fixture.Admit(
+                desired,
+                expiresAt: DateTimeOffset.Parse("2028-01-01T00:00:00Z"),
+                evaluatedAt: DateTimeOffset.Parse("2027-01-01T00:00:00Z")));
+        var assigned = Apply(admitted, fixture.Assign(admitted));
+        var claimed = Apply(assigned, fixture.Claim(assigned));
+
+        var result = WorkloadLifecycleTransitions.Apply(claimed, fixture.Approve(claimed));
+
+        Assert.Equal(
+            "invalid-lease-binding",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
     public void Assignment_outside_the_admitted_node_is_rejected()
     {
         var fixture = new LifecycleFixture();
@@ -221,7 +260,9 @@ internal sealed class LifecycleFixture
 
     public AdmitWorkload Admit(
         WorkloadLifecycle lifecycle,
-        SessionAuthority sessionAuthority = SessionAuthority.IssueMaster) =>
+        SessionAuthority sessionAuthority = SessionAuthority.IssueMaster,
+        DateTimeOffset? expiresAt = null,
+        DateTimeOffset? evaluatedAt = null) =>
         new(
             TransitionId.New(),
             lifecycle.ResourceVersion,
@@ -242,9 +283,9 @@ internal sealed class LifecycleFixture
                     ImmutableArray<Sha256Digest>.Empty,
                     ImmutableHashSet<string>.Empty,
                     Digest,
-                    DateTimeOffset.Parse("2030-01-01T00:00:00Z")),
+                    expiresAt ?? DateTimeOffset.Parse("2030-01-01T00:00:00Z")),
                 new AdmissionDecisionStatus(CommonStatus(), AdmissionVerdict.Admitted, Digest)),
-            DateTimeOffset.Parse("2029-01-01T00:00:00Z"));
+            evaluatedAt ?? DateTimeOffset.Parse("2029-01-01T00:00:00Z"));
 
     public AssignWorkload Assign(WorkloadLifecycle lifecycle) =>
         new(

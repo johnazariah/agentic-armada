@@ -28,6 +28,7 @@ public sealed record WorkloadLifecycle(
     SessionAuthority? AdmittedSessionAuthority,
     Sha256Digest? AdmittedBundleDigest,
     Sha256Digest? AdmittedPolicyDigest,
+    DateTimeOffset? AdmissionExpiresAt,
     ResourceId? AssignedNodeReference,
     ResourceId? AttemptReference,
     ResourceId? LeaseReference,
@@ -44,6 +45,7 @@ public sealed record WorkloadLifecycle(
             generation,
             resourceVersion,
             WorkloadLifecycleState.Desired,
+            null,
             null,
             null,
             null,
@@ -235,7 +237,8 @@ public static class WorkloadLifecycleTransitions
             admittedNodeReference: decision.Spec.NodeReference,
             admittedSessionAuthority: decision.Spec.SessionAuthority,
             admittedBundleDigest: decision.Spec.BundleDigest,
-            admittedPolicyDigest: decision.Spec.PolicyDigest);
+            admittedPolicyDigest: decision.Spec.PolicyDigest,
+            admissionExpiresAt: decision.Spec.ExpiresAt);
     }
 
     private static Result<WorkloadLifecycle, LifecycleFailure> ApplyAssignment(
@@ -306,6 +309,8 @@ public static class WorkloadLifecycleTransitions
         var lease = command.Lease;
         if (lifecycle.AttemptReference is null ||
             lifecycle.AssignedNodeReference is null ||
+            lifecycle.AdmissionExpiresAt is null ||
+            lifecycle.AdmissionExpiresAt <= command.EvaluatedAt ||
             lease.Spec.AttemptReference != lifecycle.AttemptReference ||
             lease.Spec.NodeReference != lifecycle.AssignedNodeReference ||
             lease.Spec.ExpiresAt <= command.EvaluatedAt ||
@@ -313,7 +318,7 @@ public static class WorkloadLifecycleTransitions
         {
             return Failure(
                 "invalid-lease-binding",
-                "Start approval requires a current, unrevoked lease bound to the claimed attempt and assigned node.");
+                "Start approval requires unexpired admission authority and a current, unrevoked lease bound to the claimed attempt and assigned node.");
         }
 
         return Succeed(
@@ -354,6 +359,8 @@ public static class WorkloadLifecycleTransitions
 
         var lease = command.Lease;
         if (lifecycle.LeaseReference is null ||
+            lifecycle.AdmissionExpiresAt is null ||
+            lifecycle.AdmissionExpiresAt <= command.EvaluatedAt ||
             lease.Metadata.Uid != lifecycle.LeaseReference ||
             lease.Spec.AttemptReference != lifecycle.AttemptReference ||
             lease.Spec.NodeReference != lifecycle.AssignedNodeReference ||
@@ -362,7 +369,7 @@ public static class WorkloadLifecycleTransitions
         {
             return Failure(
                 "invalid-lease-binding",
-                "Running requires the current, unrevoked lease approved for the claimed attempt and assigned node.");
+                "Running requires unexpired admission authority and the current, unrevoked lease approved for the claimed attempt and assigned node.");
         }
 
         return Succeed(
@@ -433,6 +440,7 @@ public static class WorkloadLifecycleTransitions
         SessionAuthority? admittedSessionAuthority = null,
         Sha256Digest? admittedBundleDigest = null,
         Sha256Digest? admittedPolicyDigest = null,
+        DateTimeOffset? admissionExpiresAt = null,
         ResourceId? assignedNodeReference = null,
         ResourceId? attemptReference = null,
         ResourceId? leaseReference = null,
@@ -448,6 +456,7 @@ public static class WorkloadLifecycleTransitions
                 AdmittedSessionAuthority = admittedSessionAuthority ?? lifecycle.AdmittedSessionAuthority,
                 AdmittedBundleDigest = admittedBundleDigest ?? lifecycle.AdmittedBundleDigest,
                 AdmittedPolicyDigest = admittedPolicyDigest ?? lifecycle.AdmittedPolicyDigest,
+                AdmissionExpiresAt = admissionExpiresAt ?? lifecycle.AdmissionExpiresAt,
                 AssignedNodeReference = assignedNodeReference ?? lifecycle.AssignedNodeReference,
                 AttemptReference = attemptReference ?? lifecycle.AttemptReference,
                 LeaseReference = leaseReference ?? lifecycle.LeaseReference,
