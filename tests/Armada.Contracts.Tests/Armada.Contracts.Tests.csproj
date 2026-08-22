@@ -13,7 +13,7 @@
     <ThresholdType Condition="'$(ThresholdType)' == ''">line</ThresholdType>
     <ThresholdStat Condition="'$(ThresholdStat)' == ''">total</ThresholdStat>
     <CoverletOutput>$(BaseIntermediateOutputPath)coverage/</CoverletOutput>
-    <ExcludeByFile>**/src/Armada.Contracts/obj/**/Resources.cs</ExcludeByFile>
+    <ExcludeByFile>**/src/Armada.Contracts/obj/**/Resources.cs,**/src/Armada.Contracts/obj/**/NodeTransport.cs,**/src/Armada.Contracts/obj/**/NodeTransportGrpc.cs</ExcludeByFile>
   </PropertyGroup>
 
   <ItemGroup>

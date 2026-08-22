@@ -24,6 +24,17 @@ Each PR must include its acceptance criteria in its linked `.project/plan/`
 record, focused tests, protocol compatibility statement and any ADR it relies
 on or supersedes.
 
+## PR A: Lab node enrolment and transport contracts
+
+**Scope:** add `armada.node.transport/v1alpha1` protobuf/gRPC contracts,
+immutable enrolment and transport DTOs, pure validation and replay decisions,
+and narrow ports only. It introduces no resource mutation, CA, persistence,
+listener, client, node filesystem or executable.
+
+**Compatibility:** this is a separate versioned transport family and leaves
+`armada.io/v1alpha1` resources and JSON unchanged. The detailed three-PR
+decomposition is `.project/plan/004-lab-node-enrolment-and-transport.md`.
+
 ## PR 1: Contracts and lifecycle
 
 **Scope:** introduce the .NET 10 `Armada.Contracts` and `Armada.Domain`
@@ -74,9 +85,10 @@ includes only its directly tested production assembly. `SkipAutoProps=true`
 omits only compiler-generated record/DTO auto-property accessors; all
 hand-written contract, mapper and lifecycle source remains measured. The
 Contracts test project also excludes only
-`src/Armada.Contracts/obj/**/Resources.cs`, the protobuf compiler output; the
-versioned source `.proto` remains build-validated and the generated file
-contains no hand-written production logic.
+`src/Armada.Contracts/obj/**/Resources.cs` and the matching
+`NodeTransport.cs`/`NodeTransportGrpc.cs`, protobuf compiler output; the
+versioned source `.proto` remains build-validated and generated files contain
+no hand-written production logic.
 
 ## PR 2: Authoritative control plane foundation
 
