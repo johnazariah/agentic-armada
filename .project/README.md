@@ -32,3 +32,4 @@ records and delivery plans live here before corresponding implementation code.
 | `migration/` | PFQE migration and evidence preservation records |
 | `plan/` | Reviewable PR decomposition and acceptance criteria |
 | `releases/` | Signed release manifests and compatibility records |
+| `runbooks/` | Operator procedures and safety boundaries |

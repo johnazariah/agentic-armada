@@ -14,6 +14,21 @@ adapter, GitHub integration and GitHub evidence archive are separate trust
 zones. GitHub text and repository content are untrusted input. Node inventory
 is an observation, not authority.
 
+## Lab baseline topology
+
+The lab control plane and PostgreSQL run on the Mac. The first future node is
+the disposable Ubuntu WSL instance `johnaz-phd-wsl`. The baseline host binds
+only to loopback and has no node transport, so WSL cannot reach it and no node
+may infer enrolment or authority from a liveness response. Readiness requires
+explicit lab mode, local PostgreSQL configuration and reachability,
+operator-applied schema management, and current restore-drill evidence.
+
+This is a configuration and dependency gate, not evidence that a backup can be
+restored or that a lab deployment is safe. Operators must keep the restore drill
+and schema procedure outside the host. mTLS/node enrolment, GitHub credentials,
+Copilot adapters, signing/key custody, installers, package downloads, workload
+execution, and production/scientific authority remain unavailable.
+
 ## Principal threats and controls
 
 | Threat | Control |
@@ -29,6 +44,8 @@ is an observation, not authority.
 | Credential exfiltration | short-lived workload-scoped grants, no shared token, explicit secret capability and evidence redaction |
 | Cross-project leakage on a shared node | schedule only to an enforceable workload isolation profile: dedicated node, isolated container or ephemeral VM; no concurrent cross-project process-only execution |
 | Operator error/recovery event | least-privileged RBAC, append-only audit, tested backup/restore and named recovery ceremony |
+| Accidental exposure of the lab baseline | explicit lab opt-in, loopback-only binding, liveness/readiness separation, no authority endpoint, and a secret-free checked-in template |
+| Readiness mistaken for deployment approval | readiness checks only local configuration, restore-drill metadata and PostgreSQL reachability; the runbook prohibits node attachment or workload operation |
 
 ## Security gates
 
