@@ -19,9 +19,9 @@
 
 ## Quality evidence
 
-The local host has the Docker client but no reachable Docker daemon/socket and
-no local PostgreSQL instance. Direct Npgsql execution methods are therefore
-narrowly excluded with their reason recorded in code and plan 001. The
-control-plane maintainer owns replacement with supported real PostgreSQL
-integration coverage by 2026-09-30; SQL schema and repository semantics remain
-tested deterministically in the interim.
+PostgreSQL integration coverage now exercises migration idempotence, concurrent
+CAS, ledger/outbox atomicity and immutable idempotency snapshots. CI provides a
+PostgreSQL 16 service through `ARMADA_POSTGRES_CONNECTION`; local `Verify`
+reports the same required connection variable and Docker bootstrap command when
+the prerequisite is absent. No executable persistence code is excluded from
+coverage.

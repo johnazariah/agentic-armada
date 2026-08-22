@@ -1,13 +1,10 @@
 using System.Text.Json;
-using System.Diagnostics.CodeAnalysis;
 using Armada.Application;
 using Armada.Contracts;
 using Npgsql;
 
 namespace Armada.Infrastructure.Postgres;
 
-// Owner: control-plane maintainer. Replace with real PostgreSQL integration coverage by 2026-09-30.
-[ExcludeFromCodeCoverage(Justification = "Requires a live PostgreSQL service; deterministic port and SQL contract tests cover CAS and atomicity semantics until 2026-09-30.")]
 public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IResourceRepository
 {
     public async Task<PersistedResource?> GetAsync(ResourceId id, CancellationToken cancellationToken)
@@ -72,6 +69,17 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
 
         if (!changed)
         {
+            var concurrentlyCommitted = await FindCommitByIdempotencyKeyAsync(
+                connection,
+                transaction,
+                commit.LedgerEvent.IdempotencyKey,
+                cancellationToken);
+            if (concurrentlyCommitted is not null)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                return new ResourceStoreResult.AlreadyApplied(concurrentlyCommitted);
+            }
+
             var actual = await GetVersionAsync(connection, transaction, commit.Resource.Id, cancellationToken);
             await transaction.RollbackAsync(cancellationToken);
             return new ResourceStoreResult.Conflict(actual);

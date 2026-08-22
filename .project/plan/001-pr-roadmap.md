@@ -94,13 +94,16 @@ GitHub adapters remain deferred.
   exact workload generation may be persisted.
 - PostgreSQL schema records current JSON state separately from an append-only
   ledger and idempotent outbox; the ledger rejects updates and deletes.
-- The local environment has Docker installed but no reachable daemon/socket and
-  no local PostgreSQL instance. Deterministic in-memory port tests cover CAS
-  contention, replay and no-partial-write laws; SQL contract tests cover the
-  migration constraints. The two direct Npgsql execution adapters have narrow,
-  documented coverage exclusions owned by the control-plane maintainer. They
-  expire on 2026-09-30 and must be replaced with a supported real PostgreSQL
-  integration suite.
+- PostgreSQL migration and repository integration tests cover CAS contention,
+  ledger/outbox atomicity, immutable replay snapshots and duplicate concurrent
+  delivery. CI starts PostgreSQL 16 and passes
+  `ARMADA_POSTGRES_CONNECTION` to the tracked `Verify` target.
+- Local `Verify` requires the same connection variable. For example:
+  `docker run --rm --name armada-postgres -e POSTGRES_DB=armada -e
+  POSTGRES_USER=armada -e POSTGRES_PASSWORD=armada -p 5432:5432 postgres:16`,
+  then set `ARMADA_POSTGRES_CONNECTION='Host=localhost;Port=5432;Database=armada;Username=armada;Password=armada'`.
+  The integration tests fail with this exact prerequisite rather than skipping
+  persistence coverage.
 
 **Compatibility:** consumes existing `armada.io/v1alpha1` contracts without
 introducing a provider or consumer `.armada/` configuration.
