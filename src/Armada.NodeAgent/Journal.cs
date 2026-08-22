@@ -467,6 +467,12 @@ public sealed class EncryptedFileJournal : INodeJournal
                 }
 
                 var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                if (claim.Phase == UpgradePhase.RollbackClaimed &&
+                    HasActivatedTerminal(snapshot.Entries, claim.IdempotencyKey))
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("upgrade-already-activated", "A durable activated terminal state rejects stale rollback claims."));
+                }
                 if (claim.Phase != UpgradePhase.RollbackClaimed &&
                     HasOutstandingRollback(snapshot.Entries, claim.IdempotencyKey))
                 {
@@ -927,6 +933,16 @@ public sealed class EncryptedFileJournal : INodeJournal
                !upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RolledBack);
     }
 
+    private static bool HasActivatedTerminal(
+        IReadOnlyList<JournalEntry> entries,
+        string idempotencyKey) =>
+        entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Any(upgrade =>
+                upgrade.IdempotencyKey == idempotencyKey &&
+                upgrade.Phase == UpgradePhase.Activated);
+
     private sealed record JournalSnapshot(
         IReadOnlyList<JournalEntry> Entries,
         LocalJournalTailMarker Anchor);
@@ -1003,6 +1019,13 @@ public sealed class InMemoryJournal : INodeJournal
 
         lock (sync)
         {
+            if (claim.Phase == UpgradePhase.RollbackClaimed &&
+                HasActivatedTerminal(claim.IdempotencyKey))
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("upgrade-already-activated", "A durable activated terminal state rejects stale rollback claims.")));
+            }
             if (claim.Phase != UpgradePhase.RollbackClaimed &&
                 HasOutstandingRollback(claim.IdempotencyKey))
             {
@@ -1117,6 +1140,14 @@ public sealed class InMemoryJournal : INodeJournal
         return upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RollbackClaimed) &&
                !upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RolledBack);
     }
+
+    private bool HasActivatedTerminal(string idempotencyKey) =>
+        entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Any(upgrade =>
+                upgrade.IdempotencyKey == idempotencyKey &&
+                upgrade.Phase == UpgradePhase.Activated);
 }
 
 internal sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore

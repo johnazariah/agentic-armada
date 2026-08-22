@@ -586,6 +586,54 @@ public sealed class ReleaseDistributionTests
     }
 
     [Fact]
+    public async Task Durable_activation_rejects_stale_rollback_claims_and_preserves_normal_replay()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var activation = Transition(fixture, plan, UpgradePhase.Activated, fixture.Now, null);
+        var journal = new InMemoryJournal();
+        await journal.AppendAsync(JournalEntry.ForUpgrade(1, fixture.Identity, activation), CancellationToken.None);
+
+        var staleRollback = await journal.ClaimUpgradeTransitionAsync(
+            fixture.Identity,
+            Transition(fixture, plan, UpgradePhase.RollbackClaimed, fixture.Now, fixture.Now.AddMinutes(5)),
+            CancellationToken.None);
+        var normalReplay = await new NodeUpgradeCoordinator(
+            journal,
+            new RecordingStaging(),
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.Equal("upgrade-already-activated", Failure(staleRollback).Code);
+        Assert.True(Success(normalReplay).Activated);
+    }
+
+    [Fact]
+    public async Task Stale_activated_then_rollback_claim_history_fails_closed_instead_of_abandoning_rollback()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var activation = Transition(fixture, plan, UpgradePhase.Activated, fixture.Now, null);
+        var staleRollback = Transition(
+            fixture,
+            plan,
+            UpgradePhase.RollbackClaimed,
+            fixture.Now,
+            fixture.Now.AddMinutes(5));
+        var journal = new InMemoryJournal();
+        await journal.AppendAsync(JournalEntry.ForUpgrade(1, fixture.Identity, activation), CancellationToken.None);
+        await journal.AppendAsync(JournalEntry.ForUpgrade(2, fixture.Identity, staleRollback), CancellationToken.None);
+        var staging = new RecordingStaging();
+
+        var recovery = await new NodeUpgradeCoordinator(
+            journal,
+            staging,
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.Equal("upgrade-already-activated", Failure(recovery).Code);
+        Assert.Empty(staging.Operations);
+    }
+
+    [Fact]
     public async Task Status_failure_after_partial_stage_still_invokes_fenced_rollback()
     {
         var fixture = new ReleaseFixture();

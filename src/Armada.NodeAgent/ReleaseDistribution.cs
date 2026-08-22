@@ -309,15 +309,16 @@ public sealed class NodeUpgradeCoordinator(
             return Failure(historyFailure.Error);
         }
 
-        if (TerminalOutcome(((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value) is { } terminal)
-        {
-            return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(terminal);
-        }
-
         var historyValues = ((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value;
-        if (HasPhase(historyValues, UpgradePhase.RollbackClaimed))
+        if (HasPhase(historyValues, UpgradePhase.RollbackClaimed) &&
+            !HasPhase(historyValues, UpgradePhase.RolledBack))
         {
             return await ResumeRollbackAsync(identity, plan, cancellationToken);
+        }
+
+        if (TerminalOutcome(historyValues) is { } terminal)
+        {
+            return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(terminal);
         }
 
         var staged = await EnsureStageAsync(identity, plan, cancellationToken);
