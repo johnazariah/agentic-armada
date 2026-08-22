@@ -4,6 +4,7 @@
     <Project Path="src/Armada.Domain/Armada.Domain.csproj" />
     <Project Path="src/Armada.NodeAgent/Armada.NodeAgent.csproj" />
     <Project Path="src/Armada.Application/Armada.Application.csproj" />
+    <Project Path="src/Armada.Infrastructure.GitHub/Armada.Infrastructure.GitHub.csproj" />
     <Project Path="src/Armada.Infrastructure.Postgres/Armada.Infrastructure.Postgres.csproj" />
   </Folder>
   <Folder Name="/tests/">
@@ -12,5 +13,6 @@
     <Project Path="tests/Armada.NodeAgent.Tests/Armada.NodeAgent.Tests.csproj" />
     <Project Path="tests/Armada.Application.Tests/Armada.Application.Tests.csproj" />
     <Project Path="tests/Armada.Infrastructure.Postgres.Tests/Armada.Infrastructure.Postgres.Tests.csproj" />
+    <Project Path="tests/Armada.Infrastructure.GitHub.Tests/Armada.Infrastructure.GitHub.Tests.csproj" />
   </Folder>
 </Solution>

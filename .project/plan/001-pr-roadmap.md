@@ -107,3 +107,31 @@ GitHub adapters remain deferred.
 
 **Compatibility:** consumes existing `armada.io/v1alpha1` contracts without
 introducing a provider or consumer `.armada/` configuration.
+
+## PR 5: GitHub projection, evidence archive and PFQE observer migration
+
+**Scope:** add asynchronous projection from immutable committed outbox events,
+typed GitHub Release evidence verification, and observation-first PFQE migration
+tooling. GitHub remains a non-authoritative human view and archive boundary.
+
+**Acceptance evidence:**
+
+- Projection maps only committed ledger/outbox snapshots through typed targets,
+  persists idempotent external receipts, retries unacknowledged failures and
+  cannot use GitHub content to change Armada authority.
+- Evidence verification independently retrieves the exact GitHub release
+  evidence, manifest and provenance assets; validates provider, repository,
+  release, names and byte digests; and requires a configured trusted-signer
+  verifier before reporting success.
+- PFQE inventory preserves immutable evidence, identity and host-boundary
+  references. Candidates are observer-only, cannot import readiness or workload
+  authority, and require immutable evidence for every stage, including an
+  explicitly non-scientific canary.
+- Focused adversarial/replay tests pass with 87.39% application and 93.82%
+  GitHub adapter line coverage. The repository's tracked PostgreSQL
+  verification passed in GitHub Actions run 32583199545; the local host
+  explicitly rejects missing PostgreSQL coverage rather than skipping it.
+
+**Compatibility:** consumes only the accepted v1 GitHub/GitHubRelease typed
+profiles. It creates no product-root `.armada/` configuration and introduces no
+scientific, live-deployment or provider authority path.

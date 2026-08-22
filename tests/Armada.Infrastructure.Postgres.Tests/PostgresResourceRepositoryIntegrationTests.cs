@@ -226,6 +226,48 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
         Assert.Equal("3", (await Repository.GetAsync(project.Metadata.Uid, CancellationToken.None))!.ResourceVersion.Value);
     }
 
+    [Fact]
+    public async Task Committed_outbox_events_and_projection_receipts_are_replay_safe()
+    {
+        await ResetAsync();
+        var commit = CreateCommit(Project());
+        Assert.IsType<ResourceStoreResult.Committed>(await Repository.CreateAsync(commit, CancellationToken.None));
+        var reader = new PostgresCommittedOutboxEventReader(Source);
+        var projected = Assert.Single(await reader.ReadAsync(1, CancellationToken.None));
+        var target = new GitHubProjectionTarget(GitHubRepository("octo/armada"), 17, "workload-status");
+        var receipt = new GitHubProjectionReceipt(
+            projected.LedgerEvent.Id,
+            target,
+            $"{projected.OutboxMessage.IdempotencyKey}:github",
+            Digest('c'),
+            "https://github.example/octo/armada/issues/17",
+            Now);
+        var store = new PostgresGitHubProjectionReceiptStore(Source);
+
+        var first = await store.RecordAsync(receipt, CancellationToken.None);
+        var replay = await store.RecordAsync(
+            receipt with { ExternalReference = "untrusted-replacement" },
+            CancellationToken.None);
+        var found = await store.FindAsync(projected.LedgerEvent.Id, target, CancellationToken.None);
+        await reader.AcknowledgeAsync(projected.OutboxMessage.Id, Now, CancellationToken.None);
+        var pendingAfterAcknowledgement = await reader.ReadAsync(1, CancellationToken.None);
+
+        Assert.Equal(commit.LedgerEvent.Id, projected.LedgerEvent.Id);
+        Assert.Equal(commit.OutboxMessage.IdempotencyKey, projected.OutboxMessage.IdempotencyKey);
+        Assert.Equal(first, replay);
+        Assert.Equal(first, found);
+        Assert.Empty(pendingAfterAcknowledgement);
+    }
+
+    [Fact]
+    public async Task Outbox_reader_requires_a_positive_batch_size()
+    {
+        var reader = new PostgresCommittedOutboxEventReader(Source);
+
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+            () => reader.ReadAsync(0, CancellationToken.None));
+    }
+
     private NpgsqlDataSource Source => dataSource ?? throw new InvalidOperationException("The PostgreSQL data source was not initialised.");
     private PostgresResourceRepository Repository => repository ?? throw new InvalidOperationException("The PostgreSQL repository was not initialised.");
 
@@ -233,7 +275,7 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
     {
         await using var connection = await Source.OpenConnectionAsync();
         await using var command = new NpgsqlCommand(
-            "TRUNCATE armada_outbox, armada_event_ledger, armada_current_resources;",
+            "TRUNCATE armada_github_projection_receipts, armada_outbox, armada_event_ledger, armada_current_resources;",
             connection);
         await command.ExecuteNonQueryAsync();
     }
