@@ -10,7 +10,9 @@
 - Resource creation and CAS spec updates generate an immutable ledger event and
   idempotent transactional-outbox message. Admission decisions are persisted
   only when an admission-policy port returns an unexpired decision bound to the
-  exact workload generation and project scope.
+  exact workload generation, project scope, bundle/policy, source repository,
+  source revision, configuration digest, session authority, isolation profile,
+  resource limits and permitted actions.
 - Added PostgreSQL migration and repository boundary for authoritative current
   resources, append-only ledger and outbox. GitHub is not read as state and no
   node, session, process, GitHub or HTTP adapter was added.

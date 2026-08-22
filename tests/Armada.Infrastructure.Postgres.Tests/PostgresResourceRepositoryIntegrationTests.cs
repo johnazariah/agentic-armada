@@ -135,6 +135,38 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Concurrent_replay_with_different_command_metadata_is_rejected()
+    {
+        await ResetAsync();
+        var project = Project();
+        var service = new ResourceApplicationService(Repository);
+        Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Success>(
+            await service.CreateAsync(
+                new CreateResourceCommand(project, new ActorId("api-user"), Guid.NewGuid(), null, Now),
+                CancellationToken.None));
+        var command = UpdateCommand(project.Metadata.Uid, new ResourceVersion("1"), 1, TransitionId.New());
+        var conflicting = command with
+        {
+            Actor = new ActorId("different-actor"),
+            CorrelationId = Guid.NewGuid()
+        };
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deliveries = new[]
+        {
+            DeliverAsync(service, command, start.Task),
+            DeliverAsync(service, conflicting, start.Task)
+        };
+
+        start.SetResult();
+        var results = await Task.WhenAll(deliveries);
+
+        Assert.Equal(
+            "idempotency-key-reused",
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Failure>(
+                Assert.Single(results, static result => result is Result<ResourceStoreResult, ResourceCommandFailure>.Failure)).Error.Code);
+    }
+
+    [Fact]
     public async Task Idempotency_lookup_returns_the_original_snapshot_after_later_updates()
     {
         await ResetAsync();

@@ -39,7 +39,7 @@ need `If-Match: <resourceVersion>` or the corresponding gRPC field.
 | `Capability` | requested capability scope | controller-verified inventory and scope verdict | organisation-scoped; a node cannot grant itself capabilities |
 | `Project` | GitHub repository allowlist, GitHub release evidence archive, Copilot profile and policy bundle | project conditions and quota observations | first-class workload isolation boundary |
 | `Workload` | project-owned GitHub bundle, resources, policy, isolation/evidence/session requirements | lifecycle, assignment, owner, deadlines, conditions | source/config/action identities are exact |
-| `AdmissionDecision` | immutable typed policy verdict: node, actions, resources, network/credential grants, session authority, isolation/evidence and expiry | decision and digest | binds the workload generation to executable authority |
+| `AdmissionDecision` | immutable typed policy verdict: exact workload source repository/revision/config, node, actions, resources, network/credential grants, session authority, isolation/evidence and expiry | decision and digest | binds the workload generation and executable source identity to authority |
 | `Attempt` | immutable workload/node/policy/bundle/admission binding | execution and terminal observation | IDs never repeat; retry means new attempt |
 | `Lease` | immutable attempt/holder/epoch/expiry binding | heartbeat and revocation observations | only valid lease authorises running work |
 | `AgentSession` | adapter/session role and capability envelope | liveness, ownership, successor, archive progress | one active Issue Master per workload generation |

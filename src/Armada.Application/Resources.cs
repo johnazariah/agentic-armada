@@ -466,6 +466,10 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
     private static bool IsMatchingReplay(ResourceCommit prior, UpdateResourceSpecCommand command)
     {
         if (prior.Resource.Id != command.ResourceId ||
+            prior.LedgerEvent.Actor != command.Actor ||
+            prior.LedgerEvent.CorrelationId != command.CorrelationId ||
+            prior.LedgerEvent.CausationId != command.CausationId ||
+            prior.LedgerEvent.OccurredAt != command.OccurredAt ||
             !long.TryParse(command.ExpectedResourceVersion.Value, out var expectedVersion) ||
             !long.TryParse(prior.Resource.ResourceVersion.Value, out var persistedVersion) ||
             persistedVersion != expectedVersion + 1 ||

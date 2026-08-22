@@ -50,6 +50,13 @@ public static class AdmissionDecisions
             return Failure("admission-policy-mismatch", "The decision must bind the workload policy digest.");
         }
 
+        if (command.Decision.Spec.SourceRepository != command.Workload.Spec.Source.Repository ||
+            command.Decision.Spec.SourceRevision != command.Workload.Spec.SourceRevision ||
+            command.Decision.Spec.ConfigDigest != command.Workload.Spec.ConfigDigest)
+        {
+            return Failure("admission-source-binding-mismatch", "The decision must bind the exact workload source repository, revision, and configuration digest.");
+        }
+
         if (command.Decision.Spec.SessionAuthority != command.Workload.Spec.SessionAuthority)
         {
             return Failure("admission-session-authority-mismatch", "The decision must bind the workload session authority.");

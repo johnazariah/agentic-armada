@@ -140,6 +140,25 @@ public sealed class ResourceApplicationTests
     }
 
     [Fact]
+    public async Task Reusing_an_update_transition_identity_with_different_command_metadata_is_rejected()
+    {
+        var repository = new InMemoryResourceRepository();
+        var service = new ResourceApplicationService(repository);
+        var resource = Fixture.Project();
+        await service.CreateAsync(Fixture.Create(resource), CancellationToken.None);
+        var command = Fixture.Update(resource.Metadata.Uid, new ResourceVersion("1"), 7);
+
+        await service.UpdateSpecAsync(command, CancellationToken.None);
+        var replay = await service.UpdateSpecAsync(
+            command with { Actor = new ActorId("different-actor") },
+            CancellationToken.None);
+
+        Assert.Equal(
+            "idempotency-key-reused",
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Failure>(replay).Error.Code);
+    }
+
+    [Fact]
     public async Task Replay_returns_the_original_update_after_later_updates()
     {
         var repository = new InMemoryResourceRepository();
@@ -410,6 +429,7 @@ public sealed class ResourceApplicationTests
         {
             ("admission-bundle-mismatch", decision with { Spec = decision.Spec with { BundleDigest = Fixture.OtherDigest() } }),
             ("admission-policy-mismatch", decision with { Spec = decision.Spec with { PolicyDigest = Fixture.OtherDigest() } }),
+            ("admission-source-binding-mismatch", decision with { Spec = decision.Spec with { SourceRevision = new string('f', 40) } }),
             ("admission-session-authority-mismatch", decision with { Spec = decision.Spec with { SessionAuthority = SessionAuthority.IssueMasterWithChildren } }),
             ("admission-isolation-profile-mismatch", decision with { Spec = decision.Spec with { IsolationProfile = IsolationProfile.IsolatedContainer } }),
             ("admission-resource-limits-mismatch", decision with { Spec = decision.Spec with { ResourceLimits = new ResourceRequirements(101, 0, 1024, 1024) } }),
@@ -567,8 +587,11 @@ internal static class Fixture
                 workload.Metadata.Uid,
                 workload.Metadata.Generation,
                 ResourceId.New(),
-                Digest(),
-                Digest(),
+                workload.Spec.BundleDigest,
+                workload.Spec.PolicyDigest,
+                workload.Spec.Source.Repository,
+                workload.Spec.SourceRevision,
+                workload.Spec.ConfigDigest,
                 ["worktree"],
                 SessionAuthority.IssueMaster,
                 IsolationProfile.DedicatedNode,
