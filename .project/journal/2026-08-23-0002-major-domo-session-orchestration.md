@@ -33,6 +33,9 @@
 - Session operation authority now checks exact organisation/project equality
   across the session, attempt and admission resources. Replacement successor
   ownership is preflighted before any replay/session state is mutated.
+- Pure reconciliation independently validates matching organisation/project
+  scope across workload-owned resources, sessions and evidence, and validates
+  that the organisation-scoped node belongs to the workload organisation.
 
 ## Quality evidence
 

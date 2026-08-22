@@ -250,6 +250,46 @@ public sealed class SessionReconciliationTests
                 fixture.Now)).Code);
     }
 
+    [Fact]
+    public void Reconciliation_refuses_cross_scope_attempt_admission_session_evidence_and_node()
+    {
+        var fixture = new SessionFixture();
+        var runtime = fixture.Runtime(SessionLiveness.Active);
+        var valid = fixture.Input(runtime);
+        var otherProject = new ProjectId(Guid.NewGuid());
+        var otherOrganisation = new OrganisationId(Guid.NewGuid());
+
+        AssertScopeRejected(valid with
+        {
+            Attempt = fixture.Attempt with { Metadata = fixture.Attempt.Metadata with { ProjectId = otherProject } }
+        });
+        AssertScopeRejected(valid with
+        {
+            Admission = fixture.Admission with { Metadata = fixture.Admission.Metadata with { OrganisationId = otherOrganisation } }
+        });
+        AssertScopeRejected(valid with
+        {
+            Sessions = ImmutableArray.Create(runtime with
+            {
+                Session = fixture.Session with { Metadata = fixture.Session.Metadata with { ProjectId = otherProject } }
+            })
+        });
+        AssertScopeRejected(valid with
+        {
+            Node = fixture.Node with { Metadata = fixture.Node.Metadata with { OrganisationId = otherOrganisation } }
+        });
+
+        fixture.Workload = fixture.Workload with
+        {
+            Status = fixture.Workload.Status with { Lifecycle = WorkloadLifecycleState.TerminalPending }
+        };
+        var terminal = fixture.Input(fixture.Runtime(SessionLiveness.Terminal), fixture.Evidence(EvidenceVerification.Verified) with
+        {
+            Metadata = fixture.Metadata("cross-project-evidence") with { ProjectId = otherProject }
+        });
+        AssertScopeRejected(terminal);
+    }
+
     [Property]
     public void Issue_master_keys_are_stable_for_the_same_values(PositiveInt generation)
     {
@@ -266,6 +306,9 @@ public sealed class SessionReconciliationTests
 
     private static SessionReconciliationFailure Failure<T>(Result<T, SessionReconciliationFailure> result) =>
         Assert.IsType<Result<T, SessionReconciliationFailure>.Failure>(result).Error;
+
+    private static void AssertScopeRejected(SessionReconciliationInput input) =>
+        Assert.Equal("reconciliation-scope-mismatch", Failure(MajorDomoReconciliation.Reconcile(input)).Code);
 
     private sealed class SessionFixture
     {

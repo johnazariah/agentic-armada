@@ -345,6 +345,12 @@ public static class MajorDomoReconciliation
     private static Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure> ReconcileTerminal(
         SessionReconciliationInput input)
     {
+        if (!HasMatchingScope(input))
+        {
+            return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Failure(
+                new("reconciliation-scope-mismatch", "Terminal archival requires matching organisation/project scope and a matching node organisation."));
+        }
+
         if (input.Attempt is null ||
             input.Attempt.Spec.WorkloadReference != input.Workload.Metadata.Uid ||
             input.Attempt.Spec.WorkloadGeneration != input.Workload.Metadata.Generation ||
@@ -387,6 +393,11 @@ public static class MajorDomoReconciliation
             input.Workload.Status.Lifecycle is WorkloadLifecycleState.Completed or WorkloadLifecycleState.Failed or WorkloadLifecycleState.Cancelled or WorkloadLifecycleState.Expired)
         {
             return Failure("workload-not-session-reconcilable", "Only assigned, claimed, running, or terminal-pending workloads can be reconciled by Major Domo.");
+        }
+
+        if (!HasMatchingScope(input))
+        {
+            return Failure("reconciliation-scope-mismatch", "Session reconciliation requires matching organisation/project scope and a matching node organisation.");
         }
 
         if (input.Attempt is null ||
@@ -446,12 +457,28 @@ public static class MajorDomoReconciliation
 
     private static bool HasIndependentlyFinalisedEvidence(SessionReconciliationInput input) =>
         input.Evidence is not null &&
+        input.Evidence.Metadata.OrganisationId == input.Workload.Metadata.OrganisationId &&
+        input.Evidence.Metadata.ProjectId == input.Workload.Metadata.ProjectId &&
         input.Evidence.Spec.AttemptReference == input.Attempt!.Metadata.Uid &&
         input.Evidence.Status.Verification == EvidenceVerification.Verified &&
         input.Evidence.Status.VerifiedAt is not null;
 
     private static bool IsTerminal(WorkloadLifecycleState lifecycle) =>
         lifecycle is WorkloadLifecycleState.Completed or WorkloadLifecycleState.Failed or WorkloadLifecycleState.Cancelled or WorkloadLifecycleState.Expired;
+
+    private static bool HasMatchingScope(SessionReconciliationInput input) =>
+        input.Node.Metadata.OrganisationId == input.Workload.Metadata.OrganisationId &&
+        input.Attempt is not null &&
+        input.Attempt.Metadata.OrganisationId == input.Workload.Metadata.OrganisationId &&
+        input.Attempt.Metadata.ProjectId == input.Workload.Metadata.ProjectId &&
+        input.Admission.Metadata.OrganisationId == input.Workload.Metadata.OrganisationId &&
+        input.Admission.Metadata.ProjectId == input.Workload.Metadata.ProjectId &&
+        input.Sessions.All(session =>
+            session.Session.Metadata.OrganisationId == input.Workload.Metadata.OrganisationId &&
+            session.Session.Metadata.ProjectId == input.Workload.Metadata.ProjectId) &&
+        (input.Evidence is null ||
+         input.Evidence.Metadata.OrganisationId == input.Workload.Metadata.OrganisationId &&
+         input.Evidence.Metadata.ProjectId == input.Workload.Metadata.ProjectId);
 
     private static Condition Blocked(
         SessionReconciliationInput input,
