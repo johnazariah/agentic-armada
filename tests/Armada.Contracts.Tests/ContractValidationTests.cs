@@ -2,6 +2,7 @@ using Armada.Contracts;
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Text.Json;
+using FsCheck.Xunit;
 
 namespace Armada.Contracts.Tests;
 
@@ -332,6 +333,41 @@ public sealed class ContractValidationTests
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
     }
 
+    [Theory]
+    [InlineData(0, 0, 1, 1, 0, "invalid-resource-requirements")]
+    [InlineData(1, -1, 1, 1, 0, "invalid-resource-requirements")]
+    [InlineData(1, 0, 0, 1, 0, "invalid-resource-requirements")]
+    [InlineData(1, 0, 1, 0, 0, "invalid-resource-requirements")]
+    [InlineData(1, 0, 1, 1, -1, "invalid-maximum-estimated-cost")]
+    public void Workload_wire_rejects_invalid_scheduling_minima(
+        int cpu,
+        int gpu,
+        long memory,
+        long storage,
+        int cost,
+        string expectedCode)
+    {
+        var result = V1Alpha1Json.FromWire(WithScheduling(cpu, gpu, memory, storage, cost));
+
+        Assert.Equal(
+            expectedCode,
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Property(MaxTest = 50)]
+    public void Workload_scheduling_numeric_validation_is_fail_closed(
+        int cpu,
+        int gpu,
+        int memory,
+        int storage,
+        int cost)
+    {
+        var result = V1Alpha1Json.FromWire(WithScheduling(cpu, gpu, memory, storage, cost));
+        var valid = cpu >= 1 && gpu >= 0 && memory >= 1 && storage >= 1 && cost >= 0;
+
+        Assert.Equal(valid, result.IsSuccess);
+    }
+
     [Fact]
     public void Wire_status_and_metadata_validation_handles_invalid_conditions_and_references()
     {
@@ -447,6 +483,24 @@ public sealed class ContractValidationTests
                     null),
                 new("GitHubRelease", "johnazariah/agentic-armada-evidence", "standard")),
             new(1, [], "desired", null, null, null, null, null, null));
+
+    private static V1Alpha1WorkloadWire WithScheduling(
+        int cpu,
+        int gpu,
+        long memory,
+        long storage,
+        decimal maximumEstimatedCost) =>
+        ValidWorkloadWire() with
+        {
+            Spec = ValidWorkloadWire().Spec! with
+            {
+                Scheduling = ValidWorkloadWire().Spec!.Scheduling! with
+                {
+                    Resources = new V1Alpha1ResourceRequirementsWire(cpu, gpu, memory, storage),
+                    MaximumEstimatedCost = maximumEstimatedCost
+                }
+            }
+        };
 
     private static V1Alpha1MetadataWire WireMetadata(string? projectId) =>
         new(

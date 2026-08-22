@@ -375,6 +375,21 @@ public static class V1Alpha1Json
         {
             return Failure<SchedulingRequirements>("missing-required-section", "Scheduling resources are required.");
         }
+        if (wire.Resources.CpuMillicores < 1 ||
+            wire.Resources.MemoryBytes < 1 ||
+            wire.Resources.StorageBytes < 1 ||
+            wire.Resources.GpuCount < 0)
+        {
+            return Failure<SchedulingRequirements>(
+                "invalid-resource-requirements",
+                "Scheduling CPU, memory, and storage must be at least one; GPU count cannot be negative.");
+        }
+        if (wire.MaximumEstimatedCost is < 0)
+        {
+            return Failure<SchedulingRequirements>(
+                "invalid-maximum-estimated-cost",
+                "Maximum estimated cost cannot be negative.");
+        }
         var tolerations = ImmutableArray.CreateBuilder<Toleration>();
         foreach (var toleration in wire.Tolerations ?? [])
         {
