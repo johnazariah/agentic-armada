@@ -1,0 +1,703 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://armada.io/spec/schemas/v1/resources.schema.json",
+  "title": "Agentic Armada v1 resource contracts",
+  "oneOf": [
+    { "$ref": "#/$defs/Project" },
+    { "$ref": "#/$defs/Node" },
+    { "$ref": "#/$defs/NodeIdentity" },
+    { "$ref": "#/$defs/Capability" },
+    { "$ref": "#/$defs/Workload" },
+    { "$ref": "#/$defs/AdmissionDecision" },
+    { "$ref": "#/$defs/Attempt" },
+    { "$ref": "#/$defs/Lease" },
+    { "$ref": "#/$defs/AgentSession" },
+    { "$ref": "#/$defs/EvidenceReceipt" },
+    { "$ref": "#/$defs/Event" }
+  ],
+  "$defs": {
+    "Uid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "Sha256": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "uid",
+        "organisationId",
+        "name",
+        "resourceVersion",
+        "generation",
+        "labels",
+        "ownerReferences",
+        "finalizers",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "uid": { "$ref": "#/$defs/Uid" },
+        "organisationId": { "$ref": "#/$defs/Uid" },
+        "projectId": { "$ref": "#/$defs/Uid" },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+        },
+        "resourceVersion": { "type": "string", "minLength": 1 },
+        "generation": { "type": "integer", "minimum": 1 },
+        "labels": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 256 }
+        },
+        "annotations": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 4096 }
+        },
+        "ownerReferences": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/OwnerReference" }
+        },
+        "finalizers": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "createdAt": { "$ref": "#/$defs/Timestamp" },
+        "updatedAt": { "$ref": "#/$defs/Timestamp" },
+        "deletionRequestedAt": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "OwnerReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "kind", "uid" ],
+      "properties": {
+        "kind": { "type": "string", "minLength": 1 },
+        "uid": { "$ref": "#/$defs/Uid" }
+      }
+    },
+    "ProjectScopedMetadata": {
+      "allOf": [
+        { "$ref": "#/$defs/Metadata" },
+        {
+          "required": [ "projectId" ]
+        }
+      ]
+    },
+    "Escalation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exactBlocker",
+        "actor",
+        "requiredAction",
+        "location",
+        "successor",
+        "deadline"
+      ],
+      "properties": {
+        "exactBlocker": { "type": "string", "minLength": 1 },
+        "actor": { "type": "string", "minLength": 1 },
+        "requiredAction": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 },
+        "successor": { "type": "string", "minLength": 1 },
+        "deadline": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "Condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "status",
+        "reason",
+        "message",
+        "observedGeneration",
+        "lastTransitionTime"
+      ],
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "status": { "enum": [ "True", "False", "Unknown" ] },
+        "reason": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 },
+        "observedGeneration": { "type": "integer", "minimum": 0 },
+        "lastTransitionTime": { "$ref": "#/$defs/Timestamp" },
+        "escalation": { "$ref": "#/$defs/Escalation" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": { "const": "Blocked" },
+              "status": { "const": "True" }
+            },
+            "required": [ "type", "status" ]
+          },
+          "then": { "required": [ "escalation" ] }
+        }
+      ]
+    },
+    "Status": {
+      "type": "object",
+      "required": [ "observedGeneration", "conditions" ],
+      "properties": {
+        "observedGeneration": { "type": "integer", "minimum": 0 },
+        "conditions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Condition" }
+        }
+      }
+    },
+    "LabelSelector": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 256 }
+        }
+      }
+    },
+    "Taint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "key", "effect" ],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" },
+        "effect": { "enum": [ "NoSchedule", "PreferNoSchedule", "NoExecute" ] }
+      }
+    },
+    "Toleration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "key", "operator", "effect" ],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "operator": { "enum": [ "Exists", "Equal" ] },
+        "value": { "type": "string" },
+        "effect": { "enum": [ "NoSchedule", "PreferNoSchedule", "NoExecute" ] }
+      }
+    },
+    "ResourceRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "cpuMillicores", "memoryBytes", "storageBytes" ],
+      "properties": {
+        "cpuMillicores": { "type": "integer", "minimum": 1 },
+        "gpuCount": { "type": "integer", "minimum": 0 },
+        "memoryBytes": { "type": "integer", "minimum": 1 },
+        "storageBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "SchedulingRequirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "resources" ],
+      "properties": {
+        "hostSelector": { "$ref": "#/$defs/LabelSelector" },
+        "tolerations": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Toleration" }
+        },
+        "affinity": { "$ref": "#/$defs/LabelSelector" },
+        "antiAffinity": { "$ref": "#/$defs/LabelSelector" },
+        "resources": { "$ref": "#/$defs/ResourceRequirements" },
+        "maxEstimatedCost": { "type": "number", "minimum": 0 },
+        "checkpointMode": { "enum": [ "Forbidden", "Preferred", "Required" ] }
+      }
+    },
+    "Envelope": {
+      "type": "object",
+      "required": [ "apiVersion", "kind", "metadata", "spec", "status" ],
+      "properties": {
+        "apiVersion": { "const": "armada.io/v1alpha1" },
+        "kind": { "type": "string" },
+        "metadata": { "$ref": "#/$defs/Metadata" },
+        "spec": { "type": "object" },
+        "status": { "$ref": "#/$defs/Status" }
+      }
+    },
+    "Project": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Project" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "github",
+                "evidenceArchive",
+                "sessionProfile",
+                "policyBundleDigest"
+              ],
+              "properties": {
+                "github": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "repositories" ],
+                  "properties": {
+                    "repositories": {
+                      "type": "array",
+                      "minItems": 1,
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[^/]+/[^/]+$"
+                      }
+                    }
+                  }
+                },
+                "evidenceArchive": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "provider", "repository" ],
+                  "properties": {
+                    "provider": { "const": "GitHubRelease" },
+                    "repository": {
+                      "type": "string",
+                      "pattern": "^[^/]+/[^/]+$"
+                    }
+                  }
+                },
+                "sessionProfile": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "provider", "profileDigest" ],
+                  "properties": {
+                    "provider": { "const": "GitHubCopilot" },
+                    "profileDigest": { "$ref": "#/$defs/Sha256" }
+                  }
+                },
+                "policyBundleDigest": { "$ref": "#/$defs/Sha256" },
+                "budgetLimit": { "type": "object" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Node": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Node" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "identityRef", "scheduling", "desiredOperation" ],
+              "properties": {
+                "identityRef": { "$ref": "#/$defs/Uid" },
+                "desiredOperation": {
+                  "enum": [ "Active", "Cordoned", "Draining", "Revoked", "Upgrading" ]
+                },
+                "scheduling": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "maxConcurrency", "cpuMillicores", "memoryBytes", "storageBytes" ],
+                  "properties": {
+                    "maxConcurrency": { "type": "integer", "minimum": 0 },
+                    "cpuMillicores": { "type": "integer", "minimum": 0 },
+                    "memoryBytes": { "type": "integer", "minimum": 0 },
+                    "storageBytes": { "type": "integer", "minimum": 0 }
+                  }
+                },
+                "taints": { "type": "array", "items": { "$ref": "#/$defs/Taint" } }
+              }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "observedIdentityEpoch": { "type": "integer", "minimum": 1 },
+                    "lastObservedAt": { "$ref": "#/$defs/Timestamp" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "NodeIdentity": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "NodeIdentity" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "publicKeyDigest", "requestedAssurance", "identityEpoch" ],
+              "properties": {
+                "publicKeyDigest": { "$ref": "#/$defs/Sha256" },
+                "requestedAssurance": {
+                  "enum": [ "DeviceKey", "TpmHardwareBound", "PlatformKeyVerified" ]
+                },
+                "identityEpoch": { "type": "integer", "minimum": 1 },
+                "attestationDigest": { "$ref": "#/$defs/Sha256" }
+              }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "certificateSerial": { "type": "string" },
+                    "certificateExpiresAt": { "$ref": "#/$defs/Timestamp" },
+                    "assurance": { "type": "string" },
+                    "revokedAt": { "$ref": "#/$defs/Timestamp" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Capability": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Capability" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "nodeRef", "requestedScopes" ],
+              "properties": {
+                "nodeRef": { "$ref": "#/$defs/Uid" },
+                "requestedScopes": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                }
+              }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "properties": {
+                    "verifiedScopes": { "type": "array", "items": { "type": "string" } },
+                    "inventoryDigest": { "$ref": "#/$defs/Sha256" },
+                    "verifiedAt": { "$ref": "#/$defs/Timestamp" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Workload": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Workload" },
+            "metadata": { "$ref": "#/$defs/ProjectScopedMetadata" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "bundleDigest",
+                "policyDigest",
+                "sourceProvider",
+                "repository",
+                "sourceRevision",
+                "configDigest",
+                "actionSchemas",
+                "sessionProvider",
+                "sessionAuthority",
+                "isolationProfile",
+                "githubIssue",
+                "scheduling",
+                "evidence"
+              ],
+              "properties": {
+                "bundleDigest": { "$ref": "#/$defs/Sha256" },
+                "policyDigest": { "$ref": "#/$defs/Sha256" },
+                "sourceProvider": { "const": "GitHub" },
+                "repository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+                "sourceRevision": { "type": "string", "minLength": 40, "maxLength": 64 },
+                "configDigest": { "$ref": "#/$defs/Sha256" },
+                "actionSchemas": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                "sessionProvider": { "const": "GitHubCopilot" },
+                "sessionAuthority": {
+                  "enum": [ "None", "IssueMaster", "IssueMasterWithChildren" ]
+                },
+                "isolationProfile": {
+                  "enum": [ "DedicatedNode", "IsolatedContainer", "EphemeralVm" ]
+                },
+                "githubIssue": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "number" ],
+                  "properties": {
+                    "number": { "type": "integer", "minimum": 1 },
+                    "nodeId": { "type": "string", "minLength": 1 }
+                  }
+                },
+                "scheduling": { "$ref": "#/$defs/SchedulingRequirements" },
+                "evidence": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [ "archiveProvider", "archiveRepository", "retentionClass" ],
+                  "properties": {
+                    "archiveProvider": { "const": "GitHubRelease" },
+                    "archiveRepository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+                    "retentionClass": { "type": "string", "minLength": 1 }
+                  }
+                }
+              }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "required": [ "lifecycle" ],
+                  "properties": {
+                    "lifecycle": {
+                      "enum": [
+                        "desired", "admitted", "assigned", "claimed",
+                        "start-approved", "running", "terminal-pending",
+                        "completed", "failed", "cancelled", "expired"
+                      ]
+                    },
+                    "attemptRef": { "$ref": "#/$defs/Uid" },
+                    "owner": { "type": "string" },
+                    "successor": { "type": "string" },
+                    "expectedNextEventAt": { "$ref": "#/$defs/Timestamp" },
+                    "progressDeadlineAt": { "$ref": "#/$defs/Timestamp" },
+                    "githubPullRequest": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [ "number" ],
+                      "properties": {
+                        "number": { "type": "integer", "minimum": 1 },
+                        "nodeId": { "type": "string", "minLength": 1 }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "AdmissionDecision": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "AdmissionDecision" },
+            "metadata": { "$ref": "#/$defs/ProjectScopedMetadata" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "workloadRef",
+                "workloadGeneration",
+                "nodeRef",
+                "bundleDigest",
+                "policyDigest",
+                "approvedActions",
+                "sessionAuthority",
+                "isolationProfile",
+                "resourceLimits",
+                "evidenceRequirements",
+                "expiresAt"
+              ],
+              "properties": {
+                "workloadRef": { "$ref": "#/$defs/Uid" },
+                "workloadGeneration": { "type": "integer", "minimum": 1 },
+                "nodeRef": { "$ref": "#/$defs/Uid" },
+                "bundleDigest": { "$ref": "#/$defs/Sha256" },
+                "policyDigest": { "$ref": "#/$defs/Sha256" },
+                "approvedActions": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": { "type": "string", "minLength": 1 }
+                },
+                "sessionAuthority": {
+                  "enum": [ "None", "IssueMaster", "IssueMasterWithChildren" ]
+                },
+                "isolationProfile": {
+                  "enum": [ "DedicatedNode", "IsolatedContainer", "EphemeralVm" ]
+                },
+                "resourceLimits": { "type": "object" },
+                "credentialGrantDigests": {
+                  "type": "array",
+                  "items": { "$ref": "#/$defs/Sha256" }
+                },
+                "networkScope": { "type": "object" },
+                "evidenceRequirements": { "type": "object" },
+                "expiresAt": { "$ref": "#/$defs/Timestamp" }
+              }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "required": [ "decision" ],
+                  "properties": {
+                    "decision": { "enum": [ "Pending", "Admitted", "Rejected", "Expired" ] },
+                    "decisionDigest": { "$ref": "#/$defs/Sha256" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Attempt": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Attempt" },
+            "metadata": { "$ref": "#/$defs/ProjectScopedMetadata" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "workloadRef", "workloadGeneration", "nodeRef", "admissionDecisionRef", "bundleDigest",
+                "policyDigest", "capabilityGrantDigest", "environmentDigest"
+              ],
+              "properties": {
+                "workloadRef": { "$ref": "#/$defs/Uid" },
+                "workloadGeneration": { "type": "integer", "minimum": 1 },
+                "nodeRef": { "$ref": "#/$defs/Uid" },
+                "admissionDecisionRef": { "$ref": "#/$defs/Uid" },
+                "bundleDigest": { "$ref": "#/$defs/Sha256" },
+                "policyDigest": { "$ref": "#/$defs/Sha256" },
+                "capabilityGrantDigest": { "$ref": "#/$defs/Sha256" },
+                "environmentDigest": { "$ref": "#/$defs/Sha256" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "Lease": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Lease" },
+            "metadata": { "$ref": "#/$defs/ProjectScopedMetadata" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "attemptRef", "nodeRef", "holderEpoch", "expiresAt" ],
+              "properties": {
+                "attemptRef": { "$ref": "#/$defs/Uid" },
+                "nodeRef": { "$ref": "#/$defs/Uid" },
+                "holderEpoch": { "type": "integer", "minimum": 1 },
+                "expiresAt": { "$ref": "#/$defs/Timestamp" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "AgentSession": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "AgentSession" },
+            "metadata": { "$ref": "#/$defs/ProjectScopedMetadata" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "attemptRef", "nodeRef", "role", "idempotencyKey" ],
+              "properties": {
+                "attemptRef": { "$ref": "#/$defs/Uid" },
+                "nodeRef": { "$ref": "#/$defs/Uid" },
+                "role": { "enum": [ "MajorDomo", "IssueMaster", "Child" ] },
+                "idempotencyKey": { "type": "string", "minLength": 1 },
+                "parentSessionRef": { "$ref": "#/$defs/Uid" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "EvidenceReceipt": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "EvidenceReceipt" },
+            "metadata": { "$ref": "#/$defs/ProjectScopedMetadata" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "attemptRef", "manifestDigest", "archiveRepository",
+                "releaseId", "assetDigest"
+              ],
+              "properties": {
+                "attemptRef": { "$ref": "#/$defs/Uid" },
+                "manifestDigest": { "$ref": "#/$defs/Sha256" },
+                "archiveRepository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
+                "releaseId": { "type": "string", "minLength": 1 },
+                "assetDigest": { "$ref": "#/$defs/Sha256" }
+              }
+            },
+            "status": {
+              "allOf": [
+                { "$ref": "#/$defs/Status" },
+                {
+                  "required": [ "verification" ],
+                  "properties": {
+                    "verification": { "enum": [ "Pending", "Verified", "Rejected" ] },
+                    "verifiedAt": { "$ref": "#/$defs/Timestamp" }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "Event": {
+      "allOf": [
+        { "$ref": "#/$defs/Envelope" },
+        {
+          "properties": {
+            "kind": { "const": "Event" },
+            "spec": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [ "type", "occurredAt", "actor", "correlationId", "payloadDigest" ],
+              "properties": {
+                "type": { "type": "string", "minLength": 1 },
+                "occurredAt": { "$ref": "#/$defs/Timestamp" },
+                "actor": { "type": "string", "minLength": 1 },
+                "correlationId": { "$ref": "#/$defs/Uid" },
+                "causationId": { "$ref": "#/$defs/Uid" },
+                "payloadDigest": { "$ref": "#/$defs/Sha256" }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
