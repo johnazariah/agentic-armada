@@ -2,9 +2,11 @@
   <Folder Name="/src/">
     <Project Path="src/Armada.Contracts/Armada.Contracts.csproj" />
     <Project Path="src/Armada.Domain/Armada.Domain.csproj" />
+    <Project Path="src/Armada.NodeAgent/Armada.NodeAgent.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Armada.Contracts.Tests/Armada.Contracts.Tests.csproj" />
     <Project Path="tests/Armada.Domain.Tests/Armada.Domain.Tests.csproj" />
+    <Project Path="tests/Armada.NodeAgent.Tests/Armada.NodeAgent.Tests.csproj" />
   </Folder>
 </Solution>
