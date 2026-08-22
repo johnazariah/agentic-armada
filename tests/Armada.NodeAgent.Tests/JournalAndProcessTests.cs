@@ -239,6 +239,80 @@ public sealed class JournalAndProcessTests
         }
     }
 
+    [Theory]
+    [InlineData("""{"encrypted":{"nonce":null,"tag":null,"ciphertext":null},"previousHash":null,"entryHash":null}""")]
+    [InlineData("""{"encrypted":{"nonce":"AA==","tag":"AA==","ciphertext":"AA=="},"previousHash":"0000000000000000000000000000000000000000000000000000000000000000","entryHash":"0000000000000000000000000000000000000000000000000000000000000000"}""")]
+    public async Task Json_parseable_malformed_journal_records_return_typed_failures(string malformedRecord)
+    {
+        var fixture = new NodeAgentFixture();
+        var path = Path.Combine(Path.GetTempPath(), $"armada-journal-{Guid.NewGuid():N}.log");
+        var journal = new EncryptedFileJournal(
+            path,
+            new AesGcmJournalProtector(RandomNumberGenerator.GetBytes(32)),
+            new InMemoryRollbackAnchorStore());
+        var entry = JournalEntry.ForEvidence(
+            1,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('a'), fixture.Digest('b'), fixture.Now));
+
+        try
+        {
+            await journal.AppendAsync(entry, CancellationToken.None);
+            await File.WriteAllTextAsync(path, malformedRecord);
+
+            var exception = await Record.ExceptionAsync(() => journal.ReadAsync(CancellationToken.None));
+            var result = await journal.ReadAsync(CancellationToken.None);
+
+            Assert.Null(exception);
+            Assert.Equal(
+                "journal-ciphertext-invalid",
+                Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure>(result).Error.Code);
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.anchor");
+        }
+    }
+
+    [Fact]
+    public async Task Concurrent_file_journal_appends_do_not_create_duplicate_ordinals_or_break_the_chain()
+    {
+        var fixture = new NodeAgentFixture();
+        var path = Path.Combine(Path.GetTempPath(), $"armada-journal-{Guid.NewGuid():N}.log");
+        var journal = new EncryptedFileJournal(
+            path,
+            new AesGcmJournalProtector(RandomNumberGenerator.GetBytes(32)),
+            new InMemoryRollbackAnchorStore());
+        var first = JournalEntry.ForEvidence(
+            1,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('a'), fixture.Digest('b'), fixture.Now));
+        var second = JournalEntry.ForEvidence(
+            2,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('c'), fixture.Digest('d'), fixture.Now));
+
+        try
+        {
+            var results = await Task.WhenAll(
+                journal.AppendAsync(first, CancellationToken.None),
+                journal.AppendAsync(second, CancellationToken.None));
+            var restored = await journal.ReadAsync(CancellationToken.None);
+
+            var entries = Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success>(restored).Value;
+            Assert.Equal(results.Count(static result => result.IsSuccess), entries.Count);
+            Assert.Equal(
+                Enumerable.Range(1, entries.Count).Select(static value => (long)value),
+                entries.Select(static entry => entry.Ordinal));
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.anchor");
+        }
+    }
+
     [Fact]
     public void Replay_rejects_duplicated_or_gapped_journal_ordinals_before_restoring_state()
     {

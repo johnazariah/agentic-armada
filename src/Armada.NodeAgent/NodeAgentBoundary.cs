@@ -12,6 +12,7 @@ public sealed class NodeAgentBoundary
     private readonly IClock clock;
     private readonly NodeDeviceIdentity identity;
     private readonly LocalIsolationCapabilities capabilities;
+    private readonly SemaphoreSlim operationGate = new(1, 1);
     private AgentState state;
 
     public NodeAgentBoundary(
@@ -34,6 +35,9 @@ public sealed class NodeAgentBoundary
         HealthObservation health,
         CancellationToken cancellationToken)
     {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
         var entries = await journal.ReadAsync(cancellationToken);
         if (entries is Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure failure)
         {
@@ -56,12 +60,20 @@ public sealed class NodeAgentBoundary
                 health,
                 state.Attempts.Values.OrderBy(static attempt => attempt.AttemptId.Value).ToImmutableArray(),
                 state.Evidence.Values.OrderBy(static evidence => evidence.AttemptId.Value).ToImmutableArray()));
+        }
+        finally
+        {
+            operationGate.Release();
+        }
     }
 
     public async Task<Result<NodeCommandAcknowledgement, NodeAgentFailure>> ReceiveAsync(
         OutboundEnvelope<NodeCommand> envelope,
         CancellationToken cancellationToken)
     {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
         var verification = await verifier.VerifyAsync(envelope, cancellationToken);
         var outcome = CommandValidation.Validate(state, envelope, verification, capabilities, clock.UtcNow);
         if (outcome.Acknowledgement.Duplicate)
@@ -83,12 +95,20 @@ public sealed class NodeAgentBoundary
 
         state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
         return new Result<NodeCommandAcknowledgement, NodeAgentFailure>.Success(outcome.Acknowledgement);
+        }
+        finally
+        {
+            operationGate.Release();
+        }
     }
 
     public async Task<Result<EvidenceObservation, NodeAgentFailure>> RecordEvidenceAsync(
         EvidenceObservation observation,
         CancellationToken cancellationToken)
     {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
         if (!state.Attempts.ContainsKey(observation.AttemptId))
         {
             return new Result<EvidenceObservation, NodeAgentFailure>.Failure(
@@ -104,6 +124,11 @@ public sealed class NodeAgentBoundary
 
         state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
         return new Result<EvidenceObservation, NodeAgentFailure>.Success(observation);
+        }
+        finally
+        {
+            operationGate.Release();
+        }
     }
 
     public async Task<Result<AttemptRuntime, NodeAgentFailure>> AuthoriseProcessStartAsync(
@@ -111,6 +136,9 @@ public sealed class NodeAgentBoundary
         Sha256Digest capabilityGrantDigest,
         CancellationToken cancellationToken)
     {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
         if (!state.Attempts.TryGetValue(attemptId, out var attempt))
         {
             return new Result<AttemptRuntime, NodeAgentFailure>.Failure(
@@ -149,6 +177,11 @@ public sealed class NodeAgentBoundary
 
         state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
         return new Result<AttemptRuntime, NodeAgentFailure>.Success(started.Value);
+        }
+        finally
+        {
+            operationGate.Release();
+        }
     }
 
     private long NextOrdinal() => state.LastJournalOrdinal + 1;

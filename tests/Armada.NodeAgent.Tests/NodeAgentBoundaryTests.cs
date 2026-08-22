@@ -346,6 +346,39 @@ public sealed class NodeAgentBoundaryTests
     }
 
     [Fact]
+    public async Task Concurrent_cancellation_start_and_evidence_operations_preserve_durable_attempt_ordering()
+    {
+        var fixture = new NodeAgentFixture();
+        var journal = new InMemoryJournal();
+        var boundary = fixture.Boundary(journal);
+        var start = fixture.StartEnvelope(sequence: 1);
+        await boundary.ReceiveAsync(start, CancellationToken.None);
+        var cancellation = fixture.CancelEnvelope(sequence: 2);
+        var evidence = new EvidenceObservation(fixture.AttemptId, fixture.Digest('e'), fixture.Digest('f'), fixture.Now);
+
+        await Task.WhenAll(
+            boundary.ReceiveAsync(cancellation, CancellationToken.None),
+            boundary.AuthoriseProcessStartAsync(
+                fixture.AttemptId,
+                Start(start).CapabilityGrantDigest,
+                CancellationToken.None),
+            boundary.RecordEvidenceAsync(evidence, CancellationToken.None));
+
+        var entries = Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success>(
+            await journal.ReadAsync(CancellationToken.None)).Value;
+        var replay = AgentState.Replay(fixture.Identity, entries);
+        var snapshot = Assert.IsType<Result<FullReconciliationSnapshot, NodeAgentFailure>.Success>(
+            await boundary.ReconcileAsync(fixture.Inventory, fixture.Health, CancellationToken.None)).Value;
+
+        Assert.Equal(
+            Enumerable.Range(1, entries.Count).Select(static value => (long)value),
+            entries.OrderBy(static entry => entry.Ordinal).Select(static entry => entry.Ordinal));
+        Assert.IsType<Result<AgentState, JournalFailure>.Success>(replay);
+        Assert.Equal(AttemptExecutionState.CancellationRequested, snapshot.Attempts.Single().State);
+        Assert.Equal(evidence, snapshot.Evidence.Single());
+    }
+
+    [Fact]
     public async Task Persistence_failures_are_returned_and_never_acknowledged_as_success()
     {
         var fixture = new NodeAgentFixture();

@@ -200,6 +200,12 @@ public sealed class AesGcmJournalProtector
 
     public Result<byte[], JournalFailure> Decrypt(EncryptedJournalRecord record)
     {
+        var recordValidation = ValidateRecord(record);
+        if (recordValidation is Result<bool, JournalFailure>.Failure validationFailure)
+        {
+            return Failure(validationFailure.Error.Code, validationFailure.Error.Message);
+        }
+
         try
         {
             var nonce = Convert.FromBase64String(record.Nonce);
@@ -218,6 +224,47 @@ public sealed class AesGcmJournalProtector
         catch (CryptographicException)
         {
             return Failure("journal-decryption-failed", "The encrypted journal record cannot be authenticated with this key.");
+        }
+        catch (ArgumentException)
+        {
+            return Failure("journal-ciphertext-invalid", "The encrypted journal record has invalid cryptographic parameters.");
+        }
+        catch (InvalidOperationException)
+        {
+            return Failure("journal-ciphertext-invalid", "The encrypted journal record cannot be processed.");
+        }
+    }
+
+    public static Result<bool, JournalFailure> ValidateRecord(EncryptedJournalRecord? record)
+    {
+        if (record is null ||
+            string.IsNullOrWhiteSpace(record.Nonce) ||
+            string.IsNullOrWhiteSpace(record.Tag) ||
+            string.IsNullOrWhiteSpace(record.Ciphertext))
+        {
+            return new Result<bool, JournalFailure>.Failure(
+                new("journal-ciphertext-invalid", "The encrypted journal record requires nonce, tag, and ciphertext fields."));
+        }
+
+        try
+        {
+            var nonce = Convert.FromBase64String(record.Nonce);
+            var tag = Convert.FromBase64String(record.Tag);
+            var ciphertext = Convert.FromBase64String(record.Ciphertext);
+            return nonce.Length == 12 && tag.Length == 16 && ciphertext.Length > 0
+                ? new Result<bool, JournalFailure>.Success(true)
+                : new Result<bool, JournalFailure>.Failure(
+                    new("journal-ciphertext-invalid", "The encrypted journal record has invalid nonce, tag, or ciphertext lengths."));
+        }
+        catch (FormatException)
+        {
+            return new Result<bool, JournalFailure>.Failure(
+                new("journal-ciphertext-invalid", "The encrypted journal record is not valid base64."));
+        }
+        catch (ArgumentException)
+        {
+            return new Result<bool, JournalFailure>.Failure(
+                new("journal-ciphertext-invalid", "The encrypted journal record has invalid base64 fields."));
         }
     }
 
@@ -239,6 +286,7 @@ public sealed class EncryptedFileJournal : INodeJournal
     private readonly string path;
     private readonly AesGcmJournalProtector protector;
     private readonly IRollbackAnchorStore rollbackAnchorStore;
+    private readonly SemaphoreSlim operationGate = new(1, 1);
 
     public EncryptedFileJournal(string path, AesGcmJournalProtector protector)
         : this(path, protector, new PlatformRollbackAnchorStore())
@@ -256,6 +304,21 @@ public sealed class EncryptedFileJournal : INodeJournal
     }
 
     public async Task<Result<JournalEntry, JournalFailure>> AppendAsync(
+        JournalEntry entry,
+        CancellationToken cancellationToken)
+    {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await AppendCoreAsync(entry, cancellationToken);
+        }
+        finally
+        {
+            operationGate.Release();
+        }
+    }
+
+    private async Task<Result<JournalEntry, JournalFailure>> AppendCoreAsync(
         JournalEntry entry,
         CancellationToken cancellationToken)
     {
@@ -332,6 +395,9 @@ public sealed class EncryptedFileJournal : INodeJournal
 
     public async Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken)
     {
+        await operationGate.WaitAsync(cancellationToken);
+        try
+        {
         var loaded = await ReadValidatedAsync(cancellationToken);
         return loaded switch
         {
@@ -341,6 +407,11 @@ public sealed class EncryptedFileJournal : INodeJournal
                 Failure<IReadOnlyList<JournalEntry>>(failure.Error.Code, failure.Error.Message),
             _ => Failure<IReadOnlyList<JournalEntry>>("journal-read-failed", "The journal reader returned an unsupported result.")
         };
+        }
+        finally
+        {
+            operationGate.Release();
+        }
     }
 
     private async Task<Result<JournalSnapshot, JournalFailure>> ReadValidatedAsync(CancellationToken cancellationToken)
@@ -401,8 +472,16 @@ public sealed class EncryptedFileJournal : INodeJournal
                 return Failure<JournalSnapshot>("journal-ciphertext-invalid", "The encrypted journal record is not valid JSON.");
             }
 
-            if (chained is null ||
-                chained.Encrypted is null ||
+            if (chained is null)
+            {
+                return Failure<JournalSnapshot>("journal-chain-invalid", "The encrypted journal chain record is empty.");
+            }
+            if (AesGcmJournalProtector.ValidateRecord(chained.Encrypted) is Result<bool, JournalFailure>.Failure recordFailure)
+            {
+                return Failure<JournalSnapshot>(recordFailure.Error.Code, recordFailure.Error.Message);
+            }
+            if (!IsHash(chained.PreviousHash) ||
+                !IsHash(chained.EntryHash) ||
                 chained.PreviousHash != previousHash ||
                 chained.EntryHash != Hash(chained.PreviousHash, chained.Encrypted))
             {
@@ -435,6 +514,12 @@ public sealed class EncryptedFileJournal : INodeJournal
                 return Failure<JournalSnapshot>(
                     "journal-ordinal-invalid",
                     "Journal entry ordinals must be unique and contiguous from one.");
+            }
+            if (entry.NodeId.Value == Guid.Empty || entry.IdentityEpoch < 0)
+            {
+                return Failure<JournalSnapshot>(
+                    "journal-entry-invalid",
+                    "Journal entries require a non-empty node identity and non-negative identity epoch.");
             }
 
             entries.Add(entry);
@@ -500,14 +585,16 @@ public sealed class EncryptedFileJournal : INodeJournal
             return Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor is not valid JSON.");
         }
 
-        if (encrypted is null || protector.Decrypt(encrypted) is not Result<byte[], JournalFailure>.Success plaintext)
+        if (protector.Decrypt(encrypted!) is not Result<byte[], JournalFailure>.Success plaintext)
         {
             return Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor cannot be authenticated.");
         }
 
         try
         {
-            return JsonSerializer.Deserialize<LocalJournalTailMarker>(plaintext.Value, SerializerOptions) is { } anchor
+            return JsonSerializer.Deserialize<LocalJournalTailMarker>(plaintext.Value, SerializerOptions) is { } anchor &&
+                   anchor.Ordinal >= 0 &&
+                   IsHash(anchor.TailHash)
                 ? new Result<LocalJournalTailMarker, JournalFailure>.Success(anchor)
                 : Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor is empty.");
         }
@@ -555,6 +642,10 @@ public sealed class EncryptedFileJournal : INodeJournal
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             ProtocolIdentity.Join(previousHash, encrypted.Nonce, encrypted.Tag, encrypted.Ciphertext)))).ToLowerInvariant();
 
+    private static bool IsHash(string? value) =>
+        value is { Length: 64 } && value.All(static character =>
+            character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
     private static Result<T, JournalFailure> Failure<T>(string code, string message) =>
         new Result<T, JournalFailure>.Failure(new(code, message));
 
@@ -567,6 +658,7 @@ public sealed class InMemoryJournal : INodeJournal
 {
     private readonly List<JournalEntry> entries = [];
     private readonly JournalFailure? appendFailure;
+    private readonly object sync = new();
 
     public InMemoryJournal(JournalFailure? appendFailure = null)
     {
@@ -583,14 +675,22 @@ public sealed class InMemoryJournal : INodeJournal
                 new Result<JournalEntry, JournalFailure>.Failure(failure));
         }
 
-        entries.Add(entry);
+        lock (sync)
+        {
+            entries.Add(entry);
+        }
         return Task.FromResult<Result<JournalEntry, JournalFailure>>(
             new Result<JournalEntry, JournalFailure>.Success(entry));
     }
 
-    public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
-        Task.FromResult<Result<IReadOnlyList<JournalEntry>, JournalFailure>>(
-            new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success(entries.ToArray()));
+    public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken)
+    {
+        lock (sync)
+        {
+            return Task.FromResult<Result<IReadOnlyList<JournalEntry>, JournalFailure>>(
+                new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success(entries.ToArray()));
+        }
+    }
 }
 
 internal sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore
