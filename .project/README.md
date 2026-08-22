@@ -14,8 +14,11 @@ records and delivery plans live here before corresponding implementation code.
   supersedes an earlier ADR.
 - Evidence references contain immutable content digests and archive locations.
   A URL alone is not evidence identity.
-- `.armada/` contains product records only. Runtime state belongs in the
+- `.project/` contains this product's records only. Runtime state belongs in the
   control-plane database; node journals belong on the enrolled node.
+- `.armada/` is reserved for a consumer repository's declarative Armada/JBOM
+  configuration and retained operational references. Its contract is specified
+  in `spec/006-consumer-armada-directory.md`.
 
 ## Index
 

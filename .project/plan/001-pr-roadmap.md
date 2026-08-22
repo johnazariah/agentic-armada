@@ -3,7 +3,7 @@
 Every layer uses one session, branch and PR. No layer is implemented against an
 unmerged private contract.
 
-1. **Contracts and lifecycle:** add `.armada` records, schemas/protobuf,
+1. **Contracts and lifecycle:** add `.project` records, schemas/protobuf,
    immutable domain types and state-machine tests for valid/invalid/replayed
    transitions.
 2. **Control plane:** PostgreSQL migrations, CAS repository, ledger/outbox,
@@ -19,6 +19,6 @@ unmerged private contract.
 7. **Distribution:** signed installers/releases, upgrade/rollback/revocation,
    compatibility records and install/upgrade verification.
 
-Each PR must include its acceptance criteria in its linked `.armada/plan/`
+Each PR must include its acceptance criteria in its linked `.project/plan/`
 record, focused tests, protocol compatibility statement and any ADR it relies
 on or supersedes.
