@@ -23,3 +23,36 @@ unmerged private contract.
 Each PR must include its acceptance criteria in its linked `.project/plan/`
 record, focused tests, protocol compatibility statement and any ADR it relies
 on or supersedes.
+
+## PR 1: Contracts and lifecycle
+
+**Scope:** introduce the .NET 10 `Armada.Contracts` and `Armada.Domain`
+libraries, their xUnit test projects, and the `armada.io/v1alpha1` resource
+contracts required for the first pure workload-lifecycle implementation.
+
+**Acceptance criteria:**
+
+- Immutable typed contracts model `Project`, `Node`, `NodeIdentity`,
+  `Capability`, `Workload`, `AdmissionDecision`, `Attempt`, `Lease`,
+  `AgentSession`, `EvidenceReceipt`, `Condition` and `Event`.
+- Version-1 integration profiles remain explicit and limited to GitHub source,
+  GitHub Copilot sessions and GitHub Release evidence archives.
+- A pure state machine permits only `desired -> admitted -> assigned -> claimed
+  -> start-approved -> running -> terminal-pending -> completed|failed|
+  cancelled|expired`; it validates generation, resource-version, admission,
+  assignment, attempt, lease, session and evidence bindings.
+- Terminalisation accepts only a verified `EvidenceReceipt` for the claimed
+  attempt. Replays with the same transition identity are idempotent; conflicting
+  replays and stale resource versions fail with typed domain errors.
+- `Blocked=True` conditions require structured escalation data naming the exact
+  blocker, actor, required action, location, successor and deadline.
+- The solution build and contracts/lifecycle tests pass without adding
+  persistence, API, node-agent, session-adapter, GitHub-adapter or process
+  execution code.
+
+**Compatibility:** this PR implements the existing
+`armada.io/v1alpha1` concepts only. It introduces no provider beyond the
+accepted v1 GitHub/GitHubCopilot/GitHubRelease profiles and no consumer
+`.armada/` configuration.
+
+**Relies on:** ADR 0002, ADR 0003, ADR 0004 and ADR 0005. It supersedes none.
