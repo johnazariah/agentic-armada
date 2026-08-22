@@ -106,6 +106,10 @@ public sealed record SchedulingRequirements(
     decimal? MaximumEstimatedCost,
     string? CheckpointMode);
 
+public sealed record HeartbeatPolicy(
+    int IntervalSeconds,
+    int TimeoutSeconds);
+
 public sealed record ProjectSpec(
     ImmutableHashSet<RepositoryName> GitHubRepositories,
     GitHubReleaseEvidenceArchiveProfile EvidenceArchive,
@@ -232,6 +236,9 @@ public sealed record WorkloadStatus(
     ActorId? Successor,
     DateTimeOffset? ExpectedNextEventAt,
     DateTimeOffset? ProgressDeadlineAt,
+    HeartbeatPolicy? HeartbeatPolicy,
+    ActorId? Watchdog,
+    ResourceId? EvidenceReceiptReference,
     GitHubPullRequest? GitHubPullRequest);
 
 public sealed record Workload(

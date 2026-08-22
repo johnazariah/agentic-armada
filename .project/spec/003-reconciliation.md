@@ -27,12 +27,14 @@ a stable idempotency key and correlation/causation identifiers.
 
 ## Ownership and failure
 
-For every non-terminal workload, status contains current owner, successor,
-expected event, progress deadline, heartbeat policy and watchdog identity. A
-missed deadline creates a structured escalation event. If a session disappears,
-the session controller revokes its authority, selects/reconciles a successor,
-and retains the same workload/attempt history; a new attempt is created only
-when the policy says retry is safe.
+For every non-terminal workload, status contains a durable attempt reference,
+current owner, successor, expected event, progress deadline, heartbeat policy
+and watchdog identity. Terminal statuses preserve the independently verified
+evidence receipt reference without requiring an active owner binding. A missed
+deadline creates a structured escalation event. If a session disappears, the
+session controller revokes its authority, selects/reconciles a successor, and
+retains the same workload/attempt history; a new attempt is created only when
+the policy says retry is safe.
 
 Nodes may only run multiple project workloads concurrently when every admitted
 workload has a compatible, enforceable isolation profile. `DedicatedNode`,

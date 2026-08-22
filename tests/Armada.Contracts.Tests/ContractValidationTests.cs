@@ -98,7 +98,7 @@ public sealed class ContractValidationTests
             new Node(metadata with { ProjectId = null }, new NodeSpec(ResourceId.New(), new NodeSchedulingCeiling(1, 1000, 1024, 1024), DesiredNodeOperation.Active, []), new NodeStatus(status, null, null)),
             new NodeIdentity(metadata with { ProjectId = null }, new NodeIdentitySpec(Digest('a'), NodeAssurance.DeviceKey, 1, null), new NodeIdentityStatus(status, null, null, null, null)),
             new Capability(metadata with { ProjectId = null }, new CapabilitySpec(ResourceId.New(), ["container"]), new CapabilityStatus(status, [], null, null)),
-            new Workload(metadata, new WorkloadSpec(Digest('a'), Digest('b'), new GitHubSourceProfile(repository), new string('c', 40), Digest('d'), ["action"], new GitHubCopilotSessionProvider(), SessionAuthority.None, IsolationProfile.DedicatedNode, new GitHubIssue(1), new SchedulingRequirements(null, [], null, null, new ResourceRequirements(1, 0, 1, 1), null, null), new WorkloadEvidenceRequirement(new GitHubReleaseEvidenceArchiveProfile(repository), "standard")), new WorkloadStatus(status, WorkloadLifecycleState.Desired, null, null, null, null, null, null)),
+            new Workload(metadata, new WorkloadSpec(Digest('a'), Digest('b'), new GitHubSourceProfile(repository), new string('c', 40), Digest('d'), ["action"], new GitHubCopilotSessionProvider(), SessionAuthority.None, IsolationProfile.DedicatedNode, new GitHubIssue(1), new SchedulingRequirements(null, [], null, null, new ResourceRequirements(1, 0, 1, 1), null, null), new WorkloadEvidenceRequirement(new GitHubReleaseEvidenceArchiveProfile(repository), "standard")), ActiveWorkloadStatus(status)),
             new AdmissionDecision(metadata, new AdmissionDecisionSpec(ResourceId.New(), 1, ResourceId.New(), Digest('a'), Digest('b'), ["action"], SessionAuthority.None, IsolationProfile.DedicatedNode, new ResourceRequirements(1, 0, 1, 1), [], [], Digest('d'), DateTimeOffset.UtcNow.AddHours(1)), new AdmissionDecisionStatus(status, AdmissionVerdict.Pending, null)),
             new Attempt(metadata, new AttemptSpec(ResourceId.New(), 1, ResourceId.New(), ResourceId.New(), Digest('a'), Digest('b'), Digest('c'), Digest('d')), new AttemptStatus(status, null)),
             new Lease(metadata, new LeaseSpec(ResourceId.New(), ResourceId.New(), 1, DateTimeOffset.UtcNow.AddHours(1)), new LeaseStatus(status, null, null)),
@@ -232,6 +232,9 @@ public sealed class ContractValidationTests
                 new ActorId("successor"),
                 DateTimeOffset.Parse("2026-08-22T00:05:00Z"),
                 DateTimeOffset.Parse("2026-08-22T00:10:00Z"),
+                new HeartbeatPolicy(30, 90),
+                new ActorId("workload-watchdog"),
+                null,
                 new GitHubPullRequest(84, "PR_kwDO")));
 
         var json = V1Alpha1Json.Serialize(workload);
@@ -246,9 +249,11 @@ public sealed class ContractValidationTests
         var scheduling = root.GetProperty("spec").GetProperty("scheduling");
         Assert.Equal(12m, scheduling.GetProperty("maxEstimatedCost").GetDecimal());
         Assert.False(scheduling.TryGetProperty("maximumEstimatedCost", out _));
-        Assert.Equal(
-            workload.Spec.BundleDigest,
-            Assert.IsType<Result<Workload, ContractValidationError>.Success>(roundTrip).Value.Spec.BundleDigest);
+        var workloadRoundTrip = Assert.IsType<Result<Workload, ContractValidationError>.Success>(roundTrip).Value;
+        Assert.Equal(workload.Spec.BundleDigest, workloadRoundTrip.Spec.BundleDigest);
+        Assert.Equal(new HeartbeatPolicy(30, 90), workloadRoundTrip.Status.HeartbeatPolicy);
+        Assert.Equal(new ActorId("workload-watchdog"), workloadRoundTrip.Status.Watchdog);
+        Assert.Equal(new GitHubPullRequest(84, "PR_kwDO"), workloadRoundTrip.Status.GitHubPullRequest);
 
         var invalidEnum = V1Alpha1Json.DeserializeWorkload(json.Replace("IsolatedContainer", "UnsupportedIsolation", StringComparison.Ordinal));
 
@@ -282,6 +287,110 @@ public sealed class ContractValidationTests
         Assert.Null(exception);
         Assert.Equal(
             "missing-required-section",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Theory]
+    [InlineData("attempt")]
+    [InlineData("owner")]
+    [InlineData("successor")]
+    [InlineData("expected-event")]
+    [InlineData("progress-deadline")]
+    [InlineData("heartbeat-policy")]
+    [InlineData("watchdog")]
+    public void Non_terminal_workload_requires_each_durable_active_binding(string binding)
+    {
+        var wire = ValidWorkloadWire();
+        var status = wire.Status!;
+        wire = binding switch
+        {
+            "attempt" => wire with { Status = status with { AttemptRef = null } },
+            "owner" => wire with { Status = status with { Owner = null } },
+            "successor" => wire with { Status = status with { Successor = null } },
+            "expected-event" => wire with { Status = status with { ExpectedNextEventAt = null } },
+            "progress-deadline" => wire with { Status = status with { ProgressDeadlineAt = null } },
+            "heartbeat-policy" => wire with { Status = status with { HeartbeatPolicy = null } },
+            "watchdog" => wire with { Status = status with { Watchdog = null } },
+            _ => throw new ArgumentOutOfRangeException(nameof(binding), binding, null)
+        };
+
+        var result = V1Alpha1Json.FromWire(wire);
+
+        Assert.Equal(
+            "active-binding-required",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(30, 29)]
+    public void Heartbeat_policy_is_typed_and_validated(int intervalSeconds, int timeoutSeconds)
+    {
+        var wire = ValidWorkloadWire() with
+        {
+            Status = ValidWorkloadWire().Status! with
+            {
+                HeartbeatPolicy = new V1Alpha1HeartbeatPolicyWire(intervalSeconds, timeoutSeconds)
+            }
+        };
+
+        var result = V1Alpha1Json.FromWire(wire);
+
+        Assert.Equal(
+            "invalid-heartbeat-policy",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Terminal_workload_preserves_evidence_without_active_owner_bindings()
+    {
+        var evidenceReceiptReference = ResourceId.New();
+        var wire = ValidWorkloadWire() with
+        {
+            Status = ValidWorkloadWire().Status! with
+            {
+                Lifecycle = "completed",
+                AttemptRef = null,
+                Owner = null,
+                Successor = null,
+                ExpectedNextEventAt = null,
+                ProgressDeadlineAt = null,
+                HeartbeatPolicy = null,
+                Watchdog = null,
+                EvidenceReceiptRef = evidenceReceiptReference.ToString()
+            }
+        };
+
+        var roundTrip = Assert.IsType<Result<Workload, ContractValidationError>.Success>(
+            V1Alpha1Json.FromWire(wire)).Value;
+
+        Assert.Equal(evidenceReceiptReference, roundTrip.Status.EvidenceReceiptReference);
+        Assert.Null(roundTrip.Status.Owner);
+        Assert.Null(roundTrip.Status.Watchdog);
+
+        var missingEvidence = V1Alpha1Json.FromWire(wire with
+        {
+            Status = wire.Status! with { EvidenceReceiptRef = null }
+        });
+        Assert.Equal(
+            "evidence-receipt-required",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(missingEvidence).Error.Code);
+    }
+
+    [Fact]
+    public void Json_dto_rejects_unknown_workload_status_fields()
+    {
+        var json = V1Alpha1Json.Serialize(new Workload(
+            Metadata(new ProjectId(Guid.Parse("22222222-2222-2222-2222-222222222222"))),
+            ValidWorkloadSpec(),
+            ActiveWorkloadStatus(Status())));
+        var payload = JsonNode.Parse(json)!.AsObject();
+        payload["status"]!["unknownStatusField"] = true;
+
+        var result = V1Alpha1Json.DeserializeWorkload(payload.ToJsonString());
+
+        Assert.Equal(
+            "invalid-json",
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
     }
 
@@ -495,6 +604,9 @@ public sealed class ContractValidationTests
                 resource.Deserialize(json.Replace("\"spec\":{", "\"spec\":{\"unknown\":true,", StringComparison.Ordinal)),
                 $"{resource.Name} accepted an unknown nested property.");
             Assert.False(
+                resource.Deserialize(json.Replace("\"status\":{", "\"status\":{\"unknown\":true,", StringComparison.Ordinal)),
+                $"{resource.Name} accepted an unknown status property.");
+            Assert.False(
                 resource.Deserialize(json[..^1] + ",\"unknown\":true}"),
                 $"{resource.Name} accepted an unknown root property.");
         }
@@ -580,7 +692,19 @@ public sealed class ContractValidationTests
                     null,
                     null),
                 new("GitHubRelease", "johnazariah/agentic-armada-evidence", "standard")),
-            new(1, [], "desired", null, null, null, null, null, null));
+            new(
+                1,
+                [],
+                "desired",
+                ResourceId.New().ToString(),
+                "workload-owner",
+                "workload-successor",
+                DateTimeOffset.Parse("2026-08-22T00:05:00Z"),
+                DateTimeOffset.Parse("2026-08-22T00:10:00Z"),
+                new V1Alpha1HeartbeatPolicyWire(30, 90),
+                "workload-watchdog",
+                null,
+                null));
 
     private static V1Alpha1WorkloadWire WithScheduling(
         int cpu,
@@ -674,7 +798,7 @@ public sealed class ContractValidationTests
         var identity = new NodeIdentity(metadata with { ProjectId = null }, new NodeIdentitySpec(Digest('a'), NodeAssurance.DeviceKey, 1, null), new NodeIdentityStatus(status, "serial", DateTimeOffset.UtcNow, NodeAssurance.DeviceKey, null));
         var capability = new Capability(metadata with { ProjectId = null }, new CapabilitySpec(node.Metadata.Uid, ["container"]), new CapabilityStatus(status, ["container"], Digest('a'), DateTimeOffset.UtcNow));
         var project = new Project(metadata with { ProjectId = null }, new ProjectSpec([repository], new GitHubReleaseEvidenceArchiveProfile(repository), new GitHubCopilotSessionProfile(Digest('a')), Digest('b'), 50m), new ProjectStatus(status, 1m));
-        var workload = new Workload(metadata, new WorkloadSpec(Digest('a'), Digest('b'), new GitHubSourceProfile(repository), new string('c', 40), Digest('d'), ["action"], new GitHubCopilotSessionProvider(), SessionAuthority.None, IsolationProfile.DedicatedNode, new GitHubIssue(1), new SchedulingRequirements(null, [], null, null, new ResourceRequirements(1, 0, 1, 1), null, null), new WorkloadEvidenceRequirement(new GitHubReleaseEvidenceArchiveProfile(repository), "standard")), new WorkloadStatus(status, WorkloadLifecycleState.Desired, null, null, null, null, null, null));
+        var workload = new Workload(metadata, ValidWorkloadSpec(), ActiveWorkloadStatus(status));
         var admission = new AdmissionDecision(metadata, new AdmissionDecisionSpec(workload.Metadata.Uid, 1, node.Metadata.Uid, Digest('a'), Digest('b'), ["action"], SessionAuthority.None, IsolationProfile.DedicatedNode, new ResourceRequirements(1, 0, 1, 1), [Digest('c')], ["github"], Digest('d'), DateTimeOffset.UtcNow.AddHours(1)), new AdmissionDecisionStatus(status, AdmissionVerdict.Pending, null));
         var attempt = new Attempt(metadata, new AttemptSpec(workload.Metadata.Uid, 1, node.Metadata.Uid, admission.Metadata.Uid, Digest('a'), Digest('b'), Digest('c'), Digest('d')), new AttemptStatus(status, WorkloadLifecycleState.Failed));
         var lease = new Lease(metadata, new LeaseSpec(attempt.Metadata.Uid, node.Metadata.Uid, 1, DateTimeOffset.UtcNow.AddHours(1)), new LeaseStatus(status, DateTimeOffset.UtcNow, null));
@@ -697,4 +821,35 @@ public sealed class ContractValidationTests
             ("Event", "type", () => V1Alpha1Json.Serialize(@event), json => V1Alpha1Json.DeserializeEvent(json) is Result<Event, ContractValidationError>.Success value && value.Value.Spec.CausationId is not null)
         ];
     }
+
+    private static WorkloadSpec ValidWorkloadSpec() =>
+        new(
+            Digest('a'),
+            Digest('b'),
+            new GitHubSourceProfile(Repository("johnazariah/agentic-armada")),
+            new string('c', 40),
+            Digest('d'),
+            ["action"],
+            new GitHubCopilotSessionProvider(),
+            SessionAuthority.None,
+            IsolationProfile.DedicatedNode,
+            new GitHubIssue(1),
+            new SchedulingRequirements(null, [], null, null, new ResourceRequirements(1, 0, 1, 1), null, null),
+            new WorkloadEvidenceRequirement(
+                new GitHubReleaseEvidenceArchiveProfile(Repository("johnazariah/agentic-armada")),
+                "standard"));
+
+    private static WorkloadStatus ActiveWorkloadStatus(ResourceStatus status) =>
+        new(
+            status,
+            WorkloadLifecycleState.Desired,
+            ResourceId.New(),
+            new ActorId("workload-owner"),
+            new ActorId("workload-successor"),
+            DateTimeOffset.Parse("2026-08-22T00:05:00Z"),
+            DateTimeOffset.Parse("2026-08-22T00:10:00Z"),
+            new HeartbeatPolicy(30, 90),
+            new ActorId("workload-watchdog"),
+            null,
+            null);
 }

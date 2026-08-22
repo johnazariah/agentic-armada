@@ -215,6 +215,15 @@
         "checkpointMode": { "enum": [ "Forbidden", "Preferred", "Required" ] }
       }
     },
+    "HeartbeatPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [ "intervalSeconds", "timeoutSeconds" ],
+      "properties": {
+        "intervalSeconds": { "type": "integer", "minimum": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 }
+      }
+    },
     "Envelope": {
       "type": "object",
       "additionalProperties": false,
@@ -343,7 +352,8 @@
                     "lastObservedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -379,7 +389,8 @@
                     "revokedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -414,7 +425,8 @@
                     "verifiedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -500,6 +512,9 @@
                     "successor": { "type": "string" },
                     "expectedNextEventAt": { "$ref": "#/$defs/Timestamp" },
                     "progressDeadlineAt": { "$ref": "#/$defs/Timestamp" },
+                    "heartbeatPolicy": { "$ref": "#/$defs/HeartbeatPolicy" },
+                    "watchdog": { "type": "string", "minLength": 1 },
+                    "evidenceReceiptRef": { "$ref": "#/$defs/Uid" },
                     "githubPullRequest": {
                       "type": "object",
                       "additionalProperties": false,
@@ -510,8 +525,39 @@
                       }
                     }
                   }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "lifecycle": {
+                        "enum": [
+                          "desired", "admitted", "assigned", "claimed",
+                          "start-approved", "running", "terminal-pending"
+                        ]
+                      }
+                    },
+                    "required": [ "lifecycle" ]
+                  },
+                  "then": {
+                    "required": [
+                      "attemptRef", "owner", "successor", "expectedNextEventAt",
+                      "progressDeadlineAt", "heartbeatPolicy", "watchdog"
+                    ]
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "lifecycle": {
+                        "enum": [ "completed", "failed", "cancelled", "expired" ]
+                      }
+                    },
+                    "required": [ "lifecycle" ]
+                  },
+                  "then": { "required": [ "evidenceReceiptRef" ] }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -595,7 +641,8 @@
                     "decisionDigest": { "$ref": "#/$defs/Sha256" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }
@@ -759,7 +806,8 @@
                     "verifiedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
-              ]
+              ],
+              "unevaluatedProperties": false
             }
           }
         }

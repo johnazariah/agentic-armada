@@ -60,6 +60,21 @@ message Condition {
 }
 message Status { int64 observed_generation = 1; repeated Condition conditions = 2; }
 message ResourceRequirements { int32 cpu_millicores = 1; int32 gpu_count = 2; int64 memory_bytes = 3; int64 storage_bytes = 4; }
+message LabelSelector { map<string, string> match_labels = 1; }
+message Toleration { string key = 1; string operator = 2; optional string value = 3; string effect = 4; }
+message SchedulingRequirements {
+  optional LabelSelector host_selector = 1;
+  repeated Toleration tolerations = 2;
+  optional LabelSelector affinity = 3;
+  optional LabelSelector anti_affinity = 4;
+  ResourceRequirements resources = 5;
+  optional double max_estimated_cost = 6;
+  optional string checkpoint_mode = 7;
+}
+message HeartbeatPolicy { int32 interval_seconds = 1; int32 timeout_seconds = 2; }
+message GitHubIssue { int32 number = 1; optional string node_id = 2; }
+message GitHubPullRequest { int32 number = 1; optional string node_id = 2; }
+message WorkloadEvidence { string archive_provider = 1; string archive_repository = 2; string retention_class = 3; }
 message BudgetLimit { double amount = 1; }
 message SessionProfile { string provider = 1; string profile_digest = 2; }
 
@@ -104,8 +119,34 @@ message CapabilitySpec { string node_ref = 1; repeated string requested_scopes =
 message CapabilityStatus { Status common = 1; repeated string verified_scopes = 2; optional string inventory_digest = 3; optional google.protobuf.Timestamp verified_at = 4; }
 
 message Workload { Metadata metadata = 1; WorkloadSpec spec = 2; WorkloadStatus status = 3; }
-message WorkloadSpec { string bundle_digest = 1; string policy_digest = 2; string repository = 3; string source_revision = 4; string config_digest = 5; repeated string action_schemas = 6; string session_authority = 7; string isolation_profile = 8; int32 github_issue_number = 9; ResourceRequirements resources = 10; string evidence_archive_repository = 11; string retention_class = 12; }
-message WorkloadStatus { Status common = 1; string lifecycle = 2; optional string attempt_ref = 3; optional string owner = 4; optional string successor = 5; optional google.protobuf.Timestamp expected_next_event_at = 6; optional google.protobuf.Timestamp progress_deadline_at = 7; }
+message WorkloadSpec {
+  string bundle_digest = 1;
+  string policy_digest = 2;
+  string source_provider = 3;
+  string repository = 4;
+  string source_revision = 5;
+  string config_digest = 6;
+  repeated string action_schemas = 7;
+  string session_provider = 8;
+  string session_authority = 9;
+  string isolation_profile = 10;
+  GitHubIssue github_issue = 11;
+  SchedulingRequirements scheduling = 12;
+  WorkloadEvidence evidence = 13;
+}
+message WorkloadStatus {
+  Status common = 1;
+  string lifecycle = 2;
+  optional string attempt_ref = 3;
+  optional string owner = 4;
+  optional string successor = 5;
+  optional google.protobuf.Timestamp expected_next_event_at = 6;
+  optional google.protobuf.Timestamp progress_deadline_at = 7;
+  HeartbeatPolicy heartbeat_policy = 8;
+  optional string watchdog = 9;
+  optional string evidence_receipt_ref = 10;
+  GitHubPullRequest github_pull_request = 11;
+}
 
 message AdmissionDecision { Metadata metadata = 1; AdmissionDecisionSpec spec = 2; AdmissionDecisionStatus status = 3; }
 message AdmissionDecisionSpec { string workload_ref = 1; int64 workload_generation = 2; string node_ref = 3; string bundle_digest = 4; string policy_digest = 5; repeated string approved_actions = 6; string session_authority = 7; string isolation_profile = 8; ResourceRequirements resource_limits = 9; repeated string credential_grant_digests = 10; repeated string network_scope = 11; string evidence_requirements_digest = 12; google.protobuf.Timestamp expires_at = 13; }

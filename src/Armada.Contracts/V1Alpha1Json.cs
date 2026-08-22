@@ -72,6 +72,11 @@ public static partial class V1Alpha1Json
                 workload.Status.Successor?.Value,
                 workload.Status.ExpectedNextEventAt,
                 workload.Status.ProgressDeadlineAt,
+                workload.Status.HeartbeatPolicy is { } heartbeatPolicy
+                    ? new(heartbeatPolicy.IntervalSeconds, heartbeatPolicy.TimeoutSeconds)
+                    : null,
+                workload.Status.Watchdog?.Value,
+                workload.Status.EvidenceReceiptReference?.ToString(),
                 workload.Status.GitHubPullRequest is { } pullRequest
                     ? new(pullRequest.Number, pullRequest.NodeId)
                     : null));
@@ -222,6 +227,16 @@ public static partial class V1Alpha1Json
         {
             return new Result<Workload, ContractValidationError>.Failure(attemptFailure.Error);
         }
+        var evidenceReceiptReference = OptionalResourceId(wire.Status.EvidenceReceiptRef);
+        if (evidenceReceiptReference is Result<ResourceId?, ContractValidationError>.Failure evidenceReceiptFailure)
+        {
+            return new Result<Workload, ContractValidationError>.Failure(evidenceReceiptFailure.Error);
+        }
+        var heartbeatPolicy = HeartbeatPolicy(wire.Status.HeartbeatPolicy);
+        if (heartbeatPolicy is Result<HeartbeatPolicy?, ContractValidationError>.Failure heartbeatPolicyFailure)
+        {
+            return new Result<Workload, ContractValidationError>.Failure(heartbeatPolicyFailure.Error);
+        }
         if (wire.Status.GithubPullRequest is { } statusPullRequest &&
             (statusPullRequest.Number < 1 || statusPullRequest.NodeId is { Length: 0 }))
         {
@@ -229,6 +244,30 @@ public static partial class V1Alpha1Json
         }
 
         var attemptSuccess = (Result<ResourceId?, ContractValidationError>.Success)attemptReference;
+        var evidenceReceiptSuccess = (Result<ResourceId?, ContractValidationError>.Success)evidenceReceiptReference;
+        var heartbeatPolicySuccess = (Result<HeartbeatPolicy?, ContractValidationError>.Success)heartbeatPolicy;
+        var isTerminal = lifecycleSuccess.Value is WorkloadLifecycleState.Completed
+            or WorkloadLifecycleState.Failed
+            or WorkloadLifecycleState.Cancelled
+            or WorkloadLifecycleState.Expired;
+        if (isTerminal)
+        {
+            if (evidenceReceiptSuccess.Value is null)
+            {
+                return Failure<Workload>("evidence-receipt-required", "Terminal workloads require an evidence receipt reference.");
+            }
+        }
+        else if (attemptSuccess.Value is null ||
+                 string.IsNullOrWhiteSpace(wire.Status.Owner) ||
+                 string.IsNullOrWhiteSpace(wire.Status.Successor) ||
+                 wire.Status.ExpectedNextEventAt is null ||
+                 wire.Status.ProgressDeadlineAt is null ||
+                 heartbeatPolicySuccess.Value is null ||
+                 string.IsNullOrWhiteSpace(wire.Status.Watchdog))
+        {
+            return Failure<Workload>("active-binding-required", "Non-terminal workloads require attempt, owner, successor, deadlines, heartbeat policy, and watchdog.");
+        }
+
         return new Result<Workload, ContractValidationError>.Success(
             new(
                 metadataSuccess.Value,
@@ -255,6 +294,9 @@ public static partial class V1Alpha1Json
                     wire.Status.Successor is null ? null : new ActorId(wire.Status.Successor),
                     wire.Status.ExpectedNextEventAt,
                     wire.Status.ProgressDeadlineAt,
+                    heartbeatPolicySuccess.Value,
+                    wire.Status.Watchdog is null ? null : new ActorId(wire.Status.Watchdog),
+                    evidenceReceiptSuccess.Value,
                     wire.Status.GithubPullRequest is { } pullRequest
                         ? new GitHubPullRequest(pullRequest.Number, pullRequest.NodeId)
                         : null)));
@@ -506,6 +548,23 @@ public static partial class V1Alpha1Json
             wire.CheckpointMode));
     }
 
+    private static Result<HeartbeatPolicy?, ContractValidationError> HeartbeatPolicy(
+        V1Alpha1HeartbeatPolicyWire? wire)
+    {
+        if (wire is null)
+        {
+            return Success<HeartbeatPolicy?>(null);
+        }
+        if (wire.IntervalSeconds < 1 || wire.TimeoutSeconds < wire.IntervalSeconds)
+        {
+            return Failure<HeartbeatPolicy?>(
+                "invalid-heartbeat-policy",
+                "Heartbeat interval must be positive and timeout must not precede the interval.");
+        }
+
+        return Success<HeartbeatPolicy?>(new HeartbeatPolicy(wire.IntervalSeconds, wire.TimeoutSeconds));
+    }
+
     private static string LifecycleValue(WorkloadLifecycleState state) =>
         state switch
         {
@@ -642,5 +701,6 @@ public sealed record V1Alpha1SchedulingWire(V1Alpha1LabelSelectorWire? HostSelec
 public sealed record V1Alpha1LabelSelectorWire(ImmutableDictionary<string, string>? MatchLabels);
 public sealed record V1Alpha1TolerationWire(string Key, string Operator, string? Value, string Effect);
 public sealed record V1Alpha1ResourceRequirementsWire(int CpuMillicores, int GpuCount, long MemoryBytes, long StorageBytes);
-public sealed record V1Alpha1WorkloadStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, string Lifecycle, string? AttemptRef, string? Owner, string? Successor, DateTimeOffset? ExpectedNextEventAt, DateTimeOffset? ProgressDeadlineAt, V1Alpha1GitHubPullRequestWire? GithubPullRequest);
+public sealed record V1Alpha1WorkloadStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, string Lifecycle, string? AttemptRef, string? Owner, string? Successor, DateTimeOffset? ExpectedNextEventAt, DateTimeOffset? ProgressDeadlineAt, V1Alpha1HeartbeatPolicyWire? HeartbeatPolicy, string? Watchdog, string? EvidenceReceiptRef, V1Alpha1GitHubPullRequestWire? GithubPullRequest);
+public sealed record V1Alpha1HeartbeatPolicyWire(int IntervalSeconds, int TimeoutSeconds);
 public sealed record V1Alpha1GitHubPullRequestWire(int Number, string? NodeId);
