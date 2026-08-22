@@ -156,6 +156,8 @@ public static class SessionAuthorityValidation
         EvidenceReceipt? evidence)
     {
         if (evidence is null ||
+            evidence.Metadata.OrganisationId != attempt.Metadata.OrganisationId ||
+            evidence.Metadata.ProjectId != attempt.Metadata.ProjectId ||
             evidence.Spec.AttemptReference != attempt.Metadata.Uid ||
             evidence.Status.Verification != EvidenceVerification.Verified ||
             evidence.Status.VerifiedAt is null)

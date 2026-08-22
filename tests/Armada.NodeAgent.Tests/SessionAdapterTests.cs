@@ -132,6 +132,27 @@ public sealed class SessionAdapterTests
     }
 
     [Fact]
+    public async Task Terminal_archive_refuses_verified_evidence_from_another_scope()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None);
+        var request = fixture.Operation(fixture.Parent);
+        await adapter.WakeParentAsync(request, CancellationToken.None);
+        await adapter.CancelParentAsync(request, CancellationToken.None);
+        var crossScopeEvidence = fixture.Evidence() with
+        {
+            Metadata = fixture.Metadata("cross-scope-evidence") with { ProjectId = new ProjectId(Guid.NewGuid()) }
+        };
+
+        Assert.Equal(
+            "independent-evidence-required",
+            Failure(await adapter.ArchiveParentAsync(
+                request with { Evidence = crossScopeEvidence },
+                CancellationToken.None)).Code);
+    }
+
+    [Fact]
     public async Task Child_creation_refuses_cross_attempt_and_cross_node_bindings()
     {
         var fixture = new AdapterFixture();
@@ -219,6 +240,29 @@ public sealed class SessionAdapterTests
             "parent-idempotency-key-reused",
             Failure(await adapter.CreateParentAsync(
                 fixture.Create(conflicting, replaces: fixture.Parent.Metadata.Uid),
+                CancellationToken.None)).Code);
+    }
+
+    [Fact]
+    public async Task Replacement_refuses_a_disappeared_child_or_active_issue_master()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None);
+        await adapter.WakeParentAsync(fixture.Operation(fixture.Parent), CancellationToken.None);
+        await adapter.CreateChildAsync(fixture.Create(fixture.Child), fixture.Parent, CancellationToken.None);
+        Value(adapter.MarkDisappearedForReconciliation(fixture.Child));
+
+        var replacement = fixture.Parent with { Metadata = fixture.Metadata("replacement") };
+        Assert.Equal(
+            "invalid-session-replacement",
+            Failure(await adapter.CreateParentAsync(
+                fixture.Create(replacement, replaces: fixture.Child.Metadata.Uid),
+                CancellationToken.None)).Code);
+        Assert.Equal(
+            "invalid-session-replacement",
+            Failure(await adapter.CreateParentAsync(
+                fixture.Create(replacement, replaces: fixture.Parent.Metadata.Uid),
                 CancellationToken.None)).Code);
     }
 
@@ -357,7 +401,7 @@ public sealed class SessionAdapterTests
             ? success.Value
             : throw new InvalidOperationException();
 
-        private EvidenceReceipt Evidence() =>
+        public EvidenceReceipt Evidence() =>
             new(Metadata("evidence"), new(Attempt.Metadata.Uid, Digest('a'), new(Repository()), "release", Digest('b')), new(new(1, ImmutableArray<Condition>.Empty), EvidenceVerification.Verified, now));
 
         public ResourceMetadata Metadata(string name, ResourceId? id = null) =>

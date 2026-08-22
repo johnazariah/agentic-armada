@@ -36,6 +36,10 @@
 - Pure reconciliation independently validates matching organisation/project
   scope across workload-owned resources, sessions and evidence, and validates
   that the organisation-scoped node belongs to the workload organisation.
+- Adapter archival applies the same evidence-to-attempt organisation/project
+  binding. Replacement provenance now requires the replaced runtime to be a
+  disappeared Issue Master; children and active parents cannot authorise a new
+  parent session.
 
 ## Quality evidence
 

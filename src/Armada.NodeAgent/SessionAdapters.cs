@@ -148,6 +148,7 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
             {
                 if (!sessions.TryGetValue(replaces, out var replaced) ||
                     replaced.Liveness != SessionLiveness.Disappeared ||
+                    replaced.Session.Spec.Role != AgentSessionRole.IssueMaster ||
                     replaced.Session.Spec.AttemptReference != request.Session.Spec.AttemptReference ||
                     replaced.Session.Spec.NodeReference != request.Session.Spec.NodeReference ||
                     replaced.Session.Metadata.ProjectId != request.Session.Metadata.ProjectId ||
