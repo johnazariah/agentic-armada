@@ -331,6 +331,7 @@ public static class MajorDomoReconciliation
         if (input.Attempt is null ||
             input.Attempt.Spec.WorkloadReference != input.Workload.Metadata.Uid ||
             input.Attempt.Spec.WorkloadGeneration != input.Workload.Metadata.Generation ||
+            input.Attempt.Spec.NodeReference != input.Node.Metadata.Uid ||
             input.Workload.Status.AttemptReference != input.Attempt.Metadata.Uid)
         {
             return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Failure(

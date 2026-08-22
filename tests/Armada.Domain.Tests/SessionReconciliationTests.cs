@@ -130,6 +130,28 @@ public sealed class SessionReconciliationTests
     }
 
     [Fact]
+    public void Terminal_evidence_cleanup_refuses_a_major_domo_on_another_node()
+    {
+        var fixture = new SessionFixture();
+        fixture.Workload = fixture.Workload with
+        {
+            Status = fixture.Workload.Status with { Lifecycle = WorkloadLifecycleState.TerminalPending }
+        };
+        var otherNode = fixture.Node with { Metadata = fixture.Metadata("other-node") };
+
+        Assert.Equal(
+            "attempt-binding-mismatch",
+            Failure(MajorDomoReconciliation.Reconcile(new(
+                otherNode,
+                fixture.Workload,
+                fixture.Admission,
+                fixture.Attempt,
+                ImmutableArray.Create(fixture.Runtime(SessionLiveness.Terminal)),
+                fixture.Evidence(EvidenceVerification.Verified),
+                fixture.Now))).Code);
+    }
+
+    [Fact]
     public void Reconciliation_refuses_an_expired_or_wrongly_bound_admission()
     {
         var fixture = new SessionFixture();
