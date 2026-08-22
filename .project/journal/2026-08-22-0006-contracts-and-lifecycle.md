@@ -16,6 +16,15 @@
 - Added focused coverage for valid lifecycle progression, invalid predecessors
   and assignments, stale CAS tokens, idempotent/conflicting replays, terminal
   evidence gating and fail-closed contract values.
+- Completed strict v1alpha1 JSON wire DTO/mapping support for every core
+  resource kind, including nested unknown-field rejection, project-scoped
+  resource validation and schema-shaped provider/budget/status values.
+- Added the versioned protobuf resource baseline and compile validation, plus
+  tracked Coverlet verification and CI invocation for the affected production
+  assemblies.
+- Coverage excludes only the protobuf compiler's generated
+  `obj/**/Resources.cs`; all hand-written resource contracts, wire mappers and
+  lifecycle code remain subject to the 85% floor.
 
 ## Boundary maintained
 

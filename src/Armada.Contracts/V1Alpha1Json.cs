@@ -4,12 +4,13 @@ using System.Text.Json.Serialization;
 
 namespace Armada.Contracts;
 
-public static class V1Alpha1Json
+public static partial class V1Alpha1Json
 {
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
     };
 
     public static string Serialize(Project project) =>
@@ -34,7 +35,7 @@ public static class V1Alpha1Json
                 new("GitHubRelease", project.Spec.EvidenceArchive.Repository.Value),
                 new("GitHubCopilot", project.Spec.SessionProfile.ProfileDigest.Value),
                 project.Spec.PolicyBundleDigest.Value,
-                project.Spec.BudgetLimit),
+                project.Spec.BudgetLimit is { } budgetLimit ? new(budgetLimit) : null),
             new(
                 project.Status.Common.ObservedGeneration,
                 project.Status.Common.Conditions.Select(ToWire).ToArray(),
@@ -93,6 +94,11 @@ public static class V1Alpha1Json
         var sessionDigest = Sha256Digest.Parse(wire.Spec.SessionProfile.ProfileDigest);
         var repositories = Repositories(wire.Spec.Github.Repositories);
 
+        if (wire.Spec.BudgetLimit is { Amount: < 0 })
+        {
+            return Failure<Project>("invalid-budget-limit", "Project budget limit cannot be negative.");
+        }
+
         if (metadata is not Result<ResourceMetadata, ContractValidationError>.Success metadataSuccess ||
             policyDigest is not Result<Sha256Digest, ContractValidationError>.Success policySuccess ||
             evidenceRepository is not Result<RepositoryName, ContractValidationError>.Success evidenceSuccess ||
@@ -122,7 +128,7 @@ public static class V1Alpha1Json
                     new GitHubReleaseEvidenceArchiveProfile(evidenceSuccess.Value),
                     new GitHubCopilotSessionProfile(sessionSuccess.Value),
                     policySuccess.Value,
-                    wire.Spec.BudgetLimit),
+                    wire.Spec.BudgetLimit?.Amount),
                 new ProjectStatus(((Result<ResourceStatus, ContractValidationError>.Success)status).Value, wire.Status.BudgetObserved)));
     }
 
@@ -392,8 +398,13 @@ public static class V1Alpha1Json
         long observedGeneration,
         IEnumerable<V1Alpha1ConditionWire>? conditions)
     {
+        if (conditions is null)
+        {
+            return Failure<ResourceStatus>("missing-required-status", "Status conditions are required.");
+        }
+
         var values = ImmutableArray.CreateBuilder<Condition>();
-        foreach (var wire in conditions ?? [])
+        foreach (var wire in conditions)
         {
             if (wire is null)
             {
@@ -528,6 +539,13 @@ public static class V1Alpha1Json
 
     private static Result<ImmutableHashSet<RepositoryName>, ContractValidationError> Repositories(IEnumerable<string>? values)
     {
+        if (values is null || !values.Any())
+        {
+            return Failure<ImmutableHashSet<RepositoryName>>(
+                "invalid-repositories",
+                "Project repository allowlists must contain at least one repository.");
+        }
+
         var repositories = ImmutableHashSet.CreateBuilder<RepositoryName>();
         foreach (var value in values ?? [])
         {
@@ -612,8 +630,9 @@ public sealed record V1Alpha1OwnerReferenceWire(string Kind, string Uid);
 public sealed record V1Alpha1ProjectStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, decimal? BudgetObserved);
 public sealed record V1Alpha1ConditionWire(string Type, string Status, string Reason, string Message, long ObservedGeneration, DateTimeOffset LastTransitionTime, V1Alpha1BlockedEscalationWire? Escalation);
 public sealed record V1Alpha1BlockedEscalationWire(string ExactBlocker, string Actor, string RequiredAction, string Location, string Successor, DateTimeOffset Deadline);
-public sealed record V1Alpha1ProjectSpecWire(V1Alpha1GitHubWire? Github, V1Alpha1EvidenceArchiveWire? EvidenceArchive, V1Alpha1SessionProfileWire? SessionProfile, string PolicyBundleDigest, decimal? BudgetLimit);
+public sealed record V1Alpha1ProjectSpecWire(V1Alpha1GitHubWire? Github, V1Alpha1EvidenceArchiveWire? EvidenceArchive, V1Alpha1SessionProfileWire? SessionProfile, string PolicyBundleDigest, V1Alpha1BudgetLimitWire? BudgetLimit);
 public sealed record V1Alpha1GitHubWire(IReadOnlyList<string>? Repositories);
+public sealed record V1Alpha1BudgetLimitWire(decimal Amount);
 public sealed record V1Alpha1EvidenceArchiveWire(string Provider, string Repository);
 public sealed record V1Alpha1SessionProfileWire(string Provider, string ProfileDigest);
 public sealed record V1Alpha1WorkloadSpecWire(string BundleDigest, string PolicyDigest, string SourceProvider, string Repository, string SourceRevision, string ConfigDigest, IReadOnlyList<string>? ActionSchemas, string SessionProvider, string SessionAuthority, string IsolationProfile, V1Alpha1GitHubIssueWire? GithubIssue, V1Alpha1SchedulingWire? Scheduling, V1Alpha1WorkloadEvidenceWire? Evidence);

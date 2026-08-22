@@ -46,6 +46,10 @@ contracts required for the first pure workload-lifecycle implementation.
   replays and stale resource versions fail with typed domain errors.
 - `Blocked=True` conditions require structured escalation data naming the exact
   blocker, actor, required action, location, successor and deadline.
+- Strict v1alpha1 JSON mapping round-trips every core resource kind and rejects
+  missing required or unknown root/nested fields with typed validation errors.
+- The versioned protobuf contract covers all core envelopes, common metadata,
+  status, conditions and escalations, and compiles with the contracts project.
 - The solution build and contracts/lifecycle tests pass without adding
   persistence, API, node-agent, session-adapter, GitHub-adapter or process
   execution code.
@@ -68,4 +72,8 @@ coverage for the affected production projects and fails below the 85% floor.
 The repository CI workflow invokes this exact command. Each test project
 includes only its directly tested production assembly. `SkipAutoProps=true`
 omits only compiler-generated record/DTO auto-property accessors; all
-hand-written contract, mapper and lifecycle source remains measured.
+hand-written contract, mapper and lifecycle source remains measured. The
+Contracts test project also excludes only
+`src/Armada.Contracts/obj/**/Resources.cs`, the protobuf compiler output; the
+versioned source `.proto` remains build-validated and the generated file
+contains no hand-written production logic.

@@ -2,6 +2,7 @@ using Armada.Contracts;
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using FsCheck.Xunit;
 
 namespace Armada.Contracts.Tests;
@@ -170,6 +171,8 @@ public sealed class ContractValidationTests
         Assert.Equal(JsonValueKind.String, root.GetProperty("metadata").GetProperty("uid").ValueKind);
         Assert.Equal("GitHubRelease", root.GetProperty("spec").GetProperty("evidenceArchive").GetProperty("provider").GetString());
         Assert.Equal("GitHubCopilot", root.GetProperty("spec").GetProperty("sessionProfile").GetProperty("provider").GetString());
+        Assert.Equal(JsonValueKind.Object, root.GetProperty("spec").GetProperty("budgetLimit").ValueKind);
+        Assert.Equal(100m, root.GetProperty("spec").GetProperty("budgetLimit").GetProperty("amount").GetDecimal());
         var projectRoundTrip = Assert.IsType<Result<Project, ContractValidationError>.Success>(roundTrip).Value;
         Assert.Equal(
             project.Spec.GitHubRepositories,
@@ -476,6 +479,42 @@ public sealed class ContractValidationTests
             Assert.IsType<Result<Project, ContractValidationError>.Failure>(result).Error.Code);
     }
 
+    [Fact]
+    public void Every_resource_wire_round_trips_and_rejects_missing_or_unknown_properties()
+    {
+        foreach (var resource in ResourceCases())
+        {
+            var json = resource.Serialize();
+            var missingNested = JsonNode.Parse(json)!.AsObject();
+            missingNested["spec"]!.AsObject().Remove(resource.RequiredSpecProperty);
+
+            Assert.True(resource.Deserialize(json), $"{resource.Name} did not round-trip.");
+            Assert.False(resource.Deserialize($$"""{"apiVersion":"armada.io/v1alpha1","kind":"{{resource.Name}}"}"""), $"{resource.Name} accepted missing sections.");
+            Assert.False(resource.Deserialize(missingNested.ToJsonString()), $"{resource.Name} accepted a missing nested required property.");
+            Assert.False(
+                resource.Deserialize(json.Replace("\"spec\":{", "\"spec\":{\"unknown\":true,", StringComparison.Ordinal)),
+                $"{resource.Name} accepted an unknown nested property.");
+            Assert.False(
+                resource.Deserialize(json[..^1] + ",\"unknown\":true}"),
+                $"{resource.Name} accepted an unknown root property.");
+        }
+    }
+
+    [Fact]
+    public void Project_rejects_null_or_empty_repository_allowlists()
+    {
+        var wire = ValidProjectWire();
+
+        Assert.Equal(
+            "invalid-repositories",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(wire with { Spec = wire.Spec! with { Github = new(null) } })).Error.Code);
+        Assert.Equal(
+            "invalid-repositories",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(wire with { Spec = wire.Spec! with { Github = new([]) } })).Error.Code);
+    }
+
     private static Sha256Digest Digest(char character) =>
         Assert.IsType<Result<Sha256Digest, ContractValidationError>.Success>(
             Sha256Digest.Parse($"sha256:{new string(character, 64)}")).Value;
@@ -512,7 +551,7 @@ public sealed class ContractValidationTests
                 new("GitHubRelease", "johnazariah/agentic-armada-evidence"),
                 new("GitHubCopilot", Digest('a').Value),
                 Digest('b').Value,
-                100m),
+                new V1Alpha1BudgetLimitWire(100m)),
             new(1, [], 10m));
 
     private static V1Alpha1WorkloadWire ValidWorkloadWire() =>
@@ -625,4 +664,37 @@ public sealed class ContractValidationTests
             DateTimeOffset.Parse("2026-08-22T00:00:00Z"),
             DateTimeOffset.Parse("2026-08-22T00:00:00Z"),
             null);
+
+    private static IEnumerable<(string Name, string RequiredSpecProperty, Func<string> Serialize, Func<string, bool> Deserialize)> ResourceCases()
+    {
+        var repository = Repository("johnazariah/agentic-armada");
+        var metadata = Metadata(new ProjectId(Guid.Parse("22222222-2222-2222-2222-222222222222")));
+        var status = Status();
+        var node = new Node(metadata with { ProjectId = null }, new NodeSpec(ResourceId.New(), new NodeSchedulingCeiling(1, 1000, 1024, 1024), DesiredNodeOperation.Active, [new("dedicated", "armada", TaintEffect.NoSchedule)]), new NodeStatus(status, 1, DateTimeOffset.UtcNow));
+        var identity = new NodeIdentity(metadata with { ProjectId = null }, new NodeIdentitySpec(Digest('a'), NodeAssurance.DeviceKey, 1, null), new NodeIdentityStatus(status, "serial", DateTimeOffset.UtcNow, NodeAssurance.DeviceKey, null));
+        var capability = new Capability(metadata with { ProjectId = null }, new CapabilitySpec(node.Metadata.Uid, ["container"]), new CapabilityStatus(status, ["container"], Digest('a'), DateTimeOffset.UtcNow));
+        var project = new Project(metadata with { ProjectId = null }, new ProjectSpec([repository], new GitHubReleaseEvidenceArchiveProfile(repository), new GitHubCopilotSessionProfile(Digest('a')), Digest('b'), 50m), new ProjectStatus(status, 1m));
+        var workload = new Workload(metadata, new WorkloadSpec(Digest('a'), Digest('b'), new GitHubSourceProfile(repository), new string('c', 40), Digest('d'), ["action"], new GitHubCopilotSessionProvider(), SessionAuthority.None, IsolationProfile.DedicatedNode, new GitHubIssue(1), new SchedulingRequirements(null, [], null, null, new ResourceRequirements(1, 0, 1, 1), null, null), new WorkloadEvidenceRequirement(new GitHubReleaseEvidenceArchiveProfile(repository), "standard")), new WorkloadStatus(status, WorkloadLifecycleState.Desired, null, null, null, null, null, null));
+        var admission = new AdmissionDecision(metadata, new AdmissionDecisionSpec(workload.Metadata.Uid, 1, node.Metadata.Uid, Digest('a'), Digest('b'), ["action"], SessionAuthority.None, IsolationProfile.DedicatedNode, new ResourceRequirements(1, 0, 1, 1), [Digest('c')], ["github"], Digest('d'), DateTimeOffset.UtcNow.AddHours(1)), new AdmissionDecisionStatus(status, AdmissionVerdict.Pending, null));
+        var attempt = new Attempt(metadata, new AttemptSpec(workload.Metadata.Uid, 1, node.Metadata.Uid, admission.Metadata.Uid, Digest('a'), Digest('b'), Digest('c'), Digest('d')), new AttemptStatus(status, WorkloadLifecycleState.Failed));
+        var lease = new Lease(metadata, new LeaseSpec(attempt.Metadata.Uid, node.Metadata.Uid, 1, DateTimeOffset.UtcNow.AddHours(1)), new LeaseStatus(status, DateTimeOffset.UtcNow, null));
+        var session = new AgentSession(metadata, new AgentSessionSpec(attempt.Metadata.Uid, node.Metadata.Uid, new GitHubCopilotSessionProfile(Digest('a')), AgentSessionRole.IssueMaster, "key", null), new AgentSessionStatus(status, new ActorId("owner"), new ActorId("successor"), DateTimeOffset.UtcNow, true));
+        var evidence = new EvidenceReceipt(metadata, new EvidenceReceiptSpec(attempt.Metadata.Uid, Digest('a'), new GitHubReleaseEvidenceArchiveProfile(repository), "release", Digest('b')), new EvidenceReceiptStatus(status, EvidenceVerification.Verified, DateTimeOffset.UtcNow));
+        var @event = new Event(metadata with { ProjectId = null }, new EventSpec("Observed", DateTimeOffset.UtcNow, new ActorId("controller"), Guid.NewGuid(), Guid.NewGuid(), Digest('a')), status);
+
+        return
+        [
+            ("Project", "github", () => V1Alpha1Json.Serialize(project), json => V1Alpha1Json.DeserializeProject(json) is Result<Project, ContractValidationError>.Success value && value.Value.Status.BudgetObserved == 1m),
+            ("Node", "identityRef", () => V1Alpha1Json.Serialize(node), json => V1Alpha1Json.DeserializeNode(json) is Result<Node, ContractValidationError>.Success value && value.Value.Status.ObservedIdentityEpoch == 1),
+            ("NodeIdentity", "publicKeyDigest", () => V1Alpha1Json.Serialize(identity), json => V1Alpha1Json.DeserializeNodeIdentity(json) is Result<NodeIdentity, ContractValidationError>.Success value && value.Value.Status.CertificateSerial == "serial"),
+            ("Capability", "nodeRef", () => V1Alpha1Json.Serialize(capability), json => V1Alpha1Json.DeserializeCapability(json) is Result<Capability, ContractValidationError>.Success value && value.Value.Status.VerifiedScopes.SetEquals(["container"])),
+            ("Workload", "bundleDigest", () => V1Alpha1Json.Serialize(workload), json => V1Alpha1Json.DeserializeWorkload(json) is Result<Workload, ContractValidationError>.Success value && value.Value.Status.Lifecycle == WorkloadLifecycleState.Desired),
+            ("AdmissionDecision", "workloadRef", () => V1Alpha1Json.Serialize(admission), json => V1Alpha1Json.DeserializeAdmissionDecision(json) is Result<AdmissionDecision, ContractValidationError>.Success value && value.Value.Status.Decision == AdmissionVerdict.Pending),
+            ("Attempt", "workloadRef", () => V1Alpha1Json.Serialize(attempt), json => V1Alpha1Json.DeserializeAttempt(json) is Result<Attempt, ContractValidationError>.Success value && value.Value.Status.TerminalObservation == WorkloadLifecycleState.Failed),
+            ("Lease", "attemptRef", () => V1Alpha1Json.Serialize(lease), json => V1Alpha1Json.DeserializeLease(json) is Result<Lease, ContractValidationError>.Success value && value.Value.Status.LastHeartbeatAt is not null),
+            ("AgentSession", "attemptRef", () => V1Alpha1Json.Serialize(session), json => V1Alpha1Json.DeserializeAgentSession(json) is Result<AgentSession, ContractValidationError>.Success value && value.Value.Status.ArchiveComplete),
+            ("EvidenceReceipt", "attemptRef", () => V1Alpha1Json.Serialize(evidence), json => V1Alpha1Json.DeserializeEvidenceReceipt(json) is Result<EvidenceReceipt, ContractValidationError>.Success value && value.Value.Status.Verification == EvidenceVerification.Verified),
+            ("Event", "type", () => V1Alpha1Json.Serialize(@event), json => V1Alpha1Json.DeserializeEvent(json) is Result<Event, ContractValidationError>.Success value && value.Value.Spec.CausationId is not null)
+        ];
+    }
 }
