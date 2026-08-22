@@ -1,4 +1,5 @@
 using Armada.Contracts;
+using System.Text.Json.Nodes;
 
 namespace Armada.Application;
 
@@ -101,6 +102,7 @@ public sealed class AdmissionApplicationService(IAdmissionPolicy policy, IResour
 {
     public async Task<Result<ResourceStoreResult, AdmissionCommandFailure>> AdmitAsync(
         Workload workload,
+        TransitionId transitionId,
         ActorId actor,
         Guid correlationId,
         Guid? causationId,
@@ -126,8 +128,14 @@ public sealed class AdmissionApplicationService(IAdmissionPolicy policy, IResour
             return new Result<ResourceStoreResult, AdmissionCommandFailure>.Failure(failed.Error);
         }
 
-        var creation = ResourceCommandDecisions.CreateAdmissionDecision(
-            ((Result<CreateResourceCommand, AdmissionCommandFailure>.Success)decision).Value);
+        var createCommand = ((Result<CreateResourceCommand, AdmissionCommandFailure>.Success)decision).Value;
+        var prior = await repository.FindByIdempotencyKeyAsync(transitionId.ToString(), cancellationToken);
+        if (prior is not null)
+        {
+            return AdmissionReplayResult(prior, success.Value, actor, correlationId, causationId, occurredAt);
+        }
+
+        var creation = ResourceCommandDecisions.CreateAdmissionDecision(createCommand, transitionId);
         if (creation is Result<ResourceCommit, ResourceCommandFailure>.Failure invalid)
         {
             return new Result<ResourceStoreResult, AdmissionCommandFailure>.Failure(
@@ -137,6 +145,55 @@ public sealed class AdmissionApplicationService(IAdmissionPolicy policy, IResour
         var committed = await repository.CreateAsync(
             ((Result<ResourceCommit, ResourceCommandFailure>.Success)creation).Value,
             cancellationToken);
-        return new Result<ResourceStoreResult, AdmissionCommandFailure>.Success(committed);
+        return committed switch
+        {
+            ResourceStoreResult.AlreadyApplied replay =>
+                AdmissionReplayResult(replay.Commit, success.Value, actor, correlationId, causationId, occurredAt),
+            _ => new Result<ResourceStoreResult, AdmissionCommandFailure>.Success(committed)
+        };
+    }
+
+    private static Result<ResourceStoreResult, AdmissionCommandFailure> AdmissionReplayResult(
+        ResourceCommit prior,
+        AdmissionDecision decision,
+        ActorId actor,
+        Guid correlationId,
+        Guid? causationId,
+        DateTimeOffset occurredAt) =>
+        IsMatchingAdmission(prior, decision, actor, correlationId, causationId, occurredAt)
+            ? new Result<ResourceStoreResult, AdmissionCommandFailure>.Success(
+                new ResourceStoreResult.AlreadyApplied(prior))
+            : new Result<ResourceStoreResult, AdmissionCommandFailure>.Failure(
+                new("idempotency-key-reused", "The admission transition identity was already used for a different command."));
+
+    private static bool IsMatchingAdmission(
+        ResourceCommit prior,
+        AdmissionDecision decision,
+        ActorId actor,
+        Guid correlationId,
+        Guid? causationId,
+        DateTimeOffset occurredAt)
+    {
+        if (prior.Resource.Kind != "AdmissionDecision" ||
+            prior.LedgerEvent.Actor != actor ||
+            prior.LedgerEvent.CorrelationId != correlationId ||
+            prior.LedgerEvent.CausationId != causationId ||
+            prior.LedgerEvent.OccurredAt != occurredAt ||
+            ResourceDocuments.TryFrom(decision) is not Result<PersistedResource, ResourceCommandFailure>.Success expected)
+        {
+            return false;
+        }
+
+        var expectedDocument = JsonNode.Parse(expected.Value.Document.GetRawText())?.AsObject();
+        var persistedDocument = JsonNode.Parse(prior.Resource.Document.GetRawText())?.AsObject();
+        if (expectedDocument?["metadata"] is not JsonObject expectedMetadata ||
+            persistedDocument?["metadata"] is not JsonObject persistedMetadata)
+        {
+            return false;
+        }
+
+        expectedMetadata.Remove("uid");
+        persistedMetadata.Remove("uid");
+        return JsonNode.DeepEquals(expectedDocument, persistedDocument);
     }
 }

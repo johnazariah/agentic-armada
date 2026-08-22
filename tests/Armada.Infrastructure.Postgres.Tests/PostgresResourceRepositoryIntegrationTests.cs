@@ -54,6 +54,15 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Configured_connection_executes_against_the_ci_postgres_service()
+    {
+        await using var connection = await Source.OpenConnectionAsync();
+        await using var command = new NpgsqlCommand("SELECT current_database();", connection);
+
+        Assert.Equal("armada", (string)(await command.ExecuteScalarAsync())!);
+    }
+
+    [Fact]
     public async Task Concurrent_CAS_updates_commit_once_with_atomic_ledger_and_outbox()
     {
         await ResetAsync();

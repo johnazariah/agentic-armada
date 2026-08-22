@@ -193,6 +193,23 @@ public static class ResourceCommandDecisions
                 "The admission command requires an AdmissionDecision resource.");
     }
 
+    public static Result<ResourceCommit, ResourceCommandFailure> CreateAdmissionDecision(
+        CreateResourceCommand command,
+        TransitionId transitionId) =>
+        CreateAdmissionDecision(command) switch
+        {
+            Result<ResourceCommit, ResourceCommandFailure>.Success success =>
+                new Result<ResourceCommit, ResourceCommandFailure>.Success(
+                    success.Value with
+                    {
+                        LedgerEvent = success.Value.LedgerEvent with { IdempotencyKey = transitionId.ToString() },
+                        OutboxMessage = success.Value.OutboxMessage with { IdempotencyKey = transitionId.ToString() }
+                    }),
+            Result<ResourceCommit, ResourceCommandFailure>.Failure failure =>
+                new Result<ResourceCommit, ResourceCommandFailure>.Failure(failure.Error),
+            _ => throw new InvalidOperationException("Unsupported admission command result.")
+        };
+
     private static Result<ResourceCommit, ResourceCommandFailure> CreateCore(CreateResourceCommand command)
     {
         var persisted = ResourceDocuments.TryFrom(command.Resource);

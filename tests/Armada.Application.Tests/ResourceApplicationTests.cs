@@ -383,6 +383,7 @@ public sealed class ResourceApplicationTests
 
         var result = await service.AdmitAsync(
             Fixture.Workload(),
+            TransitionId.New(),
             new ActorId("admission-controller"),
             Guid.NewGuid(),
             null,
@@ -402,6 +403,7 @@ public sealed class ResourceApplicationTests
 
         var result = await service.AdmitAsync(
             workload,
+            TransitionId.New(),
             new ActorId("admission-controller"),
             Guid.NewGuid(),
             null,
@@ -413,6 +415,72 @@ public sealed class ResourceApplicationTests
         Assert.Single(repository.Ledger);
         Assert.Single(repository.Outbox);
         Assert.Equal("AdmissionDecision.created", repository.Ledger.Single().Type);
+    }
+
+    [Fact]
+    public async Task Admission_replay_accepts_a_fresh_policy_decision_uid_for_the_same_transition()
+    {
+        var workload = Fixture.Workload();
+        var repository = new InMemoryResourceRepository();
+        var service = new AdmissionApplicationService(
+            new FreshUidAdmittingPolicy(Fixture.AdmissionDecision(workload)),
+            repository);
+        var transition = TransitionId.New();
+        var correlation = Guid.NewGuid();
+
+        await service.AdmitAsync(
+            workload,
+            transition,
+            new ActorId("admission-controller"),
+            correlation,
+            null,
+            Fixture.Now,
+            CancellationToken.None);
+        var replay = await service.AdmitAsync(
+            workload,
+            transition,
+            new ActorId("admission-controller"),
+            correlation,
+            null,
+            Fixture.Now,
+            CancellationToken.None);
+
+        Assert.IsType<ResourceStoreResult.AlreadyApplied>(
+            Assert.IsType<Result<ResourceStoreResult, AdmissionCommandFailure>.Success>(replay).Value);
+        Assert.Single(repository.Ledger);
+    }
+
+    [Fact]
+    public async Task Admission_replay_rejects_a_reused_transition_with_different_command_metadata()
+    {
+        var workload = Fixture.Workload();
+        var repository = new InMemoryResourceRepository();
+        var service = new AdmissionApplicationService(
+            new FreshUidAdmittingPolicy(Fixture.AdmissionDecision(workload)),
+            repository);
+        var transition = TransitionId.New();
+        var correlation = Guid.NewGuid();
+
+        await service.AdmitAsync(
+            workload,
+            transition,
+            new ActorId("admission-controller"),
+            correlation,
+            null,
+            Fixture.Now,
+            CancellationToken.None);
+        var replay = await service.AdmitAsync(
+            workload,
+            transition,
+            new ActorId("other-controller"),
+            correlation,
+            null,
+            Fixture.Now,
+            CancellationToken.None);
+
+        Assert.Equal(
+            "idempotency-key-reused",
+            Assert.IsType<Result<ResourceStoreResult, AdmissionCommandFailure>.Failure>(replay).Error.Code);
     }
 
     [Fact]
@@ -481,6 +549,16 @@ public sealed class ResourceApplicationTests
             CancellationToken cancellationToken) =>
             Task.FromResult<Result<AdmissionDecision, PolicyFailure>>(
                 new Result<AdmissionDecision, PolicyFailure>.Success(decision));
+    }
+
+    private sealed class FreshUidAdmittingPolicy(AdmissionDecision decision) : IAdmissionPolicy
+    {
+        public Task<Result<AdmissionDecision, PolicyFailure>> EvaluateAsync(
+            Workload workload,
+            CancellationToken cancellationToken) =>
+            Task.FromResult<Result<AdmissionDecision, PolicyFailure>>(
+                new Result<AdmissionDecision, PolicyFailure>.Success(
+                    decision with { Metadata = decision.Metadata with { Uid = ResourceId.New() } }));
     }
 
     private sealed record UnsupportedResource(ResourceMetadata Metadata) : IArmadaResource
