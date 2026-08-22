@@ -4,6 +4,8 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using FsCheck.Xunit;
+using Google.Protobuf;
+using Proto = Armada.Contracts.V1Alpha1;
 
 namespace Armada.Contracts.Tests;
 
@@ -180,6 +182,14 @@ public sealed class ContractValidationTests
         Assert.Equal(37m, projectRoundTrip.Status.BudgetObserved);
         Assert.Equal("certificate epoch expired", projectRoundTrip.Status.Common.Conditions.Single().Escalation!.ExactBlocker);
 
+        var negativeObserved = V1Alpha1Json.FromWire(V1Alpha1Json.ToWire(project) with
+        {
+            Status = V1Alpha1Json.ToWire(project).Status! with { BudgetObserved = -1m }
+        });
+        Assert.Equal(
+            "invalid-budget-observed",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(negativeObserved).Error.Code);
+
         var nullOwner = V1Alpha1Json.DeserializeProject(
             json.Replace("\"ownerReferences\":[]", "\"ownerReferences\":[null]", StringComparison.Ordinal));
 
@@ -300,10 +310,7 @@ public sealed class ContractValidationTests
     [InlineData("watchdog")]
     public void Claimed_workload_requires_each_durable_active_binding(string binding)
     {
-        var wire = ValidWorkloadWire() with
-        {
-            Status = ValidWorkloadWire().Status! with { Lifecycle = "claimed" }
-        };
+        var wire = ActiveWorkloadWire();
         var status = wire.Status!;
         wire = binding switch
         {
@@ -327,10 +334,11 @@ public sealed class ContractValidationTests
     [Fact]
     public void Desired_workload_round_trips_without_fabricated_active_bindings()
     {
-        var wire = ValidWorkloadWire() with
+        var wire = ActiveWorkloadWire() with
         {
-            Status = ValidWorkloadWire().Status! with
+            Status = ActiveWorkloadWire().Status! with
             {
+                Lifecycle = "desired",
                 AttemptRef = null,
                 Owner = null,
                 Successor = null,
@@ -348,7 +356,29 @@ public sealed class ContractValidationTests
         Assert.Equal(WorkloadLifecycleState.Desired, workload.Status.Lifecycle);
         Assert.Null(workload.Status.AttemptReference);
         Assert.Null(workload.Status.Owner);
-        Assert.IsType<Result<Workload, ContractValidationError>.Success>(roundTrip);
+        Assert.True(
+            roundTrip.IsSuccess,
+            roundTrip is Result<Workload, ContractValidationError>.Failure failure
+                ? $"{failure.Error.Code}: {failure.Error.Message}"
+                : "Unexpected workload result.");
+    }
+
+    [Theory]
+    [InlineData("desired")]
+    [InlineData("admitted")]
+    [InlineData("assigned")]
+    public void Pre_claim_workload_rejects_active_execution_bindings(string lifecycle)
+    {
+        var wire = ActiveWorkloadWire() with
+        {
+            Status = ActiveWorkloadWire().Status! with { Lifecycle = lifecycle }
+        };
+
+        var result = V1Alpha1Json.FromWire(wire);
+
+        Assert.Equal(
+            "preclaim-binding-forbidden",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
     }
 
     [Theory]
@@ -600,6 +630,7 @@ public sealed class ContractValidationTests
                 Conditions = [new V1Alpha1ConditionWire(
                     "Ready", "99", "Unknown", "Invalid", 1, DateTimeOffset.UtcNow, null)]
             }
+
         };
         var negativeGeneration = ValidProjectWire() with
         {
@@ -618,6 +649,27 @@ public sealed class ContractValidationTests
             "invalid-observed-generation",
             Assert.IsType<Result<Project, ContractValidationError>.Failure>(
                 V1Alpha1Json.FromWire(negativeGeneration)).Error.Code);
+    }
+
+    [Fact]
+    public void Protobuf_decimal_and_archive_provider_contracts_preserve_exact_values()
+    {
+        const string precise = "1234567890.123456789012345678";
+        var decimalValue = new Proto.DecimalValue { Value = precise };
+        var project = new Proto.ProjectSpec
+        {
+            EvidenceArchiveProvider = "GitHubRelease",
+            EvidenceArchiveRepository = "johnazariah/agentic-armada-evidence"
+        };
+        var receipt = new Proto.EvidenceReceiptSpec
+        {
+            ArchiveProvider = "GitHubRelease",
+            ArchiveRepository = "johnazariah/agentic-armada-evidence"
+        };
+
+        Assert.Equal(precise, Proto.DecimalValue.Parser.ParseFrom(decimalValue.ToByteArray()).Value);
+        Assert.Equal("GitHubRelease", Proto.ProjectSpec.Parser.ParseFrom(project.ToByteArray()).EvidenceArchiveProvider);
+        Assert.Equal("GitHubRelease", Proto.EvidenceReceiptSpec.Parser.ParseFrom(receipt.ToByteArray()).ArchiveProvider);
     }
 
     [Theory]
@@ -760,15 +812,31 @@ public sealed class ContractValidationTests
                 1,
                 [],
                 "desired",
-                ResourceId.New().ToString(),
-                "workload-owner",
-                "workload-successor",
-                DateTimeOffset.Parse("2026-08-22T00:05:00Z"),
-                DateTimeOffset.Parse("2026-08-22T00:10:00Z"),
-                new V1Alpha1HeartbeatPolicyWire(30, 90),
-                "workload-watchdog",
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
                 null,
                 null));
+
+    private static V1Alpha1WorkloadWire ActiveWorkloadWire() =>
+        ValidWorkloadWire() with
+        {
+            Status = ValidWorkloadWire().Status! with
+            {
+                Lifecycle = "claimed",
+                AttemptRef = ResourceId.New().ToString(),
+                Owner = "workload-owner",
+                Successor = "workload-successor",
+                ExpectedNextEventAt = DateTimeOffset.Parse("2026-08-22T00:05:00Z"),
+                ProgressDeadlineAt = DateTimeOffset.Parse("2026-08-22T00:10:00Z"),
+                HeartbeatPolicy = new V1Alpha1HeartbeatPolicyWire(30, 90),
+                Watchdog = "workload-watchdog"
+            }
+        };
 
     private static V1Alpha1WorkloadWire WithScheduling(
         int cpu,
@@ -876,7 +944,10 @@ public sealed class ContractValidationTests
             ("Node", "identityRef", () => V1Alpha1Json.Serialize(node), json => V1Alpha1Json.DeserializeNode(json) is Result<Node, ContractValidationError>.Success value && value.Value.Status.ObservedIdentityEpoch == 1),
             ("NodeIdentity", "publicKeyDigest", () => V1Alpha1Json.Serialize(identity), json => V1Alpha1Json.DeserializeNodeIdentity(json) is Result<NodeIdentity, ContractValidationError>.Success value && value.Value.Status.CertificateSerial == "serial"),
             ("Capability", "nodeRef", () => V1Alpha1Json.Serialize(capability), json => V1Alpha1Json.DeserializeCapability(json) is Result<Capability, ContractValidationError>.Success value && value.Value.Status.VerifiedScopes.SetEquals(["container"])),
-            ("Workload", "bundleDigest", () => V1Alpha1Json.Serialize(workload), json => V1Alpha1Json.DeserializeWorkload(json) is Result<Workload, ContractValidationError>.Success value && value.Value.Status.Lifecycle == WorkloadLifecycleState.Desired),
+            ("Workload", "bundleDigest", () => JsonSerializer.Serialize(
+                V1Alpha1Json.ToWire((Armada.Contracts.Workload)workload),
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase }),
+                WorkloadDeserializes),
             ("AdmissionDecision", "workloadRef", () => V1Alpha1Json.Serialize(admission), json => V1Alpha1Json.DeserializeAdmissionDecision(json) is Result<AdmissionDecision, ContractValidationError>.Success value && value.Value.Status.Decision == AdmissionVerdict.Pending),
             ("Attempt", "workloadRef", () => V1Alpha1Json.Serialize(attempt), json => V1Alpha1Json.DeserializeAttempt(json) is Result<Attempt, ContractValidationError>.Success value && value.Value.Status.TerminalObservation == WorkloadLifecycleState.Failed),
             ("Lease", "attemptRef", () => V1Alpha1Json.Serialize(lease), json => V1Alpha1Json.DeserializeLease(json) is Result<Lease, ContractValidationError>.Success value && value.Value.Status.LastHeartbeatAt is not null),
@@ -884,6 +955,15 @@ public sealed class ContractValidationTests
             ("EvidenceReceipt", "attemptRef", () => V1Alpha1Json.Serialize(evidence), json => V1Alpha1Json.DeserializeEvidenceReceipt(json) is Result<EvidenceReceipt, ContractValidationError>.Success value && value.Value.Status.Verification == EvidenceVerification.Verified),
             ("Event", "type", () => V1Alpha1Json.Serialize(@event), json => V1Alpha1Json.DeserializeEvent(json) is Result<Event, ContractValidationError>.Success value && value.Value.Spec.CausationId is not null)
         ];
+    }
+
+    private static bool WorkloadDeserializes(string json)
+    {
+        var result = V1Alpha1Json.DeserializeWorkload(json);
+
+        return result is Result<Workload, ContractValidationError>.Success value &&
+            value.Value.Status.Lifecycle
+            == WorkloadLifecycleState.Claimed;
     }
 
     private static WorkloadSpec ValidWorkloadSpec() =>
@@ -906,7 +986,7 @@ public sealed class ContractValidationTests
     private static WorkloadStatus ActiveWorkloadStatus(ResourceStatus status) =>
         new(
             status,
-            WorkloadLifecycleState.Desired,
+            WorkloadLifecycleState.Claimed,
             ResourceId.New(),
             new ActorId("workload-owner"),
             new ActorId("workload-successor"),

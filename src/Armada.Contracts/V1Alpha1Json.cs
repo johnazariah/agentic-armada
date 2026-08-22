@@ -103,6 +103,10 @@ public static partial class V1Alpha1Json
         {
             return Failure<Project>("invalid-budget-limit", "Project budget limit cannot be negative.");
         }
+        if (wire.Status.BudgetObserved is < 0)
+        {
+            return Failure<Project>("invalid-budget-observed", "Project budget observed cannot be negative.");
+        }
 
         if (metadata is not Result<ResourceMetadata, ContractValidationError>.Success metadataSuccess ||
             policyDigest is not Result<Sha256Digest, ContractValidationError>.Success policySuccess ||
@@ -271,6 +275,17 @@ public static partial class V1Alpha1Json
                  string.IsNullOrWhiteSpace(wire.Status.Watchdog)))
         {
             return Failure<Workload>("active-binding-required", "Claimed and executing workloads require attempt, owner, successor, deadlines, heartbeat policy, and watchdog.");
+        }
+        else if (!requiresActiveBindings &&
+                 (attemptSuccess.Value is not null ||
+                  !string.IsNullOrWhiteSpace(wire.Status.Owner) ||
+                  !string.IsNullOrWhiteSpace(wire.Status.Successor) ||
+                  wire.Status.ExpectedNextEventAt is not null ||
+                  wire.Status.ProgressDeadlineAt is not null ||
+                  heartbeatPolicySuccess.Value is not null ||
+                  !string.IsNullOrWhiteSpace(wire.Status.Watchdog)))
+        {
+            return Failure<Workload>("preclaim-binding-forbidden", "Desired, admitted, and assigned workloads cannot carry active execution bindings.");
         }
 
         return new Result<Workload, ContractValidationError>.Success(

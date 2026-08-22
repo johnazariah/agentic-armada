@@ -60,6 +60,8 @@ message Condition {
 }
 message Status { int64 observed_generation = 1; repeated Condition conditions = 2; }
 message ResourceRequirements { int32 cpu_millicores = 1; int32 gpu_count = 2; int64 memory_bytes = 3; int64 storage_bytes = 4; }
+// Exact base-10 decimal representation, preserving C# decimal precision.
+message DecimalValue { string value = 1; }
 message LabelSelector { map<string, string> match_labels = 1; }
 message Toleration { string key = 1; string operator = 2; optional string value = 3; string effect = 4; }
 message SchedulingRequirements {
@@ -68,14 +70,14 @@ message SchedulingRequirements {
   optional LabelSelector affinity = 3;
   optional LabelSelector anti_affinity = 4;
   ResourceRequirements resources = 5;
-  optional double max_estimated_cost = 6;
+  optional DecimalValue max_estimated_cost = 6;
   optional string checkpoint_mode = 7;
 }
 message HeartbeatPolicy { int32 interval_seconds = 1; int32 timeout_seconds = 2; }
 message GitHubIssue { int32 number = 1; optional string node_id = 2; }
 message GitHubPullRequest { int32 number = 1; optional string node_id = 2; }
 message WorkloadEvidence { string archive_provider = 1; string archive_repository = 2; string retention_class = 3; }
-message BudgetLimit { double amount = 1; }
+message BudgetLimit { DecimalValue amount = 1; }
 message SessionProfile { string provider = 1; string profile_digest = 2; }
 
 message Project {
@@ -85,12 +87,13 @@ message Project {
 }
 message ProjectSpec {
   repeated string github_repositories = 1;
-  string evidence_archive_repository = 2;
-  SessionProfile session_profile = 3;
-  string policy_bundle_digest = 4;
-  optional BudgetLimit budget_limit = 5;
+  string evidence_archive_provider = 2;
+  string evidence_archive_repository = 3;
+  SessionProfile session_profile = 4;
+  string policy_bundle_digest = 5;
+  optional BudgetLimit budget_limit = 6;
 }
-message ProjectStatus { Status common = 1; optional double budget_observed = 2; }
+message ProjectStatus { Status common = 1; optional DecimalValue budget_observed = 2; }
 
 message Node {
   Metadata metadata = 1;
@@ -107,8 +110,14 @@ message NodeIdentity {
   NodeIdentitySpec spec = 2;
   NodeIdentityStatus status = 3;
 }
-message NodeIdentitySpec { string public_key_digest = 1; string requested_assurance = 2; int64 identity_epoch = 3; optional string attestation_digest = 4; }
-message NodeIdentityStatus { Status common = 1; optional string certificate_serial = 2; optional google.protobuf.Timestamp certificate_expires_at = 3; optional string assurance = 4; optional google.protobuf.Timestamp revoked_at = 5; }
+enum NodeAssurance {
+  NODE_ASSURANCE_UNSPECIFIED = 0;
+  NODE_ASSURANCE_DEVICE_KEY = 1;
+  NODE_ASSURANCE_TPM_HARDWARE_BOUND = 2;
+  NODE_ASSURANCE_PLATFORM_KEY_VERIFIED = 3;
+}
+message NodeIdentitySpec { string public_key_digest = 1; NodeAssurance requested_assurance = 2; int64 identity_epoch = 3; optional string attestation_digest = 4; }
+message NodeIdentityStatus { Status common = 1; optional string certificate_serial = 2; optional google.protobuf.Timestamp certificate_expires_at = 3; optional NodeAssurance assurance = 4; optional google.protobuf.Timestamp revoked_at = 5; }
 
 message Capability {
   Metadata metadata = 1;
@@ -165,7 +174,7 @@ message AgentSessionSpec { string attempt_ref = 1; string node_ref = 2; SessionP
 message AgentSessionStatus { Status common = 1; optional string owner = 2; optional string successor = 3; optional google.protobuf.Timestamp last_observed_at = 4; bool archive_complete = 5; }
 
 message EvidenceReceipt { Metadata metadata = 1; EvidenceReceiptSpec spec = 2; EvidenceReceiptStatus status = 3; }
-message EvidenceReceiptSpec { string attempt_ref = 1; string manifest_digest = 2; string archive_repository = 3; string release_id = 4; string asset_digest = 5; }
+message EvidenceReceiptSpec { string attempt_ref = 1; string manifest_digest = 2; string archive_provider = 3; string archive_repository = 4; string release_id = 5; string asset_digest = 6; }
 message EvidenceReceiptStatus { Status common = 1; string verification = 2; optional google.protobuf.Timestamp verified_at = 3; }
 
 message Event { Metadata metadata = 1; EventSpec spec = 2; Status status = 3; }

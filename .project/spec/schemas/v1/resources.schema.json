@@ -385,7 +385,9 @@
                   "properties": {
                     "certificateSerial": { "type": "string" },
                     "certificateExpiresAt": { "$ref": "#/$defs/Timestamp" },
-                    "assurance": { "type": "string" },
+                    "assurance": {
+                      "enum": [ "DeviceKey", "TpmHardwareBound", "PlatformKeyVerified" ]
+                    },
                     "revokedAt": { "$ref": "#/$defs/Timestamp" }
                   }
                 }
