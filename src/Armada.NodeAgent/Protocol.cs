@@ -39,6 +39,7 @@ public sealed record StartAttemptCommand(
     string SchemaVersion,
     ResourceId NodeReference,
     ResourceId ProjectId,
+    ResourceId WorkloadReference,
     ResourceId AttemptId,
     DateTimeOffset ExpiresAt,
     ResourceId AdmissionDecisionReference,
@@ -46,6 +47,7 @@ public sealed record StartAttemptCommand(
     IsolationProfile IsolationProfile,
     Sha256Digest BundleDigest,
     Sha256Digest PolicyDigest,
+    Sha256Digest ReleaseDigest,
     Sha256Digest CapabilityGrantDigest)
     : NodeCommand(SchemaVersion, NodeReference, ProjectId, AttemptId, ExpiresAt)
 {
@@ -55,14 +57,16 @@ public sealed record StartAttemptCommand(
             SchemaVersion,
             NodeReference.ToString(),
             ProjectId.ToString(),
+            WorkloadReference.ToString(),
             AttemptId.ToString(),
             ExpiresAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
             AdmissionDecisionReference.ToString(),
             LeaseReference.ToString(),
             IsolationProfile.ToString(),
-            BundleDigest.Value,
-            PolicyDigest.Value,
-            CapabilityGrantDigest.Value);
+            BundleDigest?.Value ?? string.Empty,
+            PolicyDigest?.Value ?? string.Empty,
+            ReleaseDigest?.Value ?? string.Empty,
+            CapabilityGrantDigest?.Value ?? string.Empty);
 }
 
 public sealed record CancelAttemptCommand(
@@ -124,8 +128,14 @@ public enum AttemptExecutionState
 
 public sealed record AttemptRuntime(
     ResourceId ProjectId,
+    ResourceId WorkloadId,
     ResourceId AttemptId,
+    ResourceId AdmissionDecisionReference,
+    ResourceId LeaseReference,
     IsolationProfile IsolationProfile,
+    Sha256Digest BundleDigest,
+    Sha256Digest PolicyDigest,
+    Sha256Digest ReleaseDigest,
     AttemptExecutionState State,
     DateTimeOffset UpdatedAt);
 

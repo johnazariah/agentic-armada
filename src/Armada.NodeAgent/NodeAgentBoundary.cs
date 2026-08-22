@@ -106,7 +106,7 @@ public sealed class NodeAgentBoundary
         return new Result<EvidenceObservation, NodeAgentFailure>.Success(observation);
     }
 
-    private long NextOrdinal() => state.ProcessedCommands.Count + state.Evidence.Count + 1L;
+    private long NextOrdinal() => state.LastJournalOrdinal + 1;
 
     private static Result<T, NodeAgentFailure> Failure<T>(JournalFailure failure) =>
         new Result<T, NodeAgentFailure>.Failure(new(failure.Code, failure.Message));

@@ -50,7 +50,8 @@ public sealed record AgentState(
     long LastInboundSequence,
     ImmutableDictionary<string, ProcessedCommand> ProcessedCommands,
     ImmutableDictionary<ResourceId, AttemptRuntime> Attempts,
-    ImmutableDictionary<ResourceId, EvidenceObservation> Evidence)
+    ImmutableDictionary<ResourceId, EvidenceObservation> Evidence,
+    long LastJournalOrdinal)
 {
     public static AgentState Empty(NodeDeviceIdentity identity) =>
         new(
@@ -59,7 +60,8 @@ public sealed record AgentState(
             0,
             ImmutableDictionary<string, ProcessedCommand>.Empty.WithComparers(StringComparer.Ordinal),
             ImmutableDictionary<ResourceId, AttemptRuntime>.Empty,
-            ImmutableDictionary<ResourceId, EvidenceObservation>.Empty);
+            ImmutableDictionary<ResourceId, EvidenceObservation>.Empty,
+            0);
 
     public static Result<AgentState, JournalFailure> Replay(
         NodeDeviceIdentity identity,
@@ -68,10 +70,33 @@ public sealed record AgentState(
         var state = Empty(identity);
         foreach (var entry in entries.OrderBy(static entry => entry.Ordinal))
         {
+            if (entry.Ordinal != state.LastJournalOrdinal + 1)
+            {
+                return new Result<AgentState, JournalFailure>.Failure(
+                    new("journal-ordinal-invalid", "Journal entry ordinals must be unique and contiguous from one."));
+            }
+
             if (entry.NodeId != identity.NodeId || entry.IdentityEpoch != identity.IdentityEpoch)
             {
                 return new Result<AgentState, JournalFailure>.Failure(
                     new("journal-identity-mismatch", "The journal belongs to a different node identity epoch."));
+            }
+
+            if (entry.Accepted &&
+                entry.AttemptState == AttemptExecutionState.Prepared &&
+                entry.AttemptId is { } attemptId &&
+                state.Attempts.ContainsKey(attemptId))
+            {
+                return new Result<AgentState, JournalFailure>.Failure(
+                    new("attempt-binding-conflict", "A journal cannot bind an existing attempt to a second start command."));
+            }
+
+            if (entry.Accepted &&
+                entry.AttemptState == AttemptExecutionState.CancellationRequested &&
+                (entry.AttemptId is not { } cancellationAttempt || !state.Attempts.ContainsKey(cancellationAttempt)))
+            {
+                return new Result<AgentState, JournalFailure>.Failure(
+                    new("journal-attempt-binding-invalid", "A cancellation journal entry must bind to an existing attempt."));
             }
 
             state = Apply(state, entry);
@@ -82,13 +107,13 @@ public sealed record AgentState(
 
     public static AgentState Apply(AgentState state, JournalEntry entry)
     {
-        var nextState = entry.AdvancesSequence
+        var nextState = (entry.AdvancesSequence
             ? entry.StreamEpoch > state.StreamEpoch
                 ? state with { StreamEpoch = entry.StreamEpoch, LastInboundSequence = entry.Sequence }
                 : entry.StreamEpoch == state.StreamEpoch
                     ? state with { LastInboundSequence = Math.Max(state.LastInboundSequence, entry.Sequence) }
                     : state
-            : state;
+            : state) with { LastJournalOrdinal = Math.Max(state.LastJournalOrdinal, entry.Ordinal) };
 
         if (entry.Type == JournalEntryType.CommandDecision)
         {
@@ -125,12 +150,29 @@ public sealed record AgentState(
                                     UpdatedAt = entry.RecordedAt
                                 })
                         },
-                    { } attemptState when entry.IsolationProfile is { } isolation =>
+                    { } attemptState when entry.IsolationProfile is { } isolation &&
+                                           entry.WorkloadId is { } workloadId &&
+                                           entry.AdmissionDecisionReference is { } admissionDecisionReference &&
+                                           entry.LeaseReference is { } leaseReference &&
+                                           entry.BundleDigest is { } bundleDigest &&
+                                           entry.PolicyDigest is { } policyDigest &&
+                                           entry.ReleaseDigest is { } releaseDigest =>
                         nextState with
                         {
                             Attempts = nextState.Attempts.SetItem(
                                 attemptId,
-                                new(projectId, attemptId, isolation, attemptState, entry.RecordedAt))
+                                new(
+                                    projectId,
+                                    workloadId,
+                                    attemptId,
+                                    admissionDecisionReference,
+                                    leaseReference,
+                                    isolation,
+                                    bundleDigest,
+                                    policyDigest,
+                                    releaseDigest,
+                                    attemptState,
+                                    entry.RecordedAt))
                         },
                     _ => nextState
                 };
@@ -232,6 +274,20 @@ public static class CommandValidation
         {
             return Reject(envelope, "unknown-command-schema", "The start command schema is not recognised.", advancesSequence: true);
         }
+        if (command.WorkloadReference.Value == Guid.Empty ||
+            command.AdmissionDecisionReference.Value == Guid.Empty ||
+            command.LeaseReference.Value == Guid.Empty ||
+            command.BundleDigest is null ||
+            command.PolicyDigest is null ||
+            command.ReleaseDigest is null ||
+            command.CapabilityGrantDigest is null)
+        {
+            return Reject(envelope, "missing-authority-binding", "Start commands require exact workload, admission, lease, bundle, policy, release, and capability bindings.", advancesSequence: true);
+        }
+        if (state.Attempts.ContainsKey(command.AttemptId))
+        {
+            return Reject(envelope, "attempt-binding-conflict", "An existing attempt can only be replayed with its original idempotency key.", advancesSequence: true);
+        }
         if (!capabilities.EnforceableProfiles.Contains(command.IsolationProfile))
         {
             return Reject(envelope, "unsupported-isolation-profile", "The requested isolation profile is not enforceable on this node.", advancesSequence: true);
@@ -252,6 +308,10 @@ public static class CommandValidation
         if (command.SchemaVersion != NodeAgentProtocol.CancelAttemptSchema)
         {
             return Reject(envelope, "unknown-command-schema", "The cancellation command schema is not recognised.", advancesSequence: true);
+        }
+        if (command.LeaseReference.Value == Guid.Empty)
+        {
+            return Reject(envelope, "missing-authority-binding", "Cancellation commands require a lease binding.", advancesSequence: true);
         }
         if (!state.Attempts.TryGetValue(command.AttemptId, out var attempt) || attempt.ProjectId != command.ProjectId)
         {

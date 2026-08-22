@@ -53,6 +53,79 @@ public sealed class NodeAgentBoundaryTests
             Assert.IsType<Result<NodeCommandAcknowledgement, NodeAgentFailure>.Success>(conflict).Value.Code);
     }
 
+    [Fact]
+    public async Task Start_requires_complete_immutable_authority_bindings()
+    {
+        var fixture = new NodeAgentFixture();
+        var boundary = fixture.Boundary(new InMemoryJournal());
+        var missingWorkload = fixture.StartEnvelope(sequence: 1) with
+        {
+            Payload = Start(fixture.StartEnvelope(sequence: 1)) with { WorkloadReference = new ResourceId(Guid.Empty) }
+        };
+        var missingAdmission = fixture.StartEnvelope(sequence: 2) with
+        {
+            Payload = Start(fixture.StartEnvelope(sequence: 2)) with { AdmissionDecisionReference = new ResourceId(Guid.Empty) }
+        };
+        var missingLease = fixture.StartEnvelope(sequence: 3) with
+        {
+            Payload = Start(fixture.StartEnvelope(sequence: 3)) with { LeaseReference = new ResourceId(Guid.Empty) }
+        };
+        var missingRelease = fixture.StartEnvelope(sequence: 4) with
+        {
+            Payload = Start(fixture.StartEnvelope(sequence: 4)) with { ReleaseDigest = null! }
+        };
+
+        Assert.Equal("missing-authority-binding", Value(await boundary.ReceiveAsync(missingWorkload, CancellationToken.None)).Code);
+        Assert.Equal("missing-authority-binding", Value(await boundary.ReceiveAsync(missingAdmission, CancellationToken.None)).Code);
+        Assert.Equal("missing-authority-binding", Value(await boundary.ReceiveAsync(missingLease, CancellationToken.None)).Code);
+        Assert.Equal("missing-authority-binding", Value(await boundary.ReceiveAsync(missingRelease, CancellationToken.None)).Code);
+    }
+
+    [Fact]
+    public async Task Start_persists_exact_workload_and_release_authority_bindings()
+    {
+        var fixture = new NodeAgentFixture();
+        var boundary = fixture.Boundary(new InMemoryJournal());
+        var command = fixture.StartEnvelope(sequence: 1);
+
+        await boundary.ReceiveAsync(command, CancellationToken.None);
+        var snapshot = Assert.IsType<Result<FullReconciliationSnapshot, NodeAgentFailure>.Success>(
+            await boundary.ReconcileAsync(fixture.Inventory, fixture.Health, CancellationToken.None)).Value;
+        var start = Start(command);
+        var attempt = Assert.Single(snapshot.Attempts);
+
+        Assert.Equal(start.WorkloadReference, attempt.WorkloadId);
+        Assert.Equal(start.AdmissionDecisionReference, attempt.AdmissionDecisionReference);
+        Assert.Equal(start.LeaseReference, attempt.LeaseReference);
+        Assert.Equal(start.BundleDigest, attempt.BundleDigest);
+        Assert.Equal(start.PolicyDigest, attempt.PolicyDigest);
+        Assert.Equal(start.ReleaseDigest, attempt.ReleaseDigest);
+    }
+
+    [Fact]
+    public async Task Different_idempotency_key_cannot_overwrite_an_existing_attempt()
+    {
+        var fixture = new NodeAgentFixture();
+        var journal = new InMemoryJournal();
+        var boundary = fixture.Boundary(journal);
+        var first = fixture.StartEnvelope(sequence: 1, idempotencyKey: "first", profile: IsolationProfile.IsolatedContainer);
+        var replacement = fixture.StartEnvelope(
+            sequence: 2,
+            idempotencyKey: "replacement",
+            attemptId: fixture.AttemptId,
+            profile: IsolationProfile.DedicatedNode);
+
+        await boundary.ReceiveAsync(first, CancellationToken.None);
+        var rejected = await boundary.ReceiveAsync(replacement, CancellationToken.None);
+        var restarted = fixture.Boundary(journal);
+        var snapshot = await restarted.ReconcileAsync(fixture.Inventory, fixture.Health, CancellationToken.None);
+
+        Assert.Equal("attempt-binding-conflict", Value(rejected).Code);
+        Assert.Equal(
+            IsolationProfile.IsolatedContainer,
+            Assert.IsType<Result<FullReconciliationSnapshot, NodeAgentFailure>.Success>(snapshot).Value.Attempts.Single().IsolationProfile);
+    }
+
     [Theory]
     [InlineData("invalid-signature", "authority-invalid-signature")]
     [InlineData("unknown-key", "authority-unknown-key")]
@@ -208,6 +281,9 @@ public sealed class NodeAgentBoundaryTests
 
     private static NodeCommandAcknowledgement Value(Result<NodeCommandAcknowledgement, NodeAgentFailure> result) =>
         Assert.IsType<Result<NodeCommandAcknowledgement, NodeAgentFailure>.Success>(result).Value;
+
+    private static StartAttemptCommand Start(OutboundEnvelope<NodeCommand> envelope) =>
+        Assert.IsType<StartAttemptCommand>(envelope.Payload);
 }
 
 internal sealed class NodeAgentFixture
@@ -215,6 +291,7 @@ internal sealed class NodeAgentFixture
     public DateTimeOffset Now { get; } = DateTimeOffset.Parse("2026-08-22T00:00:00Z");
     public NodeDeviceIdentity Identity { get; } = new(ResourceId.New(), 7);
     public ResourceId ProjectId { get; } = ResourceId.New();
+    public ResourceId WorkloadId { get; } = ResourceId.New();
     public ResourceId AttemptId { get; } = ResourceId.New();
     public InventoryObservation Inventory { get; }
     public HealthObservation Health { get; }
@@ -258,6 +335,7 @@ internal sealed class NodeAgentFixture
                 NodeAgentProtocol.StartAttemptSchema,
                 Identity.NodeId,
                 projectId ?? ProjectId,
+                WorkloadId,
                 attemptId ?? AttemptId,
                 expiresAt ?? Now.AddMinutes(5),
                 ResourceId.New(),
@@ -265,6 +343,7 @@ internal sealed class NodeAgentFixture
                 profile,
                 Digest('a'),
                 Digest('b'),
+                Digest('d'),
                 Digest('c')));
 
     public OutboundEnvelope<NodeCommand> CancelEnvelope(

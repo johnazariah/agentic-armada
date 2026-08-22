@@ -37,7 +37,74 @@ public sealed class JournalAndProcessTests
         finally
         {
             File.Delete(path);
+            File.Delete($"{path}.anchor");
         }
+    }
+
+    [Fact]
+    public async Task Encrypted_file_journal_rejects_tampering_and_tail_truncation_against_its_anchor()
+    {
+        var fixture = new NodeAgentFixture();
+        var path = Path.Combine(Path.GetTempPath(), $"armada-journal-{Guid.NewGuid():N}.log");
+        var journal = new EncryptedFileJournal(path, new AesGcmJournalProtector(RandomNumberGenerator.GetBytes(32)));
+        var first = JournalEntry.ForEvidence(
+            1,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('a'), fixture.Digest('b'), fixture.Now));
+        var second = JournalEntry.ForEvidence(
+            2,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('c'), fixture.Digest('d'), fixture.Now.AddSeconds(1)));
+
+        try
+        {
+            await journal.AppendAsync(first, CancellationToken.None);
+            await journal.AppendAsync(second, CancellationToken.None);
+            var lines = await File.ReadAllLinesAsync(path);
+            await File.WriteAllLinesAsync(path, [lines[0]]);
+
+            var truncated = await journal.ReadAsync(CancellationToken.None);
+
+            Assert.Equal(
+                "journal-rollback-detected",
+                Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure>(truncated).Error.Code);
+
+            await File.WriteAllLinesAsync(path, lines);
+            await File.WriteAllTextAsync(path, lines[0].Replace("\"entryHash\":\"", "\"entryHash\":\"f", StringComparison.Ordinal));
+
+            var tampered = await journal.ReadAsync(CancellationToken.None);
+
+            Assert.Equal(
+                "journal-chain-invalid",
+                Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure>(tampered).Error.Code);
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.anchor");
+        }
+    }
+
+    [Fact]
+    public void Replay_rejects_duplicated_or_gapped_journal_ordinals_before_restoring_state()
+    {
+        var fixture = new NodeAgentFixture();
+        var first = JournalEntry.ForEvidence(
+            1,
+            fixture.Identity,
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('a'), fixture.Digest('b'), fixture.Now));
+        var duplicate = first with { Ordinal = 1 };
+        var gap = first with { Ordinal = 3 };
+
+        var duplicateResult = AgentState.Replay(fixture.Identity, [first, duplicate]);
+        var gapResult = AgentState.Replay(fixture.Identity, [first, gap]);
+
+        Assert.Equal(
+            "journal-ordinal-invalid",
+            Assert.IsType<Result<AgentState, JournalFailure>.Failure>(duplicateResult).Error.Code);
+        Assert.Equal(
+            "journal-ordinal-invalid",
+            Assert.IsType<Result<AgentState, JournalFailure>.Failure>(gapResult).Error.Code);
     }
 
     [Fact]
@@ -46,8 +113,14 @@ public sealed class JournalAndProcessTests
         var fixture = new NodeAgentFixture();
         var prepared = new AttemptRuntime(
             fixture.ProjectId,
+            fixture.WorkloadId,
             fixture.AttemptId,
+            ResourceId.New(),
+            ResourceId.New(),
             IsolationProfile.IsolatedContainer,
+            fixture.Digest('a'),
+            fixture.Digest('b'),
+            fixture.Digest('c'),
             AttemptExecutionState.Prepared,
             fixture.Now);
 
@@ -71,8 +144,14 @@ public sealed class JournalAndProcessTests
         var fixture = new NodeAgentFixture();
         var running = new AttemptRuntime(
             fixture.ProjectId,
+            fixture.WorkloadId,
             fixture.AttemptId,
+            ResourceId.New(),
+            ResourceId.New(),
             IsolationProfile.IsolatedContainer,
+            fixture.Digest('a'),
+            fixture.Digest('b'),
+            fixture.Digest('c'),
             AttemptExecutionState.Running,
             fixture.Now);
         var time = fixture.Now.AddSeconds(Math.Abs((long)seconds % 1000));
@@ -89,8 +168,14 @@ public sealed class JournalAndProcessTests
         var fixture = new NodeAgentFixture();
         var running = new AttemptRuntime(
             fixture.ProjectId,
+            fixture.WorkloadId,
             fixture.AttemptId,
+            ResourceId.New(),
+            ResourceId.New(),
             IsolationProfile.IsolatedContainer,
+            fixture.Digest('a'),
+            fixture.Digest('b'),
+            fixture.Digest('c'),
             AttemptExecutionState.Running,
             fixture.Now);
 
