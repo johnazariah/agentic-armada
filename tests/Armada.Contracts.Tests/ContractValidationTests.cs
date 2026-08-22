@@ -966,11 +966,18 @@ public sealed class ContractValidationTests
         var project = new Project(metadata with { ProjectId = null }, new ProjectSpec([repository], new GitHubReleaseEvidenceArchiveProfile(repository), new GitHubCopilotSessionProfile(Digest('a')), Digest('b'), 50m), new ProjectStatus(status, 1m));
         var workload = new Workload(metadata, ValidWorkloadSpec(), ActiveWorkloadStatus(status));
         var admission = new AdmissionDecision(metadata, new AdmissionDecisionSpec(workload.Metadata.Uid, 1, node.Metadata.Uid, Digest('a'), Digest('b'), repository, new string('c', 40), Digest('d'), ["action"], SessionAuthority.None, IsolationProfile.DedicatedNode, new ResourceRequirements(1, 0, 1, 1), [Digest('c')], ["github"], Digest('d'), DateTimeOffset.UtcNow.AddHours(1)), new AdmissionDecisionStatus(status, AdmissionVerdict.Pending, null));
+        var shortAdmissionRevision = V1Alpha1Json.DeserializeAdmissionDecision(
+            V1Alpha1Json.Serialize(admission).Replace(new string('c', 40), "short", StringComparison.Ordinal));
+        var longAdmissionRevision = V1Alpha1Json.DeserializeAdmissionDecision(
+            V1Alpha1Json.Serialize(admission).Replace(new string('c', 40), new string('c', 65), StringComparison.Ordinal));
         var attempt = new Attempt(metadata, new AttemptSpec(workload.Metadata.Uid, 1, node.Metadata.Uid, admission.Metadata.Uid, Digest('a'), Digest('b'), Digest('c'), Digest('d')), new AttemptStatus(status, WorkloadLifecycleState.Failed));
         var lease = new Lease(metadata, new LeaseSpec(attempt.Metadata.Uid, node.Metadata.Uid, 1, DateTimeOffset.UtcNow.AddHours(1)), new LeaseStatus(status, DateTimeOffset.UtcNow, null));
         var session = new AgentSession(metadata, new AgentSessionSpec(attempt.Metadata.Uid, node.Metadata.Uid, new GitHubCopilotSessionProfile(Digest('a')), AgentSessionRole.IssueMaster, "key", null), new AgentSessionStatus(status, new ActorId("owner"), new ActorId("successor"), DateTimeOffset.UtcNow, true));
         var evidence = new EvidenceReceipt(metadata, new EvidenceReceiptSpec(attempt.Metadata.Uid, Digest('a'), new GitHubReleaseEvidenceArchiveProfile(repository), "release", Digest('b')), new EvidenceReceiptStatus(status, EvidenceVerification.Verified, DateTimeOffset.UtcNow));
         var @event = new Event(metadata with { ProjectId = null }, new EventSpec("Observed", DateTimeOffset.UtcNow, new ActorId("controller"), Guid.NewGuid(), Guid.NewGuid(), Digest('a')), status);
+
+        Assert.Equal("invalid-source-revision", Assert.IsType<Result<AdmissionDecision, ContractValidationError>.Failure>(shortAdmissionRevision).Error.Code);
+        Assert.Equal("invalid-source-revision", Assert.IsType<Result<AdmissionDecision, ContractValidationError>.Failure>(longAdmissionRevision).Error.Code);
 
         return
         [

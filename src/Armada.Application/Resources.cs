@@ -405,8 +405,7 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
             Result<ResourceCommit, ResourceCommandFailure>.Failure failure =>
                 new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(failure.Error),
             Result<ResourceCommit, ResourceCommandFailure>.Success success =>
-                new Result<ResourceStoreResult, ResourceCommandFailure>.Success(
-                    await repository.CreateAsync(success.Value, cancellationToken)),
+                await ToValidatedCreateResultAsync(success.Value, command, cancellationToken),
             _ => throw new InvalidOperationException("Unsupported resource command decision.")
         };
     }
@@ -465,6 +464,23 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
         };
     }
 
+    private async Task<Result<ResourceStoreResult, ResourceCommandFailure>> ToValidatedCreateResultAsync(
+        ResourceCommit commit,
+        CreateResourceCommand command,
+        CancellationToken cancellationToken)
+    {
+        var persisted = await repository.CreateAsync(commit, cancellationToken);
+        return persisted switch
+        {
+            ResourceStoreResult.AlreadyApplied replay when IsMatchingCreate(replay.Commit, command) =>
+                new Result<ResourceStoreResult, ResourceCommandFailure>.Success(replay),
+            ResourceStoreResult.AlreadyApplied =>
+                new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
+                    new("idempotency-key-reused", "The idempotency identity was already used for a different create command.")),
+            _ => new Result<ResourceStoreResult, ResourceCommandFailure>.Success(persisted)
+        };
+    }
+
     private static Result<ResourceStoreResult, ResourceCommandFailure> ReplayResult(
         ResourceCommit prior,
         UpdateResourceSpecCommand command) =>
@@ -473,6 +489,14 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
                 new ResourceStoreResult.AlreadyApplied(prior))
             : new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
                 new("idempotency-key-reused", "The transition identity was already used for a different update."));
+
+    private static bool IsMatchingCreate(ResourceCommit prior, CreateResourceCommand command) =>
+        prior.LedgerEvent.Actor == command.Actor &&
+        prior.LedgerEvent.CorrelationId == command.CorrelationId &&
+        prior.LedgerEvent.CausationId == command.CausationId &&
+        prior.LedgerEvent.OccurredAt == command.OccurredAt &&
+        ResourceDocuments.TryFrom(command.Resource) is Result<PersistedResource, ResourceCommandFailure>.Success expected &&
+        JsonElement.DeepEquals(prior.Resource.Document, expected.Value.Document);
 
     private static bool IsMatchingReplay(ResourceCommit prior, UpdateResourceSpecCommand command)
     {

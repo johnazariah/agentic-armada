@@ -45,6 +45,23 @@ public sealed class ResourceApplicationTests
     }
 
     [Fact]
+    public async Task Create_replay_with_different_command_metadata_is_rejected()
+    {
+        var repository = new InMemoryResourceRepository();
+        var service = new ResourceApplicationService(repository);
+        var command = Fixture.Create(Fixture.Project());
+
+        await service.CreateAsync(command, CancellationToken.None);
+        var replay = await service.CreateAsync(
+            command with { Actor = new ActorId("different-actor") },
+            CancellationToken.None);
+
+        Assert.Equal(
+            "idempotency-key-reused",
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Failure>(replay).Error.Code);
+    }
+
+    [Fact]
     public void Generic_creation_rejects_admission_decision_authority()
     {
         var workload = Fixture.Workload();

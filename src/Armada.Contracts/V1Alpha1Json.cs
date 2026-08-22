@@ -159,10 +159,9 @@ public static partial class V1Alpha1Json
         {
             return Failure<Workload>("unsupported-provider-profile", "Workload providers must be GitHub, GitHubCopilot, and GitHubRelease.");
         }
-        if (wire.Spec.SourceRevision is null ||
-            wire.Spec.SourceRevision.Length is < 40 or > 64)
+        if (SourceRevision(wire.Spec.SourceRevision) is Result<string, ContractValidationError>.Failure revisionFailure)
         {
-            return Failure<Workload>("invalid-source-revision", "Source revision must be between 40 and 64 characters.");
+            return Failure<Workload>(revisionFailure.Error);
         }
         if (wire.Spec.ActionSchemas is not { Count: > 0 } ||
             wire.Spec.ActionSchemas.Any(static schema => schema is null))
@@ -658,6 +657,11 @@ public static partial class V1Alpha1Json
             ? Success<ResourceId?>(new ResourceId(id))
             : Failure<ResourceId?>("invalid-resource-id", "Resource references must be UUID strings.");
     }
+
+    private static Result<string, ContractValidationError> SourceRevision(string? value) =>
+        value is { Length: >= 40 and <= 64 }
+            ? Success(value)
+            : Failure<string>("invalid-source-revision", "Source revision must be between 40 and 64 characters.");
 
     private static Result<T, ContractValidationError> Success<T>(T value) =>
         new Result<T, ContractValidationError>.Success(value);

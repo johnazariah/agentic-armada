@@ -100,6 +100,32 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Concurrent_cross_resource_idempotency_collision_returns_durable_reuse()
+    {
+        await ResetAsync();
+        var first = CreateCommit(Project());
+        var second = CreateCommit(Project());
+        second = second with
+        {
+            LedgerEvent = second.LedgerEvent with { IdempotencyKey = first.LedgerEvent.IdempotencyKey },
+            OutboxMessage = second.OutboxMessage with { IdempotencyKey = first.OutboxMessage.IdempotencyKey }
+        };
+        var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var deliveries = new[]
+        {
+            DeliverCreateAsync(first, start.Task),
+            DeliverCreateAsync(second, start.Task)
+        };
+
+        start.SetResult();
+        var results = await Task.WhenAll(deliveries);
+
+        Assert.Equal(1, results.Count(static result => result is ResourceStoreResult.Committed));
+        Assert.Equal(1, results.Count(static result => result is ResourceStoreResult.AlreadyApplied));
+        Assert.Equal(1L, await CountAsync("armada_event_ledger"));
+    }
+
+    [Fact]
     public async Task Concurrent_conflicting_update_replay_never_acknowledges_the_other_specification()
     {
         await ResetAsync();
@@ -251,6 +277,12 @@ public sealed class PostgresResourceRepositoryIntegrationTests : IAsyncLifetime
     {
         await start;
         return await service.UpdateSpecAsync(command, CancellationToken.None);
+    }
+
+    private async Task<ResourceStoreResult> DeliverCreateAsync(ResourceCommit commit, Task start)
+    {
+        await start;
+        return await Repository.CreateAsync(commit, CancellationToken.None);
     }
 
     private static Project Project() =>

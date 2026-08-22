@@ -52,42 +52,56 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        var prior = await FindCommitByIdempotencyKeyAsync(
-            connection,
-            transaction,
-            commit.LedgerEvent.IdempotencyKey,
-            cancellationToken);
-        if (prior is not null)
+        try
         {
-            await transaction.RollbackAsync(cancellationToken);
-            return new ResourceStoreResult.AlreadyApplied(prior);
-        }
-
-        var changed = expectedVersion is null
-            ? await InsertResourceAsync(connection, transaction, commit.Resource, cancellationToken)
-            : await UpdateResourceAsync(connection, transaction, commit.Resource, expectedVersion.Value, cancellationToken);
-
-        if (!changed)
-        {
-            var concurrentlyCommitted = await FindCommitByIdempotencyKeyAsync(
+            var prior = await FindCommitByIdempotencyKeyAsync(
                 connection,
                 transaction,
                 commit.LedgerEvent.IdempotencyKey,
                 cancellationToken);
-            if (concurrentlyCommitted is not null)
+            if (prior is not null)
             {
                 await transaction.RollbackAsync(cancellationToken);
-                return new ResourceStoreResult.AlreadyApplied(concurrentlyCommitted);
+                return new ResourceStoreResult.AlreadyApplied(prior);
             }
 
-            var actual = await GetVersionAsync(connection, transaction, commit.Resource.Id, cancellationToken);
-            await transaction.RollbackAsync(cancellationToken);
-            return new ResourceStoreResult.Conflict(actual);
-        }
+            var changed = expectedVersion is null
+                ? await InsertResourceAsync(connection, transaction, commit.Resource, cancellationToken)
+                : await UpdateResourceAsync(connection, transaction, commit.Resource, expectedVersion.Value, cancellationToken);
 
-        await AppendLedgerAndOutboxAsync(connection, transaction, commit, cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
-        return new ResourceStoreResult.Committed(commit);
+            if (!changed)
+            {
+                var concurrentlyCommitted = await FindCommitByIdempotencyKeyAsync(
+                    connection,
+                    transaction,
+                    commit.LedgerEvent.IdempotencyKey,
+                    cancellationToken);
+                if (concurrentlyCommitted is not null)
+                {
+                    await transaction.RollbackAsync(cancellationToken);
+                    return new ResourceStoreResult.AlreadyApplied(concurrentlyCommitted);
+                }
+
+                var actual = await GetVersionAsync(connection, transaction, commit.Resource.Id, cancellationToken);
+                await transaction.RollbackAsync(cancellationToken);
+                return new ResourceStoreResult.Conflict(actual);
+            }
+
+            await AppendLedgerAndOutboxAsync(connection, transaction, commit, cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new ResourceStoreResult.Committed(commit);
+        }
+        catch (PostgresException error) when (error.SqlState == PostgresErrorCodes.UniqueViolation)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            var concurrent = await FindByIdempotencyKeyAsync(commit.LedgerEvent.IdempotencyKey, cancellationToken);
+            if (concurrent is not null)
+            {
+                return new ResourceStoreResult.AlreadyApplied(concurrent);
+            }
+
+            throw;
+        }
     }
 
     private static async Task<bool> InsertResourceAsync(
