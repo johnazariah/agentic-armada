@@ -97,6 +97,50 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
     }
 
     [Fact]
+    public async Task Published_armada_configuration_starts_and_returns_readiness_with_injected_dependencies()
+    {
+        const string connectionString =
+            "Host=127.0.0.1;Port=5432;Database=armada_lab;Username=armada_lab";
+        using var environment = new TemporaryEnvironmentVariable(
+            "ARMADA_ControlPlane__Postgres__ConnectionString",
+            connectionString);
+        var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions
+        {
+            EnvironmentName = Environments.Development
+        });
+        ControlPlaneHostConfiguration.AddSources(builder.Configuration, builder.Environment.EnvironmentName, []);
+        var configuration = ValidHostConfiguration();
+        configuration.Remove("ControlPlane:Postgres:ConnectionString");
+        builder.Configuration.AddInMemoryCollection(configuration);
+        builder.Services.AddSingleton<IRestoreEvidenceVerifier>(new VerifiedEvidence());
+        builder.Services.AddSingleton<IPostgresReadinessProbe>(new ReachablePostgres());
+
+        var options = builder.Configuration.GetSection(ControlPlaneOptions.SectionName).Get<ControlPlaneOptions>();
+        Assert.NotNull(options);
+        Assert.Equal(connectionString, options.Postgres.ConnectionString);
+
+        await using var app = ControlPlaneHostApplication.Build(builder);
+        try
+        {
+            await app.StartAsync();
+
+            var addresses = app.Services.GetRequiredService<IServer>()
+                .Features.Get<IServerAddressesFeature>()?.Addresses;
+            var address = Assert.Single(addresses ?? []);
+            using var client = new HttpClient { BaseAddress = new Uri(address) };
+
+            var ready = await client.GetAsync("/health/ready");
+
+            Assert.True(ready.IsSuccessStatusCode);
+            Assert.Contains("\"isReady\":true", await ready.Content.ReadAsStringAsync());
+        }
+        finally
+        {
+            await app.StopAsync();
+        }
+    }
+
+    [Fact]
     public void Prohibited_hosting_configuration_fails_during_bootstrap_before_a_server_can_start()
     {
         var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
@@ -154,4 +198,15 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
             "sha256:0000000000000000000000000000000000000000000000000000000000000000"
     };
 
+    private sealed class VerifiedEvidence : IRestoreEvidenceVerifier
+    {
+        public Task<bool> IsVerifiedAsync(
+            LocalRestoreEvidenceReference evidence,
+            CancellationToken cancellationToken) => Task.FromResult(true);
+    }
+
+    private sealed class ReachablePostgres : IPostgresReadinessProbe
+    {
+        public Task<bool> IsReachableAsync(CancellationToken cancellationToken) => Task.FromResult(true);
+    }
 }

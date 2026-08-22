@@ -19,6 +19,8 @@ public base URL, so it is not reachable from WSL or any network peer.
    /absolute/path/to/restore-drill-evidence.json`). Set the PostgreSQL
    connection string through
    `ARMADA_ControlPlane__Postgres__ConnectionString`, not a committed file.
+   The `ARMADA_` prefix maps to the root configuration namespace, so this is
+   the value for `ControlPlane:Postgres:ConnectionString`.
 3. Confirm PostgreSQL is local, the schema was applied by an operator, and the
    artifact is the reviewed output of a restore drill. Do not substitute a
    timestamp or free-text path for its digest.
@@ -41,6 +43,10 @@ host, or attach the WSL node by ad hoc networking. No
 mTLS/node enrolment, GitHub App or OAuth credential, Copilot adapter,
 signer/key custody, installer, package download, live session control, workload
 execution, or scientific authority is approved by this baseline.
+
+Raw `ASPNETCORE_` and `DOTNET_` URL, HTTP/HTTPS-port, and
+hosting-preference aliases are rejected as unsafe hosting configuration. They
+are not substitutes for the `ARMADA_` application configuration namespace.
 
 The host deliberately does not reload JSON configuration; restart it through a
 reviewed lab procedure after a configuration change. The local evidence opener

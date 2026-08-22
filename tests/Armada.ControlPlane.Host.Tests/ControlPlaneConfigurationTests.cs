@@ -110,6 +110,45 @@ public sealed class ControlPlaneConfigurationTests
         Assert.Contains(failures, static failure => failure.Code == "configured-host-url");
     }
 
+    [Fact]
+    public void Published_armada_environment_variable_binds_to_control_plane_options()
+    {
+        const string connectionString =
+            "Host=127.0.0.1;Port=5432;Database=armada_lab;Username=armada_lab";
+        using var environment = new TemporaryEnvironmentVariable(
+            "ARMADA_ControlPlane__Postgres__ConnectionString",
+            connectionString);
+        var configuration = new ConfigurationManager();
+
+        ControlPlaneHostConfiguration.AddSources(configuration, "Development", []);
+
+        var options = configuration.GetSection(ControlPlaneOptions.SectionName).Get<ControlPlaneOptions>();
+
+        Assert.NotNull(options);
+        Assert.Equal(connectionString, options.Postgres.ConnectionString);
+    }
+
+    [Fact]
+    public void Raw_aspnetcore_and_dotnet_hosting_inputs_remain_visible_and_rejected()
+    {
+        using var urls = new TemporaryEnvironmentVariable(
+            "ASPNETCORE_URLS",
+            "http://0.0.0.0:5080");
+        using var ports = new TemporaryEnvironmentVariable("DOTNET_HTTP_PORTS", "5081");
+        using var preference = new TemporaryEnvironmentVariable(
+            "ASPNETCORE_PREFERHOSTINGURLS",
+            "true");
+        var configuration = new ConfigurationManager();
+
+        ControlPlaneHostConfiguration.AddSources(configuration, "Development", []);
+
+        var failures = HostBindingConfiguration.Validate(configuration, hostUrls: null);
+
+        Assert.Contains(failures, static failure => failure.Code == "configured-host-url");
+        Assert.Contains(failures, static failure => failure.Code == "configured-host-port");
+        Assert.Contains(failures, static failure => failure.Code == "configured-prefer-hosting-urls");
+    }
+
     internal static ControlPlaneOptions ValidOptions() => new()
     {
         Lab = new() { Enabled = true, Topology = ControlPlaneConfiguration.LabTopology },
@@ -138,4 +177,5 @@ public sealed class ControlPlaneConfigurationTests
             ContentDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         }
     };
+
 }
