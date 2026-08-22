@@ -14,6 +14,28 @@ adapter, GitHub integration and GitHub evidence archive are separate trust
 zones. GitHub text and repository content are untrusted input. Node inventory
 is an observation, not authority.
 
+## Lab baseline topology
+
+The lab control plane and PostgreSQL run on the Mac. The first future node is
+the disposable Ubuntu WSL instance `johnaz-phd-wsl`. The baseline host binds
+only to an explicitly configured IP-loopback Kestrel listener and has no node
+transport, so WSL cannot reach it and no node may infer enrolment or authority
+from a liveness response. `Kestrel:Endpoints`, `urls`, generic HTTP/HTTPS port
+inputs, and enabled hosting-URL preference configuration are rejected before
+startup so they cannot add a public listener. Readiness requires explicit lab
+mode, local PostgreSQL configuration and reachability, operator-applied schema
+management, and a locally verified content-addressed restore-drill artifact.
+JSON configuration reload is disabled: the control plane uses code-only Kestrel
+endpoints. Restore artifacts are opened on macOS with no-follow semantics,
+validated from the opened descriptor as regular, and hashed from that same
+descriptor; unsupported platforms fail closed.
+
+This is a configuration and dependency gate, not evidence that a backup can be
+restored or that a lab deployment is safe. Operators must keep the restore drill
+and schema procedure outside the host. mTLS/node enrolment, GitHub credentials,
+Copilot adapters, signing/key custody, installers, package downloads, workload
+execution, and production/scientific authority remain unavailable.
+
 ## Principal threats and controls
 
 | Threat | Control |
@@ -29,6 +51,11 @@ is an observation, not authority.
 | Credential exfiltration | short-lived workload-scoped grants, no shared token, explicit secret capability and evidence redaction |
 | Cross-project leakage on a shared node | schedule only to an enforceable workload isolation profile: dedicated node, isolated container or ephemeral VM; no concurrent cross-project process-only execution |
 | Operator error/recovery event | least-privileged RBAC, append-only audit, tested backup/restore and named recovery ceremony |
+| Accidental exposure of the lab baseline | explicit lab opt-in, validated IP-loopback Kestrel binding, rejection of configured endpoint/URL/port/hosting-preference overrides, liveness/readiness separation, no authority endpoint, and a secret-free checked-in template |
+| Kestrel configuration reload adds a listener | code-only Kestrel configuration and non-reloadable JSON sources; listener changes require a reviewed process restart |
+| Forged or changed restore evidence | exact SHA-256 verification of a regular local artifact; missing, directory, symlink, unreadable, and tampered artifacts fail readiness |
+| Evidence path replacement between inspection and read | macOS `O_NOFOLLOW`, `fstat` validation of the opened descriptor, and hashing from that descriptor; unsupported platforms fail closed |
+| Readiness mistaken for deployment approval | readiness checks configuration, the byte identity of a local restore artifact, and PostgreSQL reachability; the runbook prohibits node attachment or workload operation |
 
 ## Security gates
 

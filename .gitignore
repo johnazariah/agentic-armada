@@ -2,3 +2,4 @@
 **/obj/
 TestResults/
 .vs/
+**/appsettings.Lab.json
