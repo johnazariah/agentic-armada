@@ -98,8 +98,9 @@ GitHub adapters remain deferred.
   no local PostgreSQL instance. Deterministic in-memory port tests cover CAS
   contention, replay and no-partial-write laws; SQL contract tests cover the
   migration constraints. The two direct Npgsql execution adapters have narrow,
-  documented coverage exclusions until the real PostgreSQL integration suite can
-  run in a supported environment.
+  documented coverage exclusions owned by the control-plane maintainer. They
+  expire on 2026-09-30 and must be replaced with a supported real PostgreSQL
+  integration suite.
 
 **Compatibility:** consumes existing `armada.io/v1alpha1` contracts without
 introducing a provider or consumer `.armada/` configuration.

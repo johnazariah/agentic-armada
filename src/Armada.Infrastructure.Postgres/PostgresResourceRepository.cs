@@ -6,8 +6,8 @@ using Npgsql;
 
 namespace Armada.Infrastructure.Postgres;
 
-// This thin boundary executes the SQL contracts tested without an available local PostgreSQL service.
-[ExcludeFromCodeCoverage(Justification = "Requires a live PostgreSQL service; deterministic port and SQL contract tests cover CAS and atomicity semantics.")]
+// Owner: control-plane maintainer. Replace with real PostgreSQL integration coverage by 2026-09-30.
+[ExcludeFromCodeCoverage(Justification = "Requires a live PostgreSQL service; deterministic port and SQL contract tests cover CAS and atomicity semantics until 2026-09-30.")]
 public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IResourceRepository
 {
     public async Task<PersistedResource?> GetAsync(ResourceId id, CancellationToken cancellationToken)

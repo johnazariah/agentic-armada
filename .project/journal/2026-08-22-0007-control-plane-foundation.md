@@ -21,6 +21,7 @@
 
 The local host has the Docker client but no reachable Docker daemon/socket and
 no local PostgreSQL instance. Direct Npgsql execution methods are therefore
-narrowly excluded with their reason recorded in code and plan 001; SQL schema
-and repository semantics are tested deterministically until a supported
-PostgreSQL integration environment is available.
+narrowly excluded with their reason recorded in code and plan 001. The
+control-plane maintainer owns replacement with supported real PostgreSQL
+integration coverage by 2026-09-30; SQL schema and repository semantics remain
+tested deterministically in the interim.

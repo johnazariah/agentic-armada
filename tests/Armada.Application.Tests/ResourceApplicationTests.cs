@@ -366,7 +366,7 @@ internal static class Fixture
                 new(2),
                 new(null, [], null, null, new(100, 0, 1024, 1024), null, null),
                 new(new(Repository("johnazariah/armada-evidence")), "standard")),
-            new(new(0, []), WorkloadLifecycleState.Desired, null, null, null, null, null, null));
+            new(new(0, []), WorkloadLifecycleState.Desired, null, null, null, null, null, null, null, null, null));
     }
 
     public static AdmissionDecision AdmissionDecision(Workload workload) =>

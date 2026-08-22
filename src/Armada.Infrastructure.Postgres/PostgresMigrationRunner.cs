@@ -3,8 +3,8 @@ using System.Diagnostics.CodeAnalysis;
 
 namespace Armada.Infrastructure.Postgres;
 
-// Executes against the PostgreSQL service; migration SQL is covered deterministically below.
-[ExcludeFromCodeCoverage(Justification = "Requires a live PostgreSQL service; migration semantics are covered by SQL contract tests.")]
+// Owner: control-plane maintainer. Replace with real PostgreSQL integration coverage by 2026-09-30.
+[ExcludeFromCodeCoverage(Justification = "Requires a live PostgreSQL service; migration semantics are covered by SQL contract tests until 2026-09-30.")]
 public sealed class PostgresMigrationRunner(NpgsqlDataSource dataSource)
 {
     public async Task ApplyAsync(DateTimeOffset appliedAt, CancellationToken cancellationToken)
