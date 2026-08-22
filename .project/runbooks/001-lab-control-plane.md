@@ -47,6 +47,8 @@ execution, or scientific authority is approved by this baseline.
 Raw `ASPNETCORE_` and `DOTNET_` URL, HTTP/HTTPS-port, and
 hosting-preference aliases are rejected as unsafe hosting configuration. They
 are not substitutes for the `ARMADA_` application configuration namespace.
+Validation reads an independent raw environment snapshot, so an empty
+`ARMADA_` value cannot mask one of those aliases.
 
 The host deliberately does not reload JSON configuration; restart it through a
 reviewed lab procedure after a configuration change. The local evidence opener

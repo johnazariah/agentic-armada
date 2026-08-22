@@ -28,8 +28,8 @@ node, transport, signing, installation, GitHub, or Copilot authority.
   the PostgreSQL connection string or its credentials.
 - Published `ARMADA_` variables map to root application configuration sections:
   `ARMADA_ControlPlane__Postgres__ConnectionString` binds
-  `ControlPlane:Postgres:ConnectionString`. The raw environment source remains
-  visible to startup validation so `Kestrel`, `urls`, generic port, and
+  `ControlPlane:Postgres:ConnectionString`. An independent raw environment
+  snapshot remains visible to startup validation so `Kestrel`, `urls`, generic port, and
   `ASPNETCORE_`/`DOTNET_` hosting aliases cannot evade the listener guard.
 - PostgreSQL is probed with `SELECT 1`; this PR neither applies migrations nor
   creates another resource/ledger/admission authority.

@@ -64,6 +64,36 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
     }
 
     [Fact]
+    public void Raw_unsafe_hosting_inputs_cannot_be_masked_by_empty_armada_values()
+    {
+        using var rawUrls = new TemporaryEnvironmentVariable(
+            "ASPNETCORE_URLS",
+            "http://0.0.0.0:5080");
+        using var rawPorts = new TemporaryEnvironmentVariable("DOTNET_HTTP_PORTS", "5081");
+        using var rawPreference = new TemporaryEnvironmentVariable(
+            "ASPNETCORE_PREFERHOSTINGURLS",
+            "true");
+        using var maskedUrls = new TemporaryEnvironmentVariable("ARMADA_ASPNETCORE_URLS", string.Empty);
+        using var maskedPorts = new TemporaryEnvironmentVariable("ARMADA_DOTNET_HTTP_PORTS", string.Empty);
+        using var maskedPreference = new TemporaryEnvironmentVariable(
+            "ARMADA_ASPNETCORE_PREFERHOSTINGURLS",
+            string.Empty);
+        var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
+        ControlPlaneHostConfiguration.AddSources(builder.Configuration, Environments.Development, []);
+
+        Assert.True(string.IsNullOrEmpty(builder.Configuration["ASPNETCORE_URLS"]));
+        Assert.True(string.IsNullOrEmpty(builder.Configuration["DOTNET_HTTP_PORTS"]));
+        Assert.True(string.IsNullOrEmpty(builder.Configuration["ASPNETCORE_PREFERHOSTINGURLS"]));
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => ControlPlaneHostApplication.Build(builder));
+
+        Assert.Contains("URL configuration is prohibited", error.Message);
+        Assert.Contains("HTTP and HTTPS port configuration is prohibited", error.Message);
+        Assert.Contains("Hosting URL preference is prohibited", error.Message);
+    }
+
+    [Fact]
     public async Task Valid_configuration_starts_a_kestrel_host_and_serves_liveness()
     {
         var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions

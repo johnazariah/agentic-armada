@@ -30,6 +30,9 @@ configures only its validated loopback listener. It never runs migrations
 automatically. Its JSON configuration sources do not reload, so endpoint changes
 cannot add listeners after startup.
 
+Hosting validation also reads an independent raw environment snapshot, so an
+empty `ARMADA_` value cannot mask a dangerous raw hosting alias.
+
 The local artifact verifier is intentionally macOS-only: it opens the final
 path with `O_NOFOLLOW`, validates the opened descriptor is a regular file, and
 hashes that same descriptor. Unsupported platforms, including Windows, fail

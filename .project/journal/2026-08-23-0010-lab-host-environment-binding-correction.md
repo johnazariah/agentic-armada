@@ -17,6 +17,8 @@
 - Deterministic regressions prove the documented variable binds, raw unsafe
   aliases fail before startup, and an otherwise valid host returns readiness
   with injected evidence and PostgreSQL dependencies. No database is required.
+- Validation reads an independent raw environment snapshot. A later empty
+  `ARMADA_` value therefore cannot mask a dangerous raw hosting alias.
 
 ## Boundary retained
 
