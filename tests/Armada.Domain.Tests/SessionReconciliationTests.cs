@@ -112,6 +112,24 @@ public sealed class SessionReconciliationTests
     }
 
     [Fact]
+    public void Terminal_evidence_cleanup_ignores_expired_execution_admission()
+    {
+        var fixture = new SessionFixture();
+        fixture.Workload = fixture.Workload with
+        {
+            Status = fixture.Workload.Status with { Lifecycle = WorkloadLifecycleState.TerminalPending }
+        };
+        fixture.Admission = fixture.Admission with
+        {
+            Spec = fixture.Admission.Spec with { ExpiresAt = fixture.Now.AddMinutes(-1) }
+        };
+
+        var actions = Value(MajorDomoReconciliation.Reconcile(
+            fixture.Input(fixture.Runtime(SessionLiveness.Terminal), fixture.Evidence(EvidenceVerification.Verified))));
+        Assert.IsType<SessionReconciliationAction.Archive>(Assert.Single(actions));
+    }
+
+    [Fact]
     public void Reconciliation_refuses_an_expired_or_wrongly_bound_admission()
     {
         var fixture = new SessionFixture();

@@ -60,6 +60,7 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
     private readonly object gate = new();
     private readonly Dictionary<ResourceId, SessionRuntime> sessions = [];
     private readonly Dictionary<string, ResourceId> parentIdempotency = new(StringComparer.Ordinal);
+    private readonly Dictionary<ChildSessionIdempotencyKey, AgentSession> childIdempotency = [];
     private readonly List<SessionObservation> observations = [];
 
     public ImmutableArray<SessionObservation> Observations
@@ -126,6 +127,11 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
                 parent.Spec.Role != AgentSessionRole.IssueMaster ||
                 request.Session.Spec.Role != AgentSessionRole.Child ||
                 request.Session.Spec.ParentSessionReference != parent.Metadata.Uid ||
+                request.Session.Spec.AttemptReference != parent.Spec.AttemptReference ||
+                request.Session.Spec.NodeReference != parent.Spec.NodeReference ||
+                request.Session.Metadata.ProjectId != parent.Metadata.ProjectId ||
+                request.Session.Metadata.OrganisationId != parent.Metadata.OrganisationId ||
+                request.Session.Spec.Provider.ProfileDigest != parent.Spec.Provider.ProfileDigest ||
                 !sessions.TryGetValue(parent.Metadata.Uid, out var durableParent) ||
                 durableParent.Session != parent ||
                 durableParent.Liveness != SessionLiveness.Active ||
@@ -133,16 +139,25 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
             {
                 return Task.FromResult(Failure<SessionRuntime>(
                     "child-session-authority-refused",
-                    "Child creation requires IssueMasterWithChildren authority and an exact Issue Master parent binding."));
+                    "Child creation requires IssueMasterWithChildren authority and exact parent, attempt, node, project, organisation, and provider bindings."));
             }
 
-            if (sessions.TryGetValue(request.Session.Metadata.Uid, out var existing))
+            var key = new ChildSessionIdempotencyKey(
+                parent.Metadata.Uid,
+                request.Session.Spec.AttemptReference,
+                request.Session.Spec.IdempotencyKey);
+            if (childIdempotency.TryGetValue(key, out var existing))
             {
-                return Task.FromResult(Success(existing));
+                return existing == request.Session && sessions.TryGetValue(existing.Metadata.Uid, out var existingRuntime)
+                    ? Task.FromResult(Success(existingRuntime))
+                    : Task.FromResult(Failure<SessionRuntime>(
+                        "child-idempotency-key-reused",
+                        "A child idempotency key was already used with different child identity or bindings."));
             }
 
             var runtime = new SessionRuntime(request.Session, SessionLiveness.Active, request.Session.Metadata.CreatedAt);
             sessions.Add(request.Session.Metadata.Uid, runtime);
+            childIdempotency.Add(key, request.Session);
             return Task.FromResult(Success(runtime));
         }
     }
@@ -263,7 +278,7 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
     {
         lock (gate)
         {
-            var current = Find(request, expectedRole, parent);
+            var current = FindForArchive(request, expectedRole, parent);
             if (current is Result<SessionRuntime, SessionAdapterFailure>.Failure failure)
             {
                 return Task.FromResult(Failure<SessionRuntime>(failure.Error.Code, failure.Error.Message));
@@ -321,6 +336,23 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
                 : new Result<SessionRuntime, SessionAdapterFailure>.Success(runtime);
     }
 
+    private Result<SessionRuntime, SessionAdapterFailure> FindForArchive(
+        SessionOperationRequest request,
+        AgentSessionRole expectedRole,
+        AgentSession? parent)
+    {
+        if (request.CorrelationId == Guid.Empty || string.IsNullOrWhiteSpace(request.Reason) ||
+            request.Session.Spec.Role != expectedRole ||
+            parent is not null && request.Session.Spec.ParentSessionReference != parent.Metadata.Uid ||
+            !sessions.TryGetValue(request.Session.Metadata.Uid, out var runtime) ||
+            runtime.Session.Spec.AttemptReference != request.Attempt.Metadata.Uid)
+        {
+            return Failure<SessionRuntime>("invalid-terminal-archive-binding", "Terminal archival requires a known session with exact role, parent, attempt, correlation, and reason bindings.");
+        }
+
+        return new Result<SessionRuntime, SessionAdapterFailure>.Success(runtime);
+    }
+
     private static Result<bool, SessionAdapterFailure> ValidateAuthority(
         AgentSession session,
         Attempt attempt,
@@ -340,6 +372,11 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
 
     private static Result<T, SessionAdapterFailure> Success<T>(T value) =>
         new Result<T, SessionAdapterFailure>.Success(value);
+
+    private sealed record ChildSessionIdempotencyKey(
+        ResourceId ParentSessionReference,
+        ResourceId AttemptReference,
+        string IdempotencyKey);
 }
 
 public sealed record SupportedCopilotIntegration(

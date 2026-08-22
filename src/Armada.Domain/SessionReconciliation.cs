@@ -229,6 +229,11 @@ public static class MajorDomoReconciliation
     {
         ArgumentNullException.ThrowIfNull(input);
 
+        if (input.Workload.Status.Lifecycle == WorkloadLifecycleState.TerminalPending)
+        {
+            return ReconcileTerminal(input);
+        }
+
         var binding = ValidateBindings(input);
         if (binding is Result<bool, SessionReconciliationFailure>.Failure failure)
         {
@@ -263,29 +268,6 @@ public static class MajorDomoReconciliation
 
         if (IsTerminal(input.Workload.Status.Lifecycle))
         {
-            return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Success(actions.ToImmutable());
-        }
-
-        if (input.Workload.Status.Lifecycle == WorkloadLifecycleState.TerminalPending)
-        {
-            if (HasIndependentlyFinalisedEvidence(input))
-            {
-                foreach (var session in issueMasters.Where(session => session.Liveness is not SessionLiveness.Archived))
-                {
-                    actions.Add(new SessionReconciliationAction.Archive(session.Session.Metadata.Uid));
-                }
-            }
-            else
-            {
-                actions.Add(new SessionReconciliationAction.Block(Blocked(
-                    input,
-                    "terminal Issue Master session cannot be archived before independently verified evidence exists",
-                    "evidence-controller",
-                    "finalise the EvidenceReceipt for the current attempt",
-                    $"Attempt/{input.Attempt!.Metadata.Uid}",
-                    "evidence-controller")));
-            }
-
             return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Success(actions.ToImmutable());
         }
 
@@ -342,6 +324,44 @@ public static class MajorDomoReconciliation
         string.Create(
             CultureInfo.InvariantCulture,
             $"issue-master:{node}:{workload}:{generation}");
+
+    private static Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure> ReconcileTerminal(
+        SessionReconciliationInput input)
+    {
+        if (input.Attempt is null ||
+            input.Attempt.Spec.WorkloadReference != input.Workload.Metadata.Uid ||
+            input.Attempt.Spec.WorkloadGeneration != input.Workload.Metadata.Generation ||
+            input.Workload.Status.AttemptReference != input.Attempt.Metadata.Uid)
+        {
+            return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Failure(
+                new("attempt-binding-mismatch", "Terminal session archival requires the attempt bound to the workload generation."));
+        }
+
+        var sessions = input.Sessions
+            .Where(session =>
+                session.Session.Spec.Role == AgentSessionRole.IssueMaster &&
+                session.Session.Spec.AttemptReference == input.Attempt.Metadata.Uid &&
+                session.Session.Spec.NodeReference == input.Attempt.Spec.NodeReference &&
+                !session.Session.Status.ArchiveComplete &&
+                session.Liveness is not SessionLiveness.Archived)
+            .OrderBy(session => session.Session.Metadata.Uid.Value)
+            .Select(session => (SessionReconciliationAction)new SessionReconciliationAction.Archive(session.Session.Metadata.Uid))
+            .ToImmutableArray();
+
+        if (HasIndependentlyFinalisedEvidence(input))
+        {
+            return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Success(sessions);
+        }
+
+        return new Result<ImmutableArray<SessionReconciliationAction>, SessionReconciliationFailure>.Success(
+            ImmutableArray.Create<SessionReconciliationAction>(new SessionReconciliationAction.Block(Blocked(
+                input,
+                "terminal Issue Master session cannot be archived before independently verified evidence exists",
+                "evidence-controller",
+                "finalise the EvidenceReceipt for the current attempt",
+                $"Attempt/{input.Attempt.Metadata.Uid}",
+                "evidence-controller"))));
+    }
 
     private static Result<bool, SessionReconciliationFailure> ValidateBindings(SessionReconciliationInput input)
     {

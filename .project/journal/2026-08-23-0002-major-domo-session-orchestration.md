@@ -22,6 +22,10 @@
 - Kept terminal archival behind independent evidence verification. No adapter
   operation can issue leases, mutate admission, alter readiness, enlarge
   capabilities, finalise evidence or acquire credentials.
+- Follow-up review evidence: terminal cleanup is deliberately independent of
+  expired execution admission once the control plane has verified the receipt;
+  child creation now requires exact parent/attempt/node/project/provider
+  bindings and a durable `(parent, attempt, idempotency key)` replay identity.
 
 ## Quality evidence
 

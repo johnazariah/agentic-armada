@@ -95,6 +95,88 @@ public sealed class SessionAdapterTests
     }
 
     [Fact]
+    public async Task Terminal_archive_allows_verified_evidence_after_execution_admission_expires()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None);
+        var request = fixture.Operation(fixture.Parent);
+        await adapter.WakeParentAsync(request, CancellationToken.None);
+        await adapter.CancelParentAsync(request, CancellationToken.None);
+
+        var archived = Value(await adapter.ArchiveParentAsync(
+            request with { OccurredAt = fixture.AfterAdmissionExpiry },
+            CancellationToken.None));
+        Assert.True(archived.Session.Status.ArchiveComplete);
+    }
+
+    [Fact]
+    public async Task Child_creation_refuses_cross_attempt_and_cross_node_bindings()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None);
+        await adapter.WakeParentAsync(fixture.Operation(fixture.Parent), CancellationToken.None);
+
+        var otherAttempt = fixture.Attempt with { Metadata = fixture.Metadata("other-attempt") };
+        var crossAttempt = fixture.Child with
+        {
+            Spec = fixture.Child.Spec with { AttemptReference = otherAttempt.Metadata.Uid }
+        };
+        Assert.Equal(
+            "child-session-authority-refused",
+            Failure(await adapter.CreateChildAsync(fixture.Create(crossAttempt, attempt: otherAttempt), fixture.Parent, CancellationToken.None)).Code);
+
+        var otherNode = ResourceId.New();
+        var otherAdmission = fixture.Admission with
+        {
+            Metadata = fixture.Metadata("other-admission"),
+            Spec = fixture.Admission.Spec with { NodeReference = otherNode }
+        };
+        var nodeAttempt = fixture.Attempt with
+        {
+            Metadata = fixture.Metadata("node-attempt"),
+            Spec = fixture.Attempt.Spec with
+            {
+                NodeReference = otherNode,
+                AdmissionDecisionReference = otherAdmission.Metadata.Uid
+            }
+        };
+        var crossNode = fixture.Child with
+        {
+            Spec = fixture.Child.Spec with
+            {
+                AttemptReference = nodeAttempt.Metadata.Uid,
+                NodeReference = otherNode
+            }
+        };
+        Assert.Equal(
+            "child-session-authority-refused",
+            Failure(await adapter.CreateChildAsync(
+                fixture.Create(crossNode, attempt: nodeAttempt, admission: otherAdmission),
+                fixture.Parent,
+                CancellationToken.None)).Code);
+    }
+
+    [Fact]
+    public async Task Child_creation_replays_by_parent_attempt_and_idempotency_key()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None);
+        await adapter.WakeParentAsync(fixture.Operation(fixture.Parent), CancellationToken.None);
+
+        var created = Value(await adapter.CreateChildAsync(fixture.Create(fixture.Child), fixture.Parent, CancellationToken.None));
+        var replay = Value(await adapter.CreateChildAsync(fixture.Create(fixture.Child), fixture.Parent, CancellationToken.None));
+        Assert.Equal(created, replay);
+
+        var collision = fixture.Child with { Metadata = fixture.Metadata("different-child") };
+        Assert.Equal(
+            "child-idempotency-key-reused",
+            Failure(await adapter.CreateChildAsync(fixture.Create(collision), fixture.Parent, CancellationToken.None)).Code);
+    }
+
+    [Fact]
     public async Task Durable_observations_bind_session_attempt_correlation_and_envelope()
     {
         var fixture = new AdapterFixture();
@@ -156,6 +238,7 @@ public sealed class SessionAdapterTests
     private sealed class AdapterFixture
     {
         private readonly DateTimeOffset now = new(2026, 8, 23, 0, 0, 0, TimeSpan.Zero);
+        public DateTimeOffset AfterAdmissionExpiry => now.AddHours(2);
         public AgentSession Parent { get; }
         public AgentSession Child { get; }
         public Attempt Attempt { get; }
@@ -180,8 +263,12 @@ public sealed class SessionAdapterTests
             Envelope = new(Digest('f'), ImmutableHashSet.Create("read"), SessionAuthority.IssueMasterWithChildren);
         }
 
-        public CreateSessionRequest Create(AgentSession session, SessionAuthority authority = SessionAuthority.IssueMasterWithChildren) =>
-            new(session, Attempt, Admission, Envelope with { SessionAuthority = authority }, Guid.NewGuid(), now);
+        public CreateSessionRequest Create(
+            AgentSession session,
+            SessionAuthority authority = SessionAuthority.IssueMasterWithChildren,
+            Attempt? attempt = null,
+            AdmissionDecision? admission = null) =>
+            new(session, attempt ?? Attempt, admission ?? Admission, Envelope with { SessionAuthority = authority }, Guid.NewGuid(), now);
 
         public SessionOperationRequest Operation(AgentSession session, EvidenceReceipt? evidence = null) =>
             new(session, Attempt, Admission, Envelope, Guid.NewGuid(), "test operation", now, evidence ?? Evidence());
@@ -196,7 +283,7 @@ public sealed class SessionAdapterTests
         private EvidenceReceipt Evidence() =>
             new(Metadata("evidence"), new(Attempt.Metadata.Uid, Digest('a'), new(Repository()), "release", Digest('b')), new(new(1, ImmutableArray<Condition>.Empty), EvidenceVerification.Verified, now));
 
-        private ResourceMetadata Metadata(string name, ResourceId? id = null) =>
+        public ResourceMetadata Metadata(string name, ResourceId? id = null) =>
             new(id ?? ResourceId.New(), new(Guid.Parse("11111111-1111-1111-1111-111111111111")), new(Guid.Parse("22222222-2222-2222-2222-222222222222")), name, new("1"), 1, ImmutableValues.EmptyLabels, ImmutableDictionary<string, string>.Empty, ImmutableValues.EmptyOwners, ImmutableValues.EmptyFinalizers, now, now);
 
         private static RepositoryName Repository() => RepositoryName.Parse("octo/armada") is Result<RepositoryName, ContractValidationError>.Success success
