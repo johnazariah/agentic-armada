@@ -205,9 +205,13 @@ public static class UpgradePlanning
 
 public enum UpgradePhase
 {
+    StageClaimed,
     Staged,
+    HealthClaimed,
     HealthConfirmed,
+    ActivationClaimed,
     Activated,
+    RollbackClaimed,
     RolledBack
 }
 
@@ -218,10 +222,25 @@ public sealed record UpgradeJournalEvent(
     UpgradePhase Phase,
     DateTimeOffset RecordedAt,
     string Code,
-    string Message);
+    string Message,
+    Guid OperationId,
+    DateTimeOffset? ClaimExpiresAt);
+
+public enum UpgradePlatformStatus
+{
+    NotStaged,
+    Staged,
+    Healthy,
+    Activated,
+    RolledBack
+}
 
 public interface IUpgradeStaging
 {
+    Task<Result<UpgradePlatformStatus, UpgradeFailure>> GetStatusAsync(
+        UpgradePlan plan,
+        CancellationToken cancellationToken);
+
     Task<Result<bool, UpgradeFailure>> StageAsync(UpgradePlan plan, CancellationToken cancellationToken);
 
     Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(UpgradePlan plan, CancellationToken cancellationToken);
@@ -242,110 +261,266 @@ public sealed class NodeUpgradeCoordinator(
     IUpgradeStaging staging,
     IClock clock)
 {
-    private readonly SemaphoreSlim operationGate = new(1, 1);
+    private static readonly TimeSpan ClaimDuration = TimeSpan.FromMinutes(5);
 
     public async Task<Result<UpgradeExecutionResult, UpgradeFailure>> ExecuteAsync(
         NodeDeviceIdentity identity,
         UpgradePlan plan,
         CancellationToken cancellationToken)
     {
-        await operationGate.WaitAsync(cancellationToken);
-        try
+        var history = await ReadHistoryAsync(plan, cancellationToken);
+        if (history is Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Failure historyFailure)
         {
-            var existing = await journal.ReadAsync(cancellationToken);
-            if (existing is Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure journalFailure)
-            {
-                return Failure(journalFailure.Error);
-            }
+            return Failure(historyFailure.Error);
+        }
 
-            var entries = ((Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success)existing).Value;
-            var priorOutcome = entries.LastOrDefault(entry =>
-                entry.Upgrade?.IdempotencyKey == plan.IdempotencyKey &&
-                entry.Upgrade.Phase is UpgradePhase.Activated or UpgradePhase.RolledBack)?.Upgrade;
-            if (priorOutcome is not null)
-            {
-                return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
-                    new(
-                        priorOutcome.Phase == UpgradePhase.Activated,
-                        priorOutcome.Phase == UpgradePhase.RolledBack,
-                        priorOutcome.Code,
-                        priorOutcome.Message));
-            }
+        if (TerminalOutcome(((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value) is { } terminal)
+        {
+            return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(terminal);
+        }
 
-            var staged = await staging.StageAsync(plan, cancellationToken);
-            if (!Succeeded(staged, out var stageFailure))
-            {
-                return Failure(stageFailure);
-            }
-            if (await RecordAsync(entries, identity, plan, UpgradePhase.Staged, "upgrade-staged", "Signed artifacts were staged.", cancellationToken) is { } stagedJournalFailure)
-            {
-                return await RollbackAfterFailureAsync(entries, identity, plan, stagedJournalFailure, cancellationToken);
-            }
-            entries = await CurrentEntriesAsync(cancellationToken);
-            if (entries is null)
-            {
-                return new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(
-                    new("journal-read-failed", "The upgrade journal could not be re-read after staging."));
-            }
+        var staged = await EnsureStageAsync(identity, plan, cancellationToken);
+        if (staged is Result<bool, UpgradeFailure>.Failure stageFailure)
+        {
+            return Failure(stageFailure.Error);
+        }
 
+        var healthy = await EnsureHealthAsync(identity, plan, cancellationToken);
+        if (healthy is Result<bool, UpgradeFailure>.Failure healthFailure)
+        {
+            return await RollbackAfterFailureAsync(identity, plan, healthFailure.Error, cancellationToken);
+        }
+
+        var activated = await EnsureActivationAsync(identity, plan, cancellationToken);
+        if (activated is Result<bool, UpgradeFailure>.Failure activationFailure)
+        {
+            return await RollbackAfterFailureAsync(identity, plan, activationFailure.Error, cancellationToken);
+        }
+
+        return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
+            new(true, false, "upgrade-activated", "The verified and healthy release was atomically activated."));
+    }
+
+    private async Task<Result<bool, UpgradeFailure>> EnsureStageAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        CancellationToken cancellationToken)
+    {
+        var history = await ReadHistoryAsync(plan, cancellationToken);
+        if (history is Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Failure failure)
+        {
+            return Failure<bool>(failure.Error);
+        }
+
+        var values = ((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value;
+        if (HasPhase(values, UpgradePhase.Staged))
+        {
+            return Success(true);
+        }
+
+        var claim = await ClaimAsync(identity, plan, UpgradePhase.StageClaimed, cancellationToken);
+        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        {
+            return Failure<bool>(claimFailure.Error);
+        }
+
+        var status = await staging.GetStatusAsync(plan, cancellationToken);
+        if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
+        {
+            return Failure<bool>(statusFailure.Error);
+        }
+
+        if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value == UpgradePlatformStatus.NotStaged)
+        {
+            var stage = await staging.StageAsync(plan, cancellationToken);
+            if (!Succeeded(stage, out var stageFailure))
+            {
+                return Failure<bool>(stageFailure);
+            }
+        }
+
+        return await CompleteAsync(
+            identity,
+            plan,
+            UpgradePhase.Staged,
+            "upgrade-staged",
+            "Signed artifacts were staged.",
+            cancellationToken);
+    }
+
+    private async Task<Result<bool, UpgradeFailure>> EnsureHealthAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        CancellationToken cancellationToken)
+    {
+        var history = await ReadHistoryAsync(plan, cancellationToken);
+        if (history is Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Failure failure)
+        {
+            return Failure<bool>(failure.Error);
+        }
+
+        var values = ((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value;
+        if (HasPhase(values, UpgradePhase.HealthConfirmed))
+        {
+            return Success(true);
+        }
+
+        var claim = await ClaimAsync(identity, plan, UpgradePhase.HealthClaimed, cancellationToken);
+        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        {
+            return Failure<bool>(claimFailure.Error);
+        }
+
+        var status = await staging.GetStatusAsync(plan, cancellationToken);
+        if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
+        {
+            return Failure<bool>(statusFailure.Error);
+        }
+
+        if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value == UpgradePlatformStatus.Staged)
+        {
             var health = await staging.ConfirmHealthAsync(plan, cancellationToken);
             if (!Succeeded(health, out var healthFailure))
             {
-                return await RollbackAfterFailureAsync(entries, identity, plan, healthFailure, cancellationToken);
+                return Failure<bool>(healthFailure);
             }
-            if (await RecordAsync(entries, identity, plan, UpgradePhase.HealthConfirmed, "upgrade-health-confirmed", "Staged artifacts passed health confirmation.", cancellationToken) is { } healthJournalFailure)
-            {
-                return await RollbackAfterFailureAsync(entries, identity, plan, healthJournalFailure, cancellationToken);
-            }
-            entries = await CurrentEntriesAsync(cancellationToken);
-            if (entries is null)
-            {
-                return new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(
-                    new("journal-read-failed", "The upgrade journal could not be re-read after health confirmation."));
-            }
+        }
 
+        return await CompleteAsync(
+            identity,
+            plan,
+            UpgradePhase.HealthConfirmed,
+            "upgrade-health-confirmed",
+            "Staged artifacts passed health confirmation.",
+            cancellationToken);
+    }
+
+    private async Task<Result<bool, UpgradeFailure>> EnsureActivationAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        CancellationToken cancellationToken)
+    {
+        var history = await ReadHistoryAsync(plan, cancellationToken);
+        if (history is Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Failure failure)
+        {
+            return Failure<bool>(failure.Error);
+        }
+
+        var values = ((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value;
+        if (HasPhase(values, UpgradePhase.Activated))
+        {
+            return Success(true);
+        }
+
+        var claim = await ClaimAsync(identity, plan, UpgradePhase.ActivationClaimed, cancellationToken);
+        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
+        {
+            return Failure<bool>(claimFailure.Error);
+        }
+
+        var status = await staging.GetStatusAsync(plan, cancellationToken);
+        if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
+        {
+            return Failure<bool>(statusFailure.Error);
+        }
+
+        if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value == UpgradePlatformStatus.Healthy)
+        {
             var activation = await staging.ActivateAsync(plan, cancellationToken);
             if (!Succeeded(activation, out var activationFailure))
             {
-                return await RollbackAfterFailureAsync(entries, identity, plan, activationFailure, cancellationToken);
+                return Failure<bool>(activationFailure);
             }
-            if (await RecordAsync(entries, identity, plan, UpgradePhase.Activated, "upgrade-activated", "The verified and healthy release was atomically activated.", cancellationToken) is { } activationJournalFailure)
-            {
-                return await RollbackAfterFailureAsync(entries, identity, plan, activationJournalFailure, cancellationToken);
-            }
-
-            return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
-                new(true, false, "upgrade-activated", "The verified and healthy release was atomically activated."));
         }
-        finally
+        else if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value != UpgradePlatformStatus.Activated)
         {
-            operationGate.Release();
+            return Failure<bool>(new(
+                "upgrade-activation-precondition-failed",
+                "Activation requires a platform-reported healthy or already activated release."));
         }
+
+        return await CompleteAsync(
+            identity,
+            plan,
+            UpgradePhase.Activated,
+            "upgrade-activated",
+            "The verified and healthy release was atomically activated.",
+            cancellationToken);
     }
 
     private async Task<Result<UpgradeExecutionResult, UpgradeFailure>> RollbackAfterFailureAsync(
-        IReadOnlyList<JournalEntry> entries,
         NodeDeviceIdentity identity,
         UpgradePlan plan,
         UpgradeFailure failure,
         CancellationToken cancellationToken)
     {
-        var rollback = await staging.RollbackAsync(plan, cancellationToken);
-        if (!Succeeded(rollback, out var rollbackFailure))
+        var claim = await ClaimAsync(identity, plan, UpgradePhase.RollbackClaimed, cancellationToken);
+        if (claim is Result<bool, UpgradeFailure>.Failure claimFailure)
         {
-            return Failure(rollbackFailure);
-        }
-        if (await RecordAsync(entries, identity, plan, UpgradePhase.RolledBack, failure.Code, failure.Message, cancellationToken) is { } journalFailure)
-        {
-            return Failure(journalFailure);
+            return Failure(claimFailure.Error);
         }
 
-        return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
-            new(false, true, failure.Code, failure.Message));
+        var status = await staging.GetStatusAsync(plan, cancellationToken);
+        if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
+        {
+            return Failure(statusFailure.Error);
+        }
+
+        if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value != UpgradePlatformStatus.RolledBack)
+        {
+            var rollback = await staging.RollbackAsync(plan, cancellationToken);
+            if (!Succeeded(rollback, out var rollbackFailure))
+            {
+                return Failure(rollbackFailure);
+            }
+        }
+
+        var completion = await CompleteAsync(
+            identity,
+            plan,
+            UpgradePhase.RolledBack,
+            failure.Code,
+            failure.Message,
+            cancellationToken);
+        return completion is Result<bool, UpgradeFailure>.Failure completionFailure
+            ? Failure(completionFailure.Error)
+            : new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
+                new(false, true, failure.Code, failure.Message));
     }
 
-    private async Task<UpgradeFailure?> RecordAsync(
-        IReadOnlyList<JournalEntry> entries,
+    private async Task<Result<bool, UpgradeFailure>> ClaimAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        UpgradePhase phase,
+        CancellationToken cancellationToken)
+    {
+        var now = clock.UtcNow;
+        var claim = new UpgradeJournalEvent(
+            plan.IdempotencyKey,
+            plan.Release.Value.Manifest.ReleaseId,
+            plan.Release.Value.ManifestDigest,
+            phase,
+            now,
+            "upgrade-transition-claimed",
+            $"The {phase} transition is durably claimed.",
+            Guid.NewGuid(),
+            now.Add(ClaimDuration));
+        var result = await journal.ClaimUpgradeTransitionAsync(identity, claim, cancellationToken);
+        return result switch
+        {
+            Result<JournalAppendClaim, JournalFailure>.Success { Value.Added: true } =>
+                Success(true),
+            Result<JournalAppendClaim, JournalFailure>.Success =>
+                Failure<bool>(new(
+                    "upgrade-transition-in-progress",
+                    $"The {phase} transition is claimed by another coordinator until its durable claim expires.")),
+            Result<JournalAppendClaim, JournalFailure>.Failure journalFailure =>
+                Failure<bool>(new(journalFailure.Error.Code, journalFailure.Error.Message)),
+            _ => Failure<bool>(new("journal-write-failed", "The journal claim returned an unsupported result."))
+        };
+    }
+
+    private async Task<Result<bool, UpgradeFailure>> CompleteAsync(
         NodeDeviceIdentity identity,
         UpgradePlan plan,
         UpgradePhase phase,
@@ -353,26 +528,61 @@ public sealed class NodeUpgradeCoordinator(
         string message,
         CancellationToken cancellationToken)
     {
-        var upgrade = new UpgradeJournalEvent(
+        var completed = new UpgradeJournalEvent(
             plan.IdempotencyKey,
             plan.Release.Value.Manifest.ReleaseId,
             plan.Release.Value.ManifestDigest,
             phase,
             clock.UtcNow,
             code,
-            message);
-        var result = await journal.AppendAsync(
-            JournalEntry.ForUpgrade(entries.Count + 1L, identity, upgrade),
+            message,
+            Guid.Empty,
+            null);
+        var result = await journal.AppendClaimedAsync(
+            JournalEntry.UpgradeClaimIdentity(completed),
+            ordinal => JournalEntry.ForUpgrade(ordinal, identity, completed),
             cancellationToken);
-        return result is Result<JournalEntry, JournalFailure>.Failure failure
-            ? new UpgradeFailure(failure.Error.Code, failure.Error.Message)
-            : null;
+        return result switch
+        {
+            Result<JournalAppendClaim, JournalFailure>.Success => Success(true),
+            Result<JournalAppendClaim, JournalFailure>.Failure journalFailure =>
+                Failure<bool>(new(journalFailure.Error.Code, journalFailure.Error.Message)),
+            _ => Failure<bool>(new("journal-write-failed", "The journal completion returned an unsupported result."))
+        };
     }
 
-    private async Task<IReadOnlyList<JournalEntry>?> CurrentEntriesAsync(CancellationToken cancellationToken) =>
-        await journal.ReadAsync(cancellationToken) is Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success success
-            ? success.Value
-            : null;
+    private async Task<Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>> ReadHistoryAsync(
+        UpgradePlan plan,
+        CancellationToken cancellationToken)
+    {
+        var entries = await journal.ReadAsync(cancellationToken);
+        return entries switch
+        {
+            Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success success =>
+                new Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success(
+                    success.Value
+                        .Select(static entry => entry.Upgrade)
+                        .OfType<UpgradeJournalEvent>()
+                        .Where(upgrade => upgrade.IdempotencyKey == plan.IdempotencyKey)
+                        .ToArray()),
+            Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure failure =>
+                new Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Failure(
+                    new(failure.Error.Code, failure.Error.Message)),
+            _ => new Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Failure(
+                new("journal-read-failed", "The journal reader returned an unsupported result."))
+        };
+    }
+
+    private static UpgradeExecutionResult? TerminalOutcome(IReadOnlyList<UpgradeJournalEvent> history) =>
+        history.LastOrDefault(static upgrade => upgrade.Phase is UpgradePhase.Activated or UpgradePhase.RolledBack) switch
+        {
+            { Phase: UpgradePhase.Activated } activated => new(true, false, activated.Code, activated.Message),
+            { Phase: UpgradePhase.RolledBack } rolledBack => new(false, true, rolledBack.Code, rolledBack.Message),
+            _ => null
+        };
+
+    private static bool HasPhase(IReadOnlyList<UpgradeJournalEvent> history, UpgradePhase phase) =>
+        history.Any(upgrade => upgrade.Phase == phase);
 
     private static bool Succeeded(
         Result<bool, UpgradeFailure> result,
@@ -389,9 +599,12 @@ public sealed class NodeUpgradeCoordinator(
         return result is Result<bool, UpgradeFailure>.Success { Value: true };
     }
 
-    private static Result<UpgradeExecutionResult, UpgradeFailure> Failure(JournalFailure failure) =>
-        new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(new(failure.Code, failure.Message));
-
     private static Result<UpgradeExecutionResult, UpgradeFailure> Failure(UpgradeFailure failure) =>
         new Result<UpgradeExecutionResult, UpgradeFailure>.Failure(failure);
+
+    private static Result<T, UpgradeFailure> Success<T>(T value) =>
+        new Result<T, UpgradeFailure>.Success(value);
+
+    private static Result<T, UpgradeFailure> Failure<T>(UpgradeFailure failure) =>
+        new Result<T, UpgradeFailure>.Failure(failure);
 }

@@ -66,11 +66,51 @@ public sealed record ReleaseCompatibility(
         InRange(controlPlaneProtocol, MinimumControlPlaneProtocol, MaximumControlPlaneProtocol);
 
     private static bool InRange(string value, string minimum, string maximum) =>
-        !string.IsNullOrWhiteSpace(value) &&
-        !string.IsNullOrWhiteSpace(minimum) &&
-        !string.IsNullOrWhiteSpace(maximum) &&
-        string.CompareOrdinal(minimum, value) <= 0 &&
-        string.CompareOrdinal(value, maximum) <= 0;
+        ProtocolIdentifier.Parse(value) is { } parsedValue &&
+        ProtocolIdentifier.Parse(minimum) is { } parsedMinimum &&
+        ProtocolIdentifier.Parse(maximum) is { } parsedMaximum &&
+        parsedValue.Family == parsedMinimum.Family &&
+        parsedMinimum.Family == parsedMaximum.Family &&
+        parsedMinimum.CompareTo(parsedValue) <= 0 &&
+        parsedValue.CompareTo(parsedMaximum) <= 0;
+
+    private sealed record ProtocolIdentifier(string Family, int Major, int Alpha) : IComparable<ProtocolIdentifier>
+    {
+        public int CompareTo(ProtocolIdentifier? other) =>
+            other is null
+                ? 1
+                : Major != other.Major
+                    ? Major.CompareTo(other.Major)
+                    : Alpha.CompareTo(other.Alpha);
+
+        public static ProtocolIdentifier? Parse(string? value)
+        {
+            var parts = value?.Split('/', StringSplitOptions.None);
+            if (parts is not [var family, var version] ||
+                string.IsNullOrWhiteSpace(family) ||
+                !version.StartsWith('v') ||
+                !TryParseVersion(version.AsSpan(1), out var major, out var alpha))
+            {
+                return null;
+            }
+
+            return new ProtocolIdentifier(family, major, alpha);
+        }
+
+        private static bool TryParseVersion(ReadOnlySpan<char> value, out int major, out int alpha)
+        {
+            major = 0;
+            alpha = 0;
+            const string alphaMarker = "alpha";
+            var marker = value.IndexOf(alphaMarker, StringComparison.Ordinal);
+            return marker > 0 &&
+                   marker + alphaMarker.Length < value.Length &&
+                   int.TryParse(value[..marker], out major) &&
+                   int.TryParse(value[(marker + alphaMarker.Length)..], out alpha) &&
+                   major >= 0 &&
+                   alpha >= 0;
+        }
+    }
 }
 
 public sealed record ReleaseRevocation(

@@ -129,7 +129,15 @@ public sealed class ReleaseDistributionTests
         Assert.False(value.Activated);
         Assert.True(value.RolledBack);
         Assert.Equal(["stage", "health", "rollback"], staging.Operations);
-        Assert.Equal([UpgradePhase.Staged, UpgradePhase.RolledBack], entries.Select(entry => entry.Upgrade!.Phase));
+        Assert.Equal(
+            [
+                UpgradePhase.StageClaimed,
+                UpgradePhase.Staged,
+                UpgradePhase.HealthClaimed,
+                UpgradePhase.RollbackClaimed,
+                UpgradePhase.RolledBack
+            ],
+            entries.Select(entry => entry.Upgrade!.Phase));
         Assert.Equal("health-check-failed", entries.Last().Upgrade!.Code);
     }
 
@@ -148,7 +156,16 @@ public sealed class ReleaseDistributionTests
 
         Assert.True(Success(result).Activated);
         Assert.Equal(["stage", "health", "activate"], staging.Operations);
-        Assert.Equal([UpgradePhase.Staged, UpgradePhase.HealthConfirmed, UpgradePhase.Activated], entries.Select(entry => entry.Upgrade!.Phase));
+        Assert.Equal(
+            [
+                UpgradePhase.StageClaimed,
+                UpgradePhase.Staged,
+                UpgradePhase.HealthClaimed,
+                UpgradePhase.HealthConfirmed,
+                UpgradePhase.ActivationClaimed,
+                UpgradePhase.Activated
+            ],
+            entries.Select(entry => entry.Upgrade!.Phase));
         Assert.True(healthIndex >= 0);
         Assert.Equal(UpgradePhase.Activated, entries.Last().Upgrade!.Phase);
     }
@@ -186,6 +203,192 @@ public sealed class ReleaseDistributionTests
         Assert.Equal(["stage", "health", "activate"], staging.Operations);
     }
 
+    [Fact]
+    public async Task Upgrade_claims_are_atomic_across_multiple_coordinator_instances_and_node_writers()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var first = Transition(fixture, plan, UpgradePhase.StageClaimed, fixture.Now, fixture.Now.AddMinutes(5));
+        var second = first with { OperationId = Guid.NewGuid() };
+        var claims = await Task.WhenAll(
+            journal.ClaimUpgradeTransitionAsync(fixture.Identity, first, CancellationToken.None),
+            journal.ClaimUpgradeTransitionAsync(fixture.Identity, second, CancellationToken.None));
+
+        var boundary = fixture.Boundary(journal);
+        await boundary.ReceiveAsync(fixture.StartEnvelope(sequence: 1), CancellationToken.None);
+        await boundary.RecordEvidenceAsync(
+            new EvidenceObservation(fixture.AttemptId, fixture.Digest('e'), fixture.Digest('f'), fixture.Now),
+            CancellationToken.None);
+        var entries = Success(await journal.ReadAsync(CancellationToken.None));
+
+        Assert.Single(claims, static claim => Success(claim).Added);
+        Assert.Single(claims, static claim => !Success(claim).Added);
+        Assert.Equal(
+            Enumerable.Range(1, entries.Count).Select(static value => (long)value),
+            entries.Select(static entry => entry.Ordinal));
+    }
+
+    [Fact]
+    public async Task Restart_after_stage_claim_queries_platform_status_without_repeating_stage()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        await SeedClaimAsync(journal, fixture, plan, UpgradePhase.StageClaimed);
+        var staging = new RecordingStaging(initialStatus: UpgradePlatformStatus.Staged);
+        var restarted = new NodeUpgradeCoordinator(journal, staging, new FixedClock(fixture.Now));
+
+        var result = await restarted.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.True(Success(result).Activated);
+        Assert.DoesNotContain("stage", staging.Operations);
+        Assert.Equal(["health", "activate"], staging.Operations);
+    }
+
+    [Fact]
+    public async Task Restart_after_health_claim_queries_platform_status_without_repeating_health_check()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        await SeedCompletionAsync(journal, fixture, plan, UpgradePhase.Staged);
+        await SeedClaimAsync(journal, fixture, plan, UpgradePhase.HealthClaimed);
+        var staging = new RecordingStaging(initialStatus: UpgradePlatformStatus.Healthy);
+        var restarted = new NodeUpgradeCoordinator(journal, staging, new FixedClock(fixture.Now));
+
+        var result = await restarted.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.True(Success(result).Activated);
+        Assert.DoesNotContain("health", staging.Operations);
+        Assert.Equal(["activate"], staging.Operations);
+    }
+
+    [Fact]
+    public async Task Restart_after_activation_side_effect_records_terminal_state_without_repeating_activation()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        await SeedCompletionAsync(journal, fixture, plan, UpgradePhase.Staged);
+        await SeedCompletionAsync(journal, fixture, plan, UpgradePhase.HealthConfirmed);
+        await SeedClaimAsync(journal, fixture, plan, UpgradePhase.ActivationClaimed);
+        var staging = new RecordingStaging(initialStatus: UpgradePlatformStatus.Activated);
+        var restarted = new NodeUpgradeCoordinator(journal, staging, new FixedClock(fixture.Now));
+
+        var result = await restarted.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+        var entries = Success(await journal.ReadAsync(CancellationToken.None));
+
+        Assert.True(Success(result).Activated);
+        Assert.DoesNotContain("activate", staging.Operations);
+        Assert.Contains(entries, entry => entry.Upgrade?.Phase == UpgradePhase.Activated);
+    }
+
+    [Fact]
+    public async Task Coordinator_fails_closed_when_the_shared_journal_cannot_be_read_or_claimed()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var unreadable = new ReadFailingJournal(new InMemoryJournal(), failAfterReads: 0);
+        var claimFailing = new InMemoryJournal(new JournalFailure("journal-unavailable", "The journal is unavailable."));
+
+        var readFailure = await new NodeUpgradeCoordinator(
+            unreadable,
+            new RecordingStaging(),
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+        var claimFailure = await new NodeUpgradeCoordinator(
+            claimFailing,
+            new RecordingStaging(),
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.Equal("journal-read-failed", Failure(readFailure).Code);
+        Assert.Equal("journal-unavailable", Failure(claimFailure).Code);
+    }
+
+    [Fact]
+    public async Task In_progress_transition_and_status_refusal_fail_without_repeating_the_effect()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var journal = new InMemoryJournal();
+        var activeClaim = Transition(fixture, plan, UpgradePhase.StageClaimed, fixture.Now, fixture.Now.AddMinutes(5));
+        await journal.ClaimUpgradeTransitionAsync(fixture.Identity, activeClaim, CancellationToken.None);
+        var statusRefusal = new RecordingStaging(
+            statusResult: Failure<UpgradePlatformStatus>("status-unavailable", "The platform state cannot be queried."));
+
+        var inProgress = await new NodeUpgradeCoordinator(
+            journal,
+            new RecordingStaging(),
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+        var unavailable = await new NodeUpgradeCoordinator(
+            new InMemoryJournal(),
+            statusRefusal,
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.Equal("upgrade-transition-in-progress", Failure(inProgress).Code);
+        Assert.Empty(statusRefusal.Operations);
+        Assert.Equal("status-unavailable", Failure(unavailable).Code);
+    }
+
+    [Fact]
+    public async Task False_stage_response_is_refused_before_health_or_activation()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var staging = new RecordingStaging(stage: new Result<bool, UpgradeFailure>.Success(false));
+
+        var result = await new NodeUpgradeCoordinator(
+            new InMemoryJournal(),
+            staging,
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.Equal("upgrade-operation-refused", Failure(result).Code);
+        Assert.Equal(["stage"], staging.Operations);
+    }
+
+    [Fact]
+    public async Task Encrypted_journal_claims_allocate_contiguous_ordinals_and_return_existing_claims()
+    {
+        var fixture = new ReleaseFixture();
+        var path = Path.Combine(Path.GetTempPath(), $"armada-upgrade-claim-{Guid.NewGuid():N}.log");
+        var journal = new EncryptedFileJournal(
+            path,
+            new AesGcmJournalProtector(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)),
+            new InMemoryRollbackAnchorStore());
+        var evidence = new EvidenceObservation(fixture.AttemptId, fixture.Digest('a'), fixture.Digest('b'), fixture.Now);
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var claim = Transition(fixture, plan, UpgradePhase.StageClaimed, fixture.Now, fixture.Now.AddMinutes(5));
+
+        try
+        {
+            var first = await journal.AppendClaimedAsync(
+                JournalEntry.EvidenceClaimIdentity(evidence),
+                ordinal => JournalEntry.ForEvidence(ordinal, fixture.Identity, evidence),
+                CancellationToken.None);
+            var duplicate = await journal.AppendClaimedAsync(
+                JournalEntry.EvidenceClaimIdentity(evidence),
+                ordinal => JournalEntry.ForEvidence(ordinal, fixture.Identity, evidence),
+                CancellationToken.None);
+            var transition = await journal.ClaimUpgradeTransitionAsync(fixture.Identity, claim, CancellationToken.None);
+            var alreadyClaimed = await journal.ClaimUpgradeTransitionAsync(
+                fixture.Identity,
+                claim with { OperationId = Guid.NewGuid() },
+                CancellationToken.None);
+            var entries = Success(await journal.ReadAsync(CancellationToken.None));
+
+            Assert.True(Success(first).Added);
+            Assert.False(Success(duplicate).Added);
+            Assert.True(Success(transition).Added);
+            Assert.False(Success(alreadyClaimed).Added);
+            Assert.Equal([1L, 2L], entries.Select(static entry => entry.Ordinal));
+        }
+        finally
+        {
+            File.Delete(path);
+            File.Delete($"{path}.anchor");
+        }
+    }
+
     private static T Success<T, TFailure>(Result<T, TFailure> result) =>
         Assert.IsType<Result<T, TFailure>.Success>(result).Value;
 
@@ -195,12 +398,61 @@ public sealed class ReleaseDistributionTests
     private static VerifiedRelease Verified(SignedRelease release, IReleaseManifestVerifier verifier) =>
         Success(ReleaseVerification.Verify(release, verifier));
 
+    private static UpgradeJournalEvent Transition(
+        ReleaseFixture fixture,
+        UpgradePlan plan,
+        UpgradePhase phase,
+        DateTimeOffset recordedAt,
+        DateTimeOffset? expiresAt) =>
+        new(
+            plan.IdempotencyKey,
+            plan.Release.Value.Manifest.ReleaseId,
+            plan.Release.Value.ManifestDigest,
+            phase,
+            recordedAt,
+            "test-transition",
+            "Deterministic test transition.",
+            Guid.NewGuid(),
+            expiresAt);
+
+    private static async Task SeedClaimAsync(
+        INodeJournal journal,
+        ReleaseFixture fixture,
+        UpgradePlan plan,
+        UpgradePhase phase)
+    {
+        var claim = Transition(
+            fixture,
+            plan,
+            phase,
+            fixture.Now.AddMinutes(-10),
+            fixture.Now.AddMinutes(-1));
+        Assert.True(Success(await journal.ClaimUpgradeTransitionAsync(fixture.Identity, claim, CancellationToken.None)).Added);
+    }
+
+    private static async Task SeedCompletionAsync(
+        INodeJournal journal,
+        ReleaseFixture fixture,
+        UpgradePlan plan,
+        UpgradePhase phase)
+    {
+        var completion = Transition(fixture, plan, phase, fixture.Now.AddMinutes(-10), null) with
+        {
+            OperationId = Guid.Empty
+        };
+        Assert.True(Success(await journal.AppendClaimedAsync(
+            JournalEntry.UpgradeClaimIdentity(completion),
+            ordinal => JournalEntry.ForUpgrade(ordinal, fixture.Identity, completion),
+            CancellationToken.None)).Added);
+    }
+
     private sealed class ReleaseFixture
     {
         private static readonly byte[] Key = [1, 3, 3, 7];
 
         public DateTimeOffset Now { get; } = DateTimeOffset.Parse("2026-08-23T00:00:00Z");
         public NodeDeviceIdentity Identity { get; } = new(ResourceId.New(), 3);
+        public ResourceId AttemptId { get; } = ResourceId.New();
         public DeterministicTestReleaseSigner Signer { get; } = new("test-key", Key);
         public SignedRelease Release { get; }
 
@@ -243,6 +495,40 @@ public sealed class ReleaseDistributionTests
                 new UpgradeRollbackAnchor("r-1", new ReleaseVersion(1, 0, 0), Digest("previous"u8)),
                 ImmutableHashSet<Sha256Digest>.Empty);
 
+        public NodeAgentBoundary Boundary(INodeJournal journal) =>
+            new(
+                Identity,
+                new LocalIsolationCapabilities(ImmutableHashSet.Create(IsolationProfile.IsolatedContainer)),
+                journal,
+                new DeterministicVerifier(AuthorityVerification.Verified),
+                new FixedClock(Now));
+
+        public OutboundEnvelope<NodeCommand> StartEnvelope(long sequence) =>
+            new(
+                NodeAgentProtocol.Version,
+                Identity.NodeId,
+                Identity.IdentityEpoch,
+                1,
+                sequence,
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                $"upgrade-journal-{sequence}",
+                Now,
+                new StartAttemptCommand(
+                    NodeAgentProtocol.StartAttemptSchema,
+                    Identity.NodeId,
+                    ResourceId.New(),
+                    ResourceId.New(),
+                    AttemptId,
+                    Now.AddMinutes(10),
+                    ResourceId.New(),
+                    ResourceId.New(),
+                    IsolationProfile.IsolatedContainer,
+                    Digest("bundle"u8),
+                    Digest("policy"u8),
+                    Digest("release"u8),
+                    Digest("grant"u8)));
+
         public SignedRelease Sign(ReleaseManifest manifest) =>
             Sign(
                 manifest,
@@ -254,6 +540,9 @@ public sealed class ReleaseDistributionTests
                         "armada.pkg" => "installer"u8.ToArray().ToImmutableArray(),
                         _ => "windows-installer"u8.ToArray().ToImmutableArray()
                     })).ToArray());
+
+        public Sha256Digest Digest(char value) =>
+            Digest(System.Text.Encoding.UTF8.GetBytes(new string(value, 3)));
 
         private SignedRelease Sign(ReleaseManifest manifest, IEnumerable<ReleaseArtifactPayload> artifacts)
         {
@@ -289,32 +578,61 @@ public sealed class ReleaseDistributionTests
         Result<bool, UpgradeFailure>? stage = null,
         Result<bool, UpgradeFailure>? health = null,
         Result<bool, UpgradeFailure>? activation = null,
-        Result<bool, UpgradeFailure>? rollback = null) : IUpgradeStaging
+        Result<bool, UpgradeFailure>? rollback = null,
+        UpgradePlatformStatus initialStatus = UpgradePlatformStatus.NotStaged,
+        Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = null) : IUpgradeStaging
     {
+        private UpgradePlatformStatus status = initialStatus;
+        private readonly Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = statusResult;
         public List<string> Operations { get; } = [];
+
+        public Task<Result<UpgradePlatformStatus, UpgradeFailure>> GetStatusAsync(
+            UpgradePlan plan,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(statusResult ?? Success<UpgradePlatformStatus, UpgradeFailure>(status));
 
         public Task<Result<bool, UpgradeFailure>> StageAsync(UpgradePlan plan, CancellationToken cancellationToken)
         {
             Operations.Add("stage");
-            return Task.FromResult(stage ?? Success<bool, UpgradeFailure>(true));
+            var result = stage ?? Success<bool, UpgradeFailure>(true);
+            if (result is Result<bool, UpgradeFailure>.Success { Value: true })
+            {
+                status = UpgradePlatformStatus.Staged;
+            }
+            return Task.FromResult(result);
         }
 
         public Task<Result<bool, UpgradeFailure>> ConfirmHealthAsync(UpgradePlan plan, CancellationToken cancellationToken)
         {
             Operations.Add("health");
-            return Task.FromResult(health ?? Success<bool, UpgradeFailure>(true));
+            var result = health ?? Success<bool, UpgradeFailure>(true);
+            if (result is Result<bool, UpgradeFailure>.Success { Value: true })
+            {
+                status = UpgradePlatformStatus.Healthy;
+            }
+            return Task.FromResult(result);
         }
 
         public Task<Result<bool, UpgradeFailure>> ActivateAsync(UpgradePlan plan, CancellationToken cancellationToken)
         {
             Operations.Add("activate");
-            return Task.FromResult(activation ?? Success<bool, UpgradeFailure>(true));
+            var result = activation ?? Success<bool, UpgradeFailure>(true);
+            if (result is Result<bool, UpgradeFailure>.Success { Value: true })
+            {
+                status = UpgradePlatformStatus.Activated;
+            }
+            return Task.FromResult(result);
         }
 
         public Task<Result<bool, UpgradeFailure>> RollbackAsync(UpgradePlan plan, CancellationToken cancellationToken)
         {
             Operations.Add("rollback");
-            return Task.FromResult(rollback ?? Success<bool, UpgradeFailure>(true));
+            var result = rollback ?? Success<bool, UpgradeFailure>(true);
+            if (result is Result<bool, UpgradeFailure>.Success { Value: true })
+            {
+                status = UpgradePlatformStatus.RolledBack;
+            }
+            return Task.FromResult(result);
         }
 
         private static Result<T, TFailure> Success<T, TFailure>(T value) =>
@@ -323,4 +641,41 @@ public sealed class ReleaseDistributionTests
 
     private static Result<T, UpgradeFailure> Failure<T>(string code, string message) =>
         new Result<T, UpgradeFailure>.Failure(new(code, message));
+
+    private sealed class ReadFailingJournal(INodeJournal inner, int failAfterReads) : INodeJournal
+    {
+        private int reads;
+
+        public Task<Result<JournalEntry, JournalFailure>> AppendAsync(
+            JournalEntry entry,
+            CancellationToken cancellationToken) =>
+            inner.AppendAsync(entry, cancellationToken);
+
+        public Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimedAsync(
+            string claimIdentity,
+            Func<long, JournalEntry> entryFactory,
+            CancellationToken cancellationToken) =>
+            inner.AppendClaimedAsync(claimIdentity, entryFactory, cancellationToken);
+
+        public Task<Result<JournalAppendClaim, JournalFailure>> ClaimUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeJournalEvent claim,
+            CancellationToken cancellationToken) =>
+            inner.ClaimUpgradeTransitionAsync(identity, claim, cancellationToken);
+
+        public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
+            reads++ >= failAfterReads
+                ? Task.FromResult<Result<IReadOnlyList<JournalEntry>, JournalFailure>>(
+                    new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure(
+                        new("journal-read-failed", "The deterministic journal read failed.")))
+                : inner.ReadAsync(cancellationToken);
+    }
+
+    private sealed class DeterministicVerifier(AuthorityVerification result) : IAuthorityVerifier
+    {
+        public Task<AuthorityVerification> VerifyAsync(
+            OutboundEnvelope<NodeCommand> envelope,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(result);
+    }
 }

@@ -17,17 +17,21 @@ threat model 001 and security-review package 002.
   platform selection, explicit revocation, replay/downgrade refusal, and
   rollback-anchor presence. Exact artifact bytes are verified before planning.
 - Added a narrow staging/health/atomic-activation/rollback port. Upgrade
-  phase evidence is appended to the node journal, and activation follows a
-  durable health confirmation only.
+  phase claims and completions allocate their journal ordinal atomically under
+  the shared journal lock. Claims precede effects; restart recovery queries
+  platform status after a stale stage, health, activation, or rollback claim
+  and never blindly repeats activation.
 - Added compatibility, release-process, and security-review gate records under
   `.project/releases/`.
 
 ## Acceptance evidence
 
 Focused contracts and node-agent tests cover canonical ordering, manifest
-tampering, signature verification failure, exact-byte mismatch, compatibility,
-channel pinning, revocation, replay/downgrade/anchor refusal, health-gated
-activation, failed activation rollback, and journal replay.
+tampering, signature verification failure, exact-byte mismatch, semantic
+protocol ordering (`alpha10` versus `alpha2`), compatibility, channel pinning,
+revocation, replay/downgrade/anchor refusal, atomic journal claims, recovery
+after each claimed effect boundary, health-gated activation, failed activation
+rollback, and journal replay.
 
 ## Remaining blockers
 

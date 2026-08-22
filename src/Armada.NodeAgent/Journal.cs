@@ -61,7 +61,7 @@ public sealed record JournalEntry(
             envelope.MessageId,
             envelope.CorrelationId,
             envelope.IdempotencyKey,
-            ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey),
+            CommandClaimIdentity(envelope),
             outcome.Acknowledgement.Accepted,
             outcome.AdvancesSequence,
             outcome.Acknowledgement.Code,
@@ -101,7 +101,7 @@ public sealed record JournalEntry(
             Guid.Empty,
             Guid.Empty,
             $"evidence:{observation.AttemptId}:{observation.ManifestDigest}",
-            observation.AttemptId.ToString(),
+            EvidenceClaimIdentity(observation),
             true,
             false,
             "evidence-observed",
@@ -137,7 +137,7 @@ public sealed record JournalEntry(
             Guid.Empty,
             Guid.Empty,
             $"attempt-start:{attempt.AttemptId}",
-            ProtocolIdentity.Join(
+            AttemptStartClaimIdentity(
                 attempt.ProjectId.ToString(),
                 attempt.WorkloadId.ToString(),
                 attempt.AttemptId.ToString(),
@@ -182,7 +182,7 @@ public sealed record JournalEntry(
             Guid.Empty,
             Guid.Empty,
             upgrade.IdempotencyKey,
-            ProtocolIdentity.Join(upgrade.ReleaseId, upgrade.ManifestDigest.Value, upgrade.Phase.ToString()),
+            UpgradeClaimIdentity(upgrade),
             true,
             false,
             upgrade.Code,
@@ -203,6 +203,54 @@ public sealed record JournalEntry(
             null,
             upgrade.RecordedAt,
             upgrade);
+
+    public static string EvidenceClaimIdentity(EvidenceObservation observation) =>
+        ProtocolIdentity.Join(
+            "evidence",
+            observation.AttemptId.ToString(),
+            observation.ManifestDigest.Value,
+            observation.OutputDigest.Value);
+
+    public static string CommandClaimIdentity(OutboundEnvelope<NodeCommand> envelope) =>
+        ProtocolIdentity.Join(
+            "node-command",
+            envelope.ProtocolVersion,
+            envelope.NodeId.ToString(),
+            envelope.IdentityEpoch.ToString(),
+            envelope.StreamEpoch.ToString(),
+            envelope.Sequence.ToString(),
+            ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey));
+
+    public static string AttemptStartClaimIdentity(
+        string projectId,
+        string workloadId,
+        string attemptId,
+        string admissionDecisionId,
+        string leaseId,
+        string bundleDigest,
+        string policyDigest,
+        string releaseDigest,
+        string capabilityGrantDigest,
+        string authorityExpiresAt) =>
+        ProtocolIdentity.Join(
+            "attempt-start",
+            projectId,
+            workloadId,
+            attemptId,
+            admissionDecisionId,
+            leaseId,
+            bundleDigest,
+            policyDigest,
+            releaseDigest,
+            capabilityGrantDigest,
+            authorityExpiresAt);
+
+    public static string UpgradeClaimIdentity(UpgradeJournalEvent upgrade) =>
+        ProtocolIdentity.Join(
+            "release-upgrade",
+            upgrade.IdempotencyKey,
+            upgrade.Phase.ToString(),
+            upgrade.OperationId.ToString("D"));
 }
 
 public sealed record EncryptedJournalRecord(string Nonce, string Tag, string Ciphertext);
@@ -356,6 +404,92 @@ public sealed class EncryptedFileJournal : INodeJournal
         }
     }
 
+    public async Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimedAsync(
+            string claimIdentity,
+            Func<long, JournalEntry> entryFactory,
+            CancellationToken cancellationToken)
+        {
+            await operationGate.WaitAsync(cancellationToken);
+            try
+            {
+                var loaded = await ReadValidatedAsync(cancellationToken);
+                if (loaded is Result<JournalSnapshot, JournalFailure>.Failure failure)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(failure.Error);
+                }
+
+                var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                var existing = snapshot.Entries.SingleOrDefault(entry => entry.PayloadIdentity == claimIdentity);
+                if (existing is not null)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false));
+                }
+
+                var entry = entryFactory(snapshot.Anchor.Ordinal + 1);
+                if (entry.PayloadIdentity != claimIdentity)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-claim-identity-mismatch", "The claimed journal entry must retain its supplied claim identity."));
+                }
+
+                return await AppendCoreAsync(entry, cancellationToken) switch
+                {
+                    Result<JournalEntry, JournalFailure>.Success success =>
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(success.Value, true)),
+                    Result<JournalEntry, JournalFailure>.Failure appendFailure =>
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(appendFailure.Error),
+                    _ => new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-write-failed", "The journal append returned an unsupported result."))
+                };
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
+
+    public async Task<Result<JournalAppendClaim, JournalFailure>> ClaimUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeJournalEvent claim,
+            CancellationToken cancellationToken)
+        {
+            await operationGate.WaitAsync(cancellationToken);
+            try
+            {
+                var loaded = await ReadValidatedAsync(cancellationToken);
+                if (loaded is Result<JournalSnapshot, JournalFailure>.Failure failure)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(failure.Error);
+                }
+
+                var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                var existing = snapshot.Entries
+                    .Where(entry =>
+                        entry.Upgrade?.IdempotencyKey == claim.IdempotencyKey &&
+                        entry.Upgrade.Phase == claim.Phase)
+                    .OrderBy(static entry => entry.Ordinal)
+                    .LastOrDefault();
+                if (existing?.Upgrade?.ClaimExpiresAt is { } expiresAt && expiresAt > claim.RecordedAt)
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false));
+                }
+
+                var entry = JournalEntry.ForUpgrade(snapshot.Anchor.Ordinal + 1, identity, claim);
+                return await AppendCoreAsync(entry, cancellationToken) switch
+                {
+                    Result<JournalEntry, JournalFailure>.Success success =>
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(success.Value, true)),
+                    Result<JournalEntry, JournalFailure>.Failure appendFailure =>
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(appendFailure.Error),
+                    _ => new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("journal-write-failed", "The journal transition claim returned an unsupported result."))
+                };
+            }
+            finally
+            {
+                operationGate.Release();
+            }
+        }
     private async Task<Result<JournalEntry, JournalFailure>> AppendCoreAsync(
         JournalEntry entry,
         CancellationToken cancellationToken)
@@ -721,6 +855,64 @@ public sealed class InMemoryJournal : INodeJournal
             new Result<JournalEntry, JournalFailure>.Success(entry));
     }
 
+    public Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimedAsync(
+            string claimIdentity,
+            Func<long, JournalEntry> entryFactory,
+            CancellationToken cancellationToken)
+        {
+            if (appendFailure is { } failure)
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(failure));
+            }
+
+            lock (sync)
+            {
+                var existing = entries.SingleOrDefault(entry => entry.PayloadIdentity == claimIdentity);
+                if (existing is not null)
+                {
+                    return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false)));
+                }
+
+                var entry = entryFactory(entries.Count + 1L);
+                return entry.PayloadIdentity != claimIdentity
+                    ? Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                        new Result<JournalAppendClaim, JournalFailure>.Failure(
+                            new("journal-claim-identity-mismatch", "The claimed journal entry must retain its supplied claim identity.")))
+                    : AppendClaimed(entry);
+            }
+        }
+
+    public Task<Result<JournalAppendClaim, JournalFailure>> ClaimUpgradeTransitionAsync(
+            NodeDeviceIdentity identity,
+            UpgradeJournalEvent claim,
+            CancellationToken cancellationToken)
+        {
+            if (appendFailure is { } failure)
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(failure));
+            }
+
+            lock (sync)
+            {
+                var existing = entries
+                    .Where(entry =>
+                        entry.Upgrade?.IdempotencyKey == claim.IdempotencyKey &&
+                        entry.Upgrade.Phase == claim.Phase)
+                    .OrderBy(static entry => entry.Ordinal)
+                    .LastOrDefault();
+                if (existing?.Upgrade?.ClaimExpiresAt is { } expiresAt && expiresAt > claim.RecordedAt)
+                {
+                    return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                        new Result<JournalAppendClaim, JournalFailure>.Success(new(existing, false)));
+                }
+
+                return AppendClaimed(JournalEntry.ForUpgrade(entries.Count + 1L, identity, claim));
+            }
+        }
+
     public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken)
     {
         lock (sync)
@@ -728,6 +920,13 @@ public sealed class InMemoryJournal : INodeJournal
             return Task.FromResult<Result<IReadOnlyList<JournalEntry>, JournalFailure>>(
                 new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success(entries.ToArray()));
         }
+    }
+
+    private Task<Result<JournalAppendClaim, JournalFailure>> AppendClaimed(JournalEntry entry)
+    {
+        entries.Add(entry);
+        return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+            new Result<JournalAppendClaim, JournalFailure>.Success(new(entry, true)));
     }
 }
 

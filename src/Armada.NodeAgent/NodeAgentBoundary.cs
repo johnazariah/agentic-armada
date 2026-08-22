@@ -104,19 +104,16 @@ public sealed class NodeAgentBoundary
             return new Result<NodeCommandAcknowledgement, NodeAgentFailure>.Success(outcome.Acknowledgement);
         }
 
-        var entry = JournalEntry.ForCommand(
-            NextOrdinal(),
-            identity,
-            envelope,
-            outcome,
-            clock.UtcNow);
-        var persisted = await journal.AppendAsync(entry, cancellationToken);
-        if (persisted is Result<JournalEntry, JournalFailure>.Failure failure)
+        var persisted = await journal.AppendClaimedAsync(
+            JournalEntry.CommandClaimIdentity(envelope),
+            ordinal => JournalEntry.ForCommand(ordinal, identity, envelope, outcome, clock.UtcNow),
+            cancellationToken);
+        if (persisted is Result<JournalAppendClaim, JournalFailure>.Failure failure)
         {
             return Failure<NodeCommandAcknowledgement>(failure.Error);
         }
 
-        state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
+        state = AgentState.Apply(state, ((Result<JournalAppendClaim, JournalFailure>.Success)persisted).Value.Entry);
         return new Result<NodeCommandAcknowledgement, NodeAgentFailure>.Success(outcome.Acknowledgement);
         }
         finally
@@ -138,14 +135,16 @@ public sealed class NodeAgentBoundary
                 new("unknown-attempt-binding", "Evidence must bind to an observed local attempt."));
         }
 
-        var entry = JournalEntry.ForEvidence(NextOrdinal(), identity, observation);
-        var persisted = await journal.AppendAsync(entry, cancellationToken);
-        if (persisted is Result<JournalEntry, JournalFailure>.Failure failure)
+        var persisted = await journal.AppendClaimedAsync(
+            JournalEntry.EvidenceClaimIdentity(observation),
+            ordinal => JournalEntry.ForEvidence(ordinal, identity, observation),
+            cancellationToken);
+        if (persisted is Result<JournalAppendClaim, JournalFailure>.Failure failure)
         {
             return Failure<EvidenceObservation>(failure.Error);
         }
 
-        state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
+        state = AgentState.Apply(state, ((Result<JournalAppendClaim, JournalFailure>.Success)persisted).Value.Entry);
         return new Result<EvidenceObservation, NodeAgentFailure>.Success(observation);
         }
         finally
@@ -191,14 +190,27 @@ public sealed class NodeAgentBoundary
                 new("attempt-not-prepared", "The process start transition is not valid for this attempt."));
         }
 
-        var entry = JournalEntry.ForAttemptStarted(NextOrdinal(), identity, started.Value, clock.UtcNow);
-        var persisted = await journal.AppendAsync(entry, cancellationToken);
-        if (persisted is Result<JournalEntry, JournalFailure>.Failure failure)
+        var claimIdentity = JournalEntry.AttemptStartClaimIdentity(
+            started.Value.ProjectId.ToString(),
+            started.Value.WorkloadId.ToString(),
+            started.Value.AttemptId.ToString(),
+            started.Value.AdmissionDecisionReference.ToString(),
+            started.Value.LeaseReference.ToString(),
+            started.Value.BundleDigest.Value,
+            started.Value.PolicyDigest.Value,
+            started.Value.ReleaseDigest.Value,
+            started.Value.CapabilityGrantDigest.Value,
+            started.Value.AuthorityExpiresAt.ToUniversalTime().ToString("O"));
+        var persisted = await journal.AppendClaimedAsync(
+            claimIdentity,
+            ordinal => JournalEntry.ForAttemptStarted(ordinal, identity, started.Value, clock.UtcNow),
+            cancellationToken);
+        if (persisted is Result<JournalAppendClaim, JournalFailure>.Failure failure)
         {
             return Failure<AttemptRuntime>(failure.Error);
         }
 
-        state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
+        state = AgentState.Apply(state, ((Result<JournalAppendClaim, JournalFailure>.Success)persisted).Value.Entry);
         return new Result<AttemptRuntime, NodeAgentFailure>.Success(started.Value);
         }
         finally
@@ -206,8 +218,6 @@ public sealed class NodeAgentBoundary
             operationGate.Release();
         }
     }
-
-    private long NextOrdinal() => state.LastJournalOrdinal + 1;
 
     private static Result<T, NodeAgentFailure> Failure<T>(JournalFailure failure) =>
         new Result<T, NodeAgentFailure>.Failure(new(failure.Code, failure.Message));

@@ -15,15 +15,19 @@ threat model 001 and assurance package 002.
 - Pure upgrade planning refuses unsupported platforms, incompatible protocols,
   unpinned channels, revocation, manifest replay, downgrade, and absent rollback
   anchors. It selects only the exact node-agent and platform installer artifacts.
-- The node reconciliation boundary records stage, health, activation, and
-  rollback events in the existing journal. It never activates before verified
-  health; failed health or activation triggers rollback through a narrow staging
-  port.
+- The node reconciliation boundary atomically claims journal ordinals and every
+  stage, health, activation, and rollback transition in the existing journal.
+  Claims precede effects and expire for explicit restart recovery; recovery
+  queries the narrow staging-status port rather than blindly repeating an
+  effect. It never activates before verified health; failed health or
+  activation triggers rollback through a narrow staging port.
 - Templates remain platform abstractions only. No package, installer, release,
   download, shell, package manager, deployment, or node-enrolment effect exists.
-- Deterministic tests cover canonical digest/signature tampering, compatibility,
-  revocation, replay/downgrade/channel/anchor refusal, failed staging/health/
-  activation, rollback, health-first activation, and journal replay.
+- Deterministic tests cover canonical digest/signature tampering, semantic
+  `alpha10`/`alpha2` protocol comparison, compatibility, revocation,
+  replay/downgrade/channel/anchor refusal, atomic journal claims, restart after
+  stage/health/activation boundaries, failed staging/health/activation,
+  rollback, health-first activation, and journal replay.
 - The tracked `dotnet msbuild eng/Verify.proj /t:Verify` gate passes with no
   broad coverage exclusions and the PostgreSQL CI service required by the
   repository workflow.
@@ -34,4 +38,3 @@ The production rollback-anchor adapter, production trusted-key source/key
 custody decision, supported live Copilot integration, independent security
 review, live deployment review, and backup/restore ceremony remain absent.
 Those gaps block real release activation and are not resolved by this PR.
-

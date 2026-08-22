@@ -258,7 +258,7 @@ public static class CommandValidation
             return Reject(envelope, "invalid-envelope-identity", "Commands require non-empty message, correlation, and idempotency identities.");
         }
 
-        var payloadIdentity = ProtocolIdentity.Envelope(envelope.Payload, envelope.IdempotencyKey);
+        var payloadIdentity = JournalEntry.CommandClaimIdentity(envelope);
         if (state.ProcessedCommands.TryGetValue(envelope.IdempotencyKey, out var processed))
         {
             return processed.PayloadIdentity == payloadIdentity

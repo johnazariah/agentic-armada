@@ -68,11 +68,26 @@ public sealed class ReleaseDistributionContractTests
         Assert.False(compatibility.Supports("armada.node/v1alpha1", "armada.control/v1alpha2"));
     }
 
+    [Fact]
+    public void Compatibility_compares_numeric_alpha_components_not_lexical_protocol_text()
+    {
+        var narrow = new ReleaseCompatibility(
+            "armada.node/v1alpha1",
+            "armada.node/v1alpha2",
+            "armada.control/v1alpha1",
+            "armada.control/v1alpha2");
+        var wide = narrow with { MaximumNodeProtocol = "armada.node/v1alpha10" };
+
+        Assert.False(narrow.Supports("armada.node/v1alpha10", "armada.control/v1alpha1"));
+        Assert.True(wide.Supports("armada.node/v1alpha10", "armada.control/v1alpha1"));
+        Assert.False(wide.Supports("armada.control/v1alpha1", "armada.control/v1alpha1"));
+    }
+
     [Property(MaxTest = 50)]
     public void Canonical_digest_changes_when_the_release_identity_changes(NonEmptyString suffix)
     {
         var manifest = Manifest();
-        var changed = manifest with { ReleaseId = $"r-{suffix.Get}" };
+        var changed = manifest with { ReleaseId = $"r-{suffix.Get}-changed" };
 
         var originalDigest = ReleaseManifestContract.Digest(ReleaseManifestContract.CanonicalBytes(manifest));
         var changedDigest = ReleaseManifestContract.Digest(ReleaseManifestContract.CanonicalBytes(changed));
