@@ -158,6 +158,20 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
                         "invalid-session-replacement",
                         "A replacement must name a disappeared Issue Master with exact attempt, node, project, organisation, and provider bindings."));
                 }
+
+                if (successors.ContainsKey(replaces))
+                {
+                    return Task.FromResult(Failure<SessionRuntime>(
+                        "replacement-successor-already-exists",
+                        "A disappeared Issue Master already has a durable successor."));
+                }
+            }
+
+            if (sessions.ContainsKey(request.Session.Metadata.Uid))
+            {
+                return Task.FromResult(Failure<SessionRuntime>(
+                    "parent-session-identity-reused",
+                    "An AgentSession identity may not be reused by a different parent idempotency request."));
             }
 
             var runtime = new SessionRuntime(request.Session, SessionLiveness.Idle, request.Session.Metadata.CreatedAt);
@@ -400,6 +414,11 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
             return Failure<SessionRuntime>("session-not-found", "The requested session is not known by this adapter.");
         }
 
+        if (runtime.Session.Metadata != request.Session.Metadata)
+        {
+            return Failure<SessionRuntime>("session-metadata-mismatch", "The operation metadata must match the durable AgentSession identity and scope.");
+        }
+
         return ValidateAuthority(runtime.Session, request.Attempt, request.Admission, request.Envelope, request.OccurredAt) is
             Result<bool, SessionAdapterFailure>.Failure failure
                 ? Failure<SessionRuntime>(failure.Error.Code, failure.Error.Message)
@@ -418,6 +437,17 @@ public sealed class InMemorySessionAdapter : ISessionAdapter
             runtime.Session.Spec.AttemptReference != request.Attempt.Metadata.Uid)
         {
             return Failure<SessionRuntime>("invalid-terminal-archive-binding", "Terminal archival requires a known session with exact role, parent, attempt, correlation, and reason bindings.");
+        }
+
+        if (runtime.Session.Metadata != request.Session.Metadata)
+        {
+            return Failure<SessionRuntime>("session-metadata-mismatch", "The operation metadata must match the durable AgentSession identity and scope.");
+        }
+
+        var scope = SessionAuthorityValidation.ValidateScope(runtime.Session, request.Attempt, request.Admission);
+        if (scope is Result<bool, SessionReconciliationFailure>.Failure scopeFailure)
+        {
+            return Failure<SessionRuntime>(scopeFailure.Error.Code, scopeFailure.Error.Message);
         }
 
         return new Result<SessionRuntime, SessionAdapterFailure>.Success(runtime);

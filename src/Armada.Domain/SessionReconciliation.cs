@@ -112,6 +112,12 @@ public static class SessionAuthorityValidation
         CapabilityEnvelope envelope,
         DateTimeOffset evaluatedAt)
     {
+        var scope = ValidateScope(session, attempt, admission);
+        if (scope is Result<bool, SessionReconciliationFailure>.Failure failure)
+        {
+            return new Result<bool, SessionReconciliationFailure>.Failure(failure.Error);
+        }
+
         if (session.Spec.AttemptReference != attempt.Metadata.Uid ||
             session.Spec.NodeReference != attempt.Spec.NodeReference ||
             attempt.Spec.AdmissionDecisionReference != admission.Metadata.Uid ||
@@ -133,6 +139,17 @@ public static class SessionAuthorityValidation
 
         return new Result<bool, SessionReconciliationFailure>.Success(true);
     }
+
+    public static Result<bool, SessionReconciliationFailure> ValidateScope(
+        AgentSession session,
+        Attempt attempt,
+        AdmissionDecision admission) =>
+        session.Metadata.OrganisationId == attempt.Metadata.OrganisationId &&
+        session.Metadata.OrganisationId == admission.Metadata.OrganisationId &&
+        session.Metadata.ProjectId == attempt.Metadata.ProjectId &&
+        session.Metadata.ProjectId == admission.Metadata.ProjectId
+            ? new Result<bool, SessionReconciliationFailure>.Success(true)
+            : Failure("session-scope-mismatch", "Session, Attempt, and AdmissionDecision must remain in the exact same organisation and project.");
 
     public static Result<bool, SessionReconciliationFailure> CanArchive(
         Attempt attempt,

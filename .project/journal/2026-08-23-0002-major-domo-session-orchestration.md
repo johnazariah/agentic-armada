@@ -30,6 +30,9 @@
   authorised replacement key. A replacement names the disappeared owner,
   records its durable successor mapping, and rejects conflicting replay
   payloads.
+- Session operation authority now checks exact organisation/project equality
+  across the session, attempt and admission resources. Replacement successor
+  ownership is preflighted before any replay/session state is mutated.
 
 ## Quality evidence
 

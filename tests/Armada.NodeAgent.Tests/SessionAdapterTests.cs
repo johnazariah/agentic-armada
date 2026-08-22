@@ -78,6 +78,27 @@ public sealed class SessionAdapterTests
     }
 
     [Fact]
+    public async Task Parent_creation_and_operations_refuse_cross_project_or_organisation_scope()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        var crossProject = fixture.Parent with
+        {
+            Metadata = fixture.Parent.Metadata with { ProjectId = new ProjectId(Guid.NewGuid()) }
+        };
+        Assert.Equal("session-scope-mismatch", Failure(await adapter.CreateParentAsync(fixture.Create(crossProject), CancellationToken.None)).Code);
+
+        await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None);
+        var crossOrganisation = fixture.Parent with
+        {
+            Metadata = fixture.Parent.Metadata with { OrganisationId = new OrganisationId(Guid.NewGuid()) }
+        };
+        Assert.Equal(
+            "session-metadata-mismatch",
+            Failure(await adapter.ObserveParentAsync(fixture.Operation(crossOrganisation), CancellationToken.None)).Code);
+    }
+
+    [Fact]
     public async Task Archived_parent_cannot_be_woken_or_used_to_create_children()
     {
         var fixture = new AdapterFixture();
@@ -199,6 +220,36 @@ public sealed class SessionAdapterTests
             Failure(await adapter.CreateParentAsync(
                 fixture.Create(conflicting, replaces: fixture.Parent.Metadata.Uid),
                 CancellationToken.None)).Code);
+    }
+
+    [Fact]
+    public async Task Conflicting_second_replacement_persists_no_successor_or_replay_state()
+    {
+        var fixture = new AdapterFixture();
+        var adapter = new InMemorySessionAdapter();
+        Value(await adapter.CreateParentAsync(fixture.Create(fixture.Parent), CancellationToken.None));
+        Value(adapter.MarkDisappearedForReconciliation(fixture.Parent));
+
+        var first = fixture.Parent with { Metadata = fixture.Metadata("replacement-first") };
+        Value(await adapter.CreateParentAsync(
+            fixture.Create(first, replaces: fixture.Parent.Metadata.Uid),
+            CancellationToken.None));
+
+        var second = fixture.Parent with
+        {
+            Metadata = fixture.Metadata("replacement-second"),
+            Spec = fixture.Parent.Spec with { IdempotencyKey = "alternate-replacement" }
+        };
+        var request = fixture.Create(second, replaces: fixture.Parent.Metadata.Uid);
+        Assert.Equal(
+            "replacement-successor-already-exists",
+            Failure(await adapter.CreateParentAsync(request, CancellationToken.None)).Code);
+        Assert.Equal(first.Metadata.Uid, adapter.Successors[fixture.Parent.Metadata.Uid]);
+
+        Assert.Equal(
+            "replacement-successor-already-exists",
+            Failure(await adapter.CreateParentAsync(request, CancellationToken.None)).Code);
+        Assert.Equal(first.Metadata.Uid, adapter.Successors[fixture.Parent.Metadata.Uid]);
     }
 
     [Fact]
