@@ -50,7 +50,8 @@ public static class PfqeMigration
 {
     public static Result<PfqeMigrationInventory, PfqeMigrationFailure> CreateInventory(
         IEnumerable<PfqeImmutableReference> references,
-        IEnumerable<string> candidateProfiles)
+        IEnumerable<string> candidateProfiles,
+        PfqeMigrationStageEvidence inventoryEvidence)
     {
         ArgumentNullException.ThrowIfNull(references);
         ArgumentNullException.ThrowIfNull(candidateProfiles);
@@ -69,6 +70,11 @@ public static class PfqeMigration
             .Count() != immutableReferences.Length)
         {
             return Failure("duplicate-reference-inventory", "Migration references must be unique immutable identities.");
+        }
+
+        if (!IsValidStageEvidence(inventoryEvidence, PfqeMigrationStage.Inventory))
+        {
+            return Failure("invalid-stage-evidence", "Observer inventory requires an immutable inventory-stage evidence reference.");
         }
 
         var candidates = candidateProfiles
@@ -91,7 +97,7 @@ public static class PfqeMigration
             .ToImmutableArray();
 
         return new Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success(
-            new(immutableReferences, observerCandidates, PfqeMigrationStage.Inventory, []));
+            new(immutableReferences, observerCandidates, PfqeMigrationStage.Inventory, [inventoryEvidence]));
     }
 
     public static Result<PfqeMigrationInventory, PfqeMigrationFailure> Advance(
@@ -106,11 +112,12 @@ public static class PfqeMigration
             return Failure("invalid-migration-stage", "Migration stages may advance only one reviewed stage at a time.");
         }
 
-        if (evidence.Stage != nextStage ||
-            string.IsNullOrWhiteSpace(evidence.SourceLocation) ||
-            evidence.ContentDigest is null ||
-            (nextStage == PfqeMigrationStage.NonScientificCanary && !evidence.IsNonScientificCanary) ||
-            (nextStage != PfqeMigrationStage.NonScientificCanary && evidence.IsNonScientificCanary))
+        if (!HasCompleteEvidenceChain(inventory))
+        {
+            return Failure("migration-evidence-chain-invalid", "Migration advancement requires an ordered immutable evidence chain from inventory through the current stage.");
+        }
+
+        if (!IsValidStageEvidence(evidence, nextStage))
         {
             return Failure("invalid-stage-evidence", "Each migration stage requires its own immutable evidence; the canary stage must be explicitly non-scientific.");
         }
@@ -127,6 +134,23 @@ public static class PfqeMigration
         return new Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success(
             inventory with { Stage = nextStage, StageEvidence = inventory.StageEvidence.Add(evidence) });
     }
+
+    private static bool HasCompleteEvidenceChain(PfqeMigrationInventory inventory) =>
+        Enum.IsDefined(inventory.Stage) &&
+        inventory.StageEvidence.Length == (int)inventory.Stage &&
+        inventory.StageEvidence.Select(static (evidence, index) => IsValidStageEvidence(
+            evidence,
+            (PfqeMigrationStage)(index + 1))).All(static valid => valid);
+
+    private static bool IsValidStageEvidence(
+        PfqeMigrationStageEvidence evidence,
+        PfqeMigrationStage expectedStage) =>
+        evidence.Stage == expectedStage &&
+        string.IsNullOrWhiteSpace(evidence.SourceLocation) == false &&
+        evidence.ContentDigest is not null &&
+        (expectedStage == PfqeMigrationStage.NonScientificCanary
+            ? evidence.IsNonScientificCanary
+            : !evidence.IsNonScientificCanary);
 
     private static Result<PfqeMigrationInventory, PfqeMigrationFailure> Failure(string code, string message) =>
         new Result<PfqeMigrationInventory, PfqeMigrationFailure>.Failure(new(code, message));

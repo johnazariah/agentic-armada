@@ -94,7 +94,10 @@ public sealed class GitHubProjectionAndMigrationTests
             new PfqeImmutableReference(PfqeReferenceKind.HostBoundary, "host://profile/one", Digest('d'))
         };
 
-        var result = PfqeMigration.CreateInventory(references, ["profile-a", "profile-b"]);
+        var result = PfqeMigration.CreateInventory(
+            references,
+            ["profile-a", "profile-b"],
+            StageEvidence(PfqeMigrationStage.Inventory));
 
         var inventory = Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success>(result).Value;
         Assert.All(inventory.Candidates, candidate =>
@@ -130,7 +133,10 @@ public sealed class GitHubProjectionAndMigrationTests
     {
         var duplicate = new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://same", Fixture.OtherDigest());
 
-        var invalid = PfqeMigration.CreateInventory([duplicate, duplicate], ["profile"]);
+        var invalid = PfqeMigration.CreateInventory(
+            [duplicate, duplicate],
+            ["profile"],
+            StageEvidence(PfqeMigrationStage.Inventory));
         var skipped = PfqeMigration.Advance(
             Inventory(),
             PfqeMigrationStage.ObserverAgent,
@@ -149,7 +155,8 @@ public sealed class GitHubProjectionAndMigrationTests
     {
         var noCandidates = PfqeMigration.CreateInventory(
             [new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://one", Fixture.OtherDigest())],
-            []);
+            [],
+            StageEvidence(PfqeMigrationStage.Inventory));
         var inventory = Inventory();
         var observerCandidates = Advance(inventory, PfqeMigrationStage.ObservationCandidates);
         var observerAgent = Advance(observerCandidates, PfqeMigrationStage.ObserverAgent);
@@ -170,12 +177,69 @@ public sealed class GitHubProjectionAndMigrationTests
         Assert.Single(canary.StageEvidence, evidence => evidence.Stage == PfqeMigrationStage.NonScientificCanary);
     }
 
+    [Fact]
+    public void Migration_rejects_a_current_stage_that_lacks_ordered_immutable_evidence()
+    {
+        var bypass = Inventory() with
+        {
+            Stage = PfqeMigrationStage.ReviewedIdentity,
+            StageEvidence = []
+        };
+
+        var result = PfqeMigration.Advance(
+            bypass,
+            PfqeMigrationStage.NonScientificCanary,
+            StageEvidence(PfqeMigrationStage.NonScientificCanary));
+
+        Assert.Equal(
+            "migration-evidence-chain-invalid",
+            Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Migration_rejects_gapped_reordered_and_mismatched_evidence_chains()
+    {
+        var inventory = Inventory();
+        var observed = Advance(inventory, PfqeMigrationStage.ObservationCandidates);
+        var gapped = observed with
+        {
+            Stage = PfqeMigrationStage.ReviewedIdentity
+        };
+        var reordered = observed with
+        {
+            StageEvidence = [observed.StageEvidence[1], observed.StageEvidence[0]]
+        };
+        var mismatched = observed with
+        {
+            StageEvidence = [observed.StageEvidence[0], StageEvidence(PfqeMigrationStage.ObserverAgent)]
+        };
+
+        AssertChainRejected(gapped, PfqeMigrationStage.NonScientificCanary);
+        AssertChainRejected(reordered, PfqeMigrationStage.ObserverAgent);
+        AssertChainRejected(mismatched, PfqeMigrationStage.ObserverAgent);
+    }
+
+    [Fact]
+    public void Migration_accepts_a_complete_ordered_evidence_chain()
+    {
+        var observerCandidates = Advance(Inventory(), PfqeMigrationStage.ObservationCandidates);
+        var observerAgent = Advance(observerCandidates, PfqeMigrationStage.ObserverAgent);
+        var reviewedIdentity = Advance(observerAgent, PfqeMigrationStage.ReviewedIdentity);
+        var canary = Advance(reviewedIdentity, PfqeMigrationStage.NonScientificCanary);
+
+        Assert.Equal(PfqeMigrationStage.NonScientificCanary, canary.Stage);
+        Assert.Equal(
+            Enum.GetValues<PfqeMigrationStage>().Where(stage => stage <= canary.Stage),
+            canary.StageEvidence.Select(static evidence => evidence.Stage));
+    }
+
     [Property]
     public void Inventory_candidates_are_observer_only_for_every_profile(int profile)
     {
         var result = PfqeMigration.CreateInventory(
             [new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://property", Digest('e'))],
-            [$"profile-{profile}"]);
+            [$"profile-{profile}"],
+            StageEvidence(PfqeMigrationStage.Inventory));
 
         var inventory = Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success>(result).Value;
         var candidate = Assert.Single(inventory.Candidates);
@@ -201,7 +265,8 @@ public sealed class GitHubProjectionAndMigrationTests
         Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success>(
             PfqeMigration.CreateInventory(
                 [new PfqeImmutableReference(PfqeReferenceKind.Evidence, "archive://one", Fixture.OtherDigest())],
-                ["profile"])).Value;
+                ["profile"],
+                StageEvidence(PfqeMigrationStage.Inventory))).Value;
 
     private static PfqeMigrationStageEvidence StageEvidence(PfqeMigrationStage stage) =>
         new(stage, $"migration://{stage}", Digest('f'), stage == PfqeMigrationStage.NonScientificCanary);
@@ -209,6 +274,15 @@ public sealed class GitHubProjectionAndMigrationTests
     private static PfqeMigrationInventory Advance(PfqeMigrationInventory inventory, PfqeMigrationStage stage) =>
         Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Success>(
             PfqeMigration.Advance(inventory, stage, StageEvidence(stage))).Value;
+
+    private static void AssertChainRejected(PfqeMigrationInventory inventory, PfqeMigrationStage nextStage)
+    {
+        var result = PfqeMigration.Advance(inventory, nextStage, StageEvidence(nextStage));
+
+        Assert.Equal(
+            "migration-evidence-chain-invalid",
+            Assert.IsType<Result<PfqeMigrationInventory, PfqeMigrationFailure>.Failure>(result).Error.Code);
+    }
 
     private static Sha256Digest Digest(char value) =>
         Assert.IsType<Result<Sha256Digest, ContractValidationError>.Success>(
