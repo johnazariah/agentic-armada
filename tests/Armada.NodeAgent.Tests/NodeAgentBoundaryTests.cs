@@ -100,6 +100,8 @@ public sealed class NodeAgentBoundaryTests
         Assert.Equal(start.BundleDigest, attempt.BundleDigest);
         Assert.Equal(start.PolicyDigest, attempt.PolicyDigest);
         Assert.Equal(start.ReleaseDigest, attempt.ReleaseDigest);
+        Assert.Equal(start.CapabilityGrantDigest, attempt.CapabilityGrantDigest);
+        Assert.Equal(start.ExpiresAt, attempt.AuthorityExpiresAt);
     }
 
     [Fact]
@@ -124,6 +126,79 @@ public sealed class NodeAgentBoundaryTests
         Assert.Equal(
             IsolationProfile.IsolatedContainer,
             Assert.IsType<Result<FullReconciliationSnapshot, NodeAgentFailure>.Success>(snapshot).Value.Attempts.Single().IsolationProfile);
+    }
+
+    [Fact]
+    public async Task Restarted_agent_rejects_process_start_after_persisted_authority_expiry()
+    {
+        var fixture = new NodeAgentFixture();
+        var journal = new InMemoryJournal();
+        var first = fixture.Boundary(journal);
+        var command = fixture.StartEnvelope(sequence: 1, expiresAt: fixture.Now.AddMinutes(1));
+
+        await first.ReceiveAsync(command, CancellationToken.None);
+        var restarted = fixture.Boundary(journal, now: fixture.Now.AddMinutes(2));
+        await restarted.ReconcileAsync(fixture.Inventory, fixture.Health, CancellationToken.None);
+        var result = await restarted.AuthoriseProcessStartAsync(
+            fixture.AttemptId,
+            Start(command).CapabilityGrantDigest,
+            CancellationToken.None);
+
+        Assert.Equal(
+            "expired-authority",
+            Assert.IsType<Result<AttemptRuntime, NodeAgentFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public async Task Process_start_requires_the_persisted_capability_grant()
+    {
+        var fixture = new NodeAgentFixture();
+        var boundary = fixture.Boundary(new InMemoryJournal());
+        var command = fixture.StartEnvelope(sequence: 1);
+
+        await boundary.ReceiveAsync(command, CancellationToken.None);
+        var result = await boundary.AuthoriseProcessStartAsync(
+            fixture.AttemptId,
+            fixture.Digest('f'),
+            CancellationToken.None);
+
+        Assert.Equal(
+            "capability-grant-mismatch",
+            Assert.IsType<Result<AttemptRuntime, NodeAgentFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public async Task Process_start_accepts_the_current_persisted_capability_grant()
+    {
+        var fixture = new NodeAgentFixture();
+        var boundary = fixture.Boundary(new InMemoryJournal());
+        var command = fixture.StartEnvelope(sequence: 1);
+
+        await boundary.ReceiveAsync(command, CancellationToken.None);
+        var result = await boundary.AuthoriseProcessStartAsync(
+            fixture.AttemptId,
+            Start(command).CapabilityGrantDigest,
+            CancellationToken.None);
+
+        Assert.Equal(
+            fixture.AttemptId,
+            Assert.IsType<Result<AttemptRuntime, NodeAgentFailure>.Success>(result).Value.AttemptId);
+    }
+
+    [Fact]
+    public async Task Process_start_rejects_an_unknown_attempt()
+    {
+        var fixture = new NodeAgentFixture();
+        var boundary = fixture.Boundary(new InMemoryJournal());
+
+        var result = await boundary.AuthoriseProcessStartAsync(
+            ResourceId.New(),
+            fixture.Digest('a'),
+            CancellationToken.None);
+
+        Assert.Equal(
+            "unknown-attempt-binding",
+            Assert.IsType<Result<AttemptRuntime, NodeAgentFailure>.Failure>(result).Error.Code);
     }
 
     [Theory]
@@ -306,13 +381,16 @@ internal sealed class NodeAgentFixture
         Health = new("1.0.0-test", true, Now);
     }
 
-    public NodeAgentBoundary Boundary(INodeJournal journal, IAuthorityVerifier? verifier = null) =>
+    public NodeAgentBoundary Boundary(
+        INodeJournal journal,
+        IAuthorityVerifier? verifier = null,
+        DateTimeOffset? now = null) =>
         new(
             Identity,
             new LocalIsolationCapabilities(Inventory.EnforceableIsolationProfiles),
             journal,
             verifier ?? new DeterministicVerifier(AuthorityVerification.Verified),
-            new FixedClock(Now));
+            new FixedClock(now ?? Now));
 
     public OutboundEnvelope<NodeCommand> StartEnvelope(
         long sequence,

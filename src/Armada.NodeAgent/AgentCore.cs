@@ -156,7 +156,9 @@ public sealed record AgentState(
                                            entry.LeaseReference is { } leaseReference &&
                                            entry.BundleDigest is { } bundleDigest &&
                                            entry.PolicyDigest is { } policyDigest &&
-                                           entry.ReleaseDigest is { } releaseDigest =>
+                                           entry.ReleaseDigest is { } releaseDigest &&
+                                           entry.CapabilityGrantDigest is { } capabilityGrantDigest &&
+                                           entry.AuthorityExpiresAt is { } authorityExpiresAt =>
                         nextState with
                         {
                             Attempts = nextState.Attempts.SetItem(
@@ -171,6 +173,8 @@ public sealed record AgentState(
                                     bundleDigest,
                                     policyDigest,
                                     releaseDigest,
+                                    capabilityGrantDigest,
+                                    authorityExpiresAt,
                                     attemptState,
                                     entry.RecordedAt))
                         },

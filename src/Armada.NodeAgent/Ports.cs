@@ -24,6 +24,21 @@ public interface INodeJournal
         CancellationToken cancellationToken);
 }
 
+public sealed record RollbackAnchor(long Ordinal, string TailHash)
+{
+    public static readonly RollbackAnchor Empty =
+        new(0, "0000000000000000000000000000000000000000000000000000000000000000");
+}
+
+public interface IRollbackAnchorStore
+{
+    Task<Result<RollbackAnchor, JournalFailure>> ReadAsync(CancellationToken cancellationToken);
+
+    Task<Result<RollbackAnchor, JournalFailure>> AdvanceAsync(
+        RollbackAnchor next,
+        CancellationToken cancellationToken);
+}
+
 public interface IClock
 {
     DateTimeOffset UtcNow { get; }

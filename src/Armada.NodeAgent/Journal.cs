@@ -33,6 +33,8 @@ public sealed record JournalEntry(
     ResourceId? LeaseReference,
     IsolationProfile? IsolationProfile,
     AttemptExecutionState? AttemptState,
+    DateTimeOffset? AuthorityExpiresAt,
+    Sha256Digest? CapabilityGrantDigest,
     Sha256Digest? BundleDigest,
     Sha256Digest? PolicyDigest,
     Sha256Digest? ReleaseDigest,
@@ -73,6 +75,8 @@ public sealed record JournalEntry(
             },
             outcome.IsolationProfile,
             outcome.AttemptState,
+            envelope.Payload is StartAttemptCommand startExpiry ? startExpiry.ExpiresAt : null,
+            envelope.Payload is StartAttemptCommand startGrant ? startGrant.CapabilityGrantDigest : null,
             envelope.Payload is StartAttemptCommand startBundle ? startBundle.BundleDigest : null,
             envelope.Payload is StartAttemptCommand startPolicy ? startPolicy.PolicyDigest : null,
             envelope.Payload is StartAttemptCommand startRelease ? startRelease.ReleaseDigest : null,
@@ -102,6 +106,8 @@ public sealed record JournalEntry(
             null,
             null,
             observation.AttemptId,
+            null,
+            null,
             null,
             null,
             null,
@@ -177,7 +183,7 @@ public sealed record ChainedJournalRecord(
     string PreviousHash,
     string EntryHash);
 
-public sealed record JournalAnchor(long Ordinal, string TailHash);
+public sealed record LocalJournalTailMarker(long Ordinal, string TailHash);
 
 public sealed class EncryptedFileJournal : INodeJournal
 {
@@ -185,11 +191,16 @@ public sealed class EncryptedFileJournal : INodeJournal
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
     private readonly string path;
     private readonly AesGcmJournalProtector protector;
+    private readonly IRollbackAnchorStore rollbackAnchorStore;
 
-    public EncryptedFileJournal(string path, AesGcmJournalProtector protector)
+    public EncryptedFileJournal(
+        string path,
+        AesGcmJournalProtector protector,
+        IRollbackAnchorStore rollbackAnchorStore)
     {
         this.path = path;
         this.protector = protector;
+        this.rollbackAnchorStore = rollbackAnchorStore;
     }
 
     public async Task<Result<JournalEntry, JournalFailure>> AppendAsync(
@@ -233,11 +244,26 @@ public sealed class EncryptedFileJournal : INodeJournal
             }
 
             var anchorResult = await WriteAnchorAsync(
-                new JournalAnchor(entry.Ordinal, chained.EntryHash),
+                new LocalJournalTailMarker(entry.Ordinal, chained.EntryHash),
                 cancellationToken);
             if (anchorResult is Result<bool, JournalFailure>.Failure anchorFailure)
             {
                 return Failure<JournalEntry>(anchorFailure.Error.Code, anchorFailure.Error.Message);
+            }
+
+            var rollbackAnchor = await rollbackAnchorStore.AdvanceAsync(
+                new RollbackAnchor(entry.Ordinal, chained.EntryHash),
+                cancellationToken);
+            if (rollbackAnchor is Result<RollbackAnchor, JournalFailure>.Failure rollbackFailure)
+            {
+                return Failure<JournalEntry>(rollbackFailure.Error.Code, rollbackFailure.Error.Message);
+            }
+            if (((Result<RollbackAnchor, JournalFailure>.Success)rollbackAnchor).Value !=
+                new RollbackAnchor(entry.Ordinal, chained.EntryHash))
+            {
+                return Failure<JournalEntry>(
+                    "rollback-anchor-invalid",
+                    "The rollback-resistant anchor store did not confirm the appended journal checkpoint.");
             }
         }
         catch (IOException exception)
@@ -272,8 +298,20 @@ public sealed class EncryptedFileJournal : INodeJournal
         var anchorExists = File.Exists(anchorPath);
         if (!journalExists && !anchorExists)
         {
+            var emptyJournalAnchor = await rollbackAnchorStore.ReadAsync(cancellationToken);
+            if (emptyJournalAnchor is Result<RollbackAnchor, JournalFailure>.Failure emptyAnchorFailure)
+            {
+                return Failure<JournalSnapshot>(emptyAnchorFailure.Error.Code, emptyAnchorFailure.Error.Message);
+            }
+            if (((Result<RollbackAnchor, JournalFailure>.Success)emptyJournalAnchor).Value != RollbackAnchor.Empty)
+            {
+                return Failure<JournalSnapshot>(
+                    "journal-rollback-detected",
+                    "The rollback-resistant journal anchor proves that local journal history was removed.");
+            }
+
             return new Result<JournalSnapshot, JournalFailure>.Success(
-                new([], new JournalAnchor(0, GenesisHash)));
+                new([], new LocalJournalTailMarker(0, GenesisHash)));
         }
         if (journalExists != anchorExists)
         {
@@ -353,12 +391,12 @@ public sealed class EncryptedFileJournal : INodeJournal
         }
 
         var anchor = await ReadAnchorAsync(cancellationToken);
-        if (anchor is Result<JournalAnchor, JournalFailure>.Failure anchorFailure)
+        if (anchor is Result<LocalJournalTailMarker, JournalFailure>.Failure anchorFailure)
         {
             return Failure<JournalSnapshot>(anchorFailure.Error.Code, anchorFailure.Error.Message);
         }
 
-        var anchorValue = ((Result<JournalAnchor, JournalFailure>.Success)anchor).Value;
+        var anchorValue = ((Result<LocalJournalTailMarker, JournalFailure>.Success)anchor).Value;
         if (anchorValue.Ordinal != entries.Count || anchorValue.TailHash != previousHash)
         {
             return Failure<JournalSnapshot>(
@@ -366,10 +404,25 @@ public sealed class EncryptedFileJournal : INodeJournal
                 "The durable journal anchor does not match the encrypted journal tail.");
         }
 
+        var rollbackAnchor = await rollbackAnchorStore.ReadAsync(cancellationToken);
+        if (rollbackAnchor is Result<RollbackAnchor, JournalFailure>.Failure rollbackFailure)
+        {
+            return Failure<JournalSnapshot>(rollbackFailure.Error.Code, rollbackFailure.Error.Message);
+        }
+
+        var rollbackAnchorValue = ((Result<RollbackAnchor, JournalFailure>.Success)rollbackAnchor).Value;
+        if (rollbackAnchorValue.Ordinal != anchorValue.Ordinal ||
+            rollbackAnchorValue.TailHash != anchorValue.TailHash)
+        {
+            return Failure<JournalSnapshot>(
+                "journal-rollback-detected",
+                "The rollback-resistant journal anchor does not match the local journal tail.");
+        }
+
         return new Result<JournalSnapshot, JournalFailure>.Success(new(entries, anchorValue));
     }
 
-    private async Task<Result<JournalAnchor, JournalFailure>> ReadAnchorAsync(CancellationToken cancellationToken)
+    private async Task<Result<LocalJournalTailMarker, JournalFailure>> ReadAnchorAsync(CancellationToken cancellationToken)
     {
         string raw;
         try
@@ -378,11 +431,11 @@ public sealed class EncryptedFileJournal : INodeJournal
         }
         catch (IOException exception)
         {
-            return Failure<JournalAnchor>("journal-anchor-read-failed", exception.Message);
+            return Failure<LocalJournalTailMarker>("journal-anchor-read-failed", exception.Message);
         }
         catch (UnauthorizedAccessException exception)
         {
-            return Failure<JournalAnchor>("journal-anchor-read-failed", exception.Message);
+            return Failure<LocalJournalTailMarker>("journal-anchor-read-failed", exception.Message);
         }
 
         EncryptedJournalRecord? encrypted;
@@ -392,28 +445,28 @@ public sealed class EncryptedFileJournal : INodeJournal
         }
         catch (JsonException)
         {
-            return Failure<JournalAnchor>("journal-anchor-invalid", "The durable journal anchor is not valid JSON.");
+            return Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor is not valid JSON.");
         }
 
         if (encrypted is null || protector.Decrypt(encrypted) is not Result<byte[], JournalFailure>.Success plaintext)
         {
-            return Failure<JournalAnchor>("journal-anchor-invalid", "The durable journal anchor cannot be authenticated.");
+            return Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor cannot be authenticated.");
         }
 
         try
         {
-            return JsonSerializer.Deserialize<JournalAnchor>(plaintext.Value, SerializerOptions) is { } anchor
-                ? new Result<JournalAnchor, JournalFailure>.Success(anchor)
-                : Failure<JournalAnchor>("journal-anchor-invalid", "The durable journal anchor is empty.");
+            return JsonSerializer.Deserialize<LocalJournalTailMarker>(plaintext.Value, SerializerOptions) is { } anchor
+                ? new Result<LocalJournalTailMarker, JournalFailure>.Success(anchor)
+                : Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor is empty.");
         }
         catch (JsonException)
         {
-            return Failure<JournalAnchor>("journal-anchor-invalid", "The durable journal anchor has an invalid payload.");
+            return Failure<LocalJournalTailMarker>("journal-anchor-invalid", "The durable journal anchor has an invalid payload.");
         }
     }
 
     private async Task<Result<bool, JournalFailure>> WriteAnchorAsync(
-        JournalAnchor anchor,
+        LocalJournalTailMarker anchor,
         CancellationToken cancellationToken)
     {
         var temporaryPath = $"{AnchorPath()}.tmp";
@@ -455,7 +508,7 @@ public sealed class EncryptedFileJournal : INodeJournal
 
     private sealed record JournalSnapshot(
         IReadOnlyList<JournalEntry> Entries,
-        JournalAnchor Anchor);
+        LocalJournalTailMarker Anchor);
 }
 
 public sealed class InMemoryJournal : INodeJournal
@@ -486,4 +539,44 @@ public sealed class InMemoryJournal : INodeJournal
     public Task<Result<IReadOnlyList<JournalEntry>, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
         Task.FromResult<Result<IReadOnlyList<JournalEntry>, JournalFailure>>(
             new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success(entries.ToArray()));
+}
+
+public sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore
+{
+    private RollbackAnchor anchor = RollbackAnchor.Empty;
+
+    public Task<Result<RollbackAnchor, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+            new Result<RollbackAnchor, JournalFailure>.Success(anchor));
+
+    public Task<Result<RollbackAnchor, JournalFailure>> AdvanceAsync(
+        RollbackAnchor next,
+        CancellationToken cancellationToken)
+    {
+        if (next.Ordinal != anchor.Ordinal + 1 || string.IsNullOrWhiteSpace(next.TailHash))
+        {
+            return Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+                new Result<RollbackAnchor, JournalFailure>.Failure(
+                    new("rollback-anchor-nonmonotonic", "Rollback anchors must advance by one durable journal ordinal.")));
+        }
+
+        anchor = next;
+        return Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+            new Result<RollbackAnchor, JournalFailure>.Success(anchor));
+    }
+}
+
+public sealed class UnavailableRollbackAnchorStore : IRollbackAnchorStore
+{
+    public Task<Result<RollbackAnchor, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
+        Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+            new Result<RollbackAnchor, JournalFailure>.Failure(
+                new("rollback-anchor-unavailable", "A rollback-resistant anchor store is required before restoring the journal.")));
+
+    public Task<Result<RollbackAnchor, JournalFailure>> AdvanceAsync(
+        RollbackAnchor next,
+        CancellationToken cancellationToken) =>
+        Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
+            new Result<RollbackAnchor, JournalFailure>.Failure(
+                new("rollback-anchor-unavailable", "A rollback-resistant anchor store is required before recording the journal.")));
 }

@@ -136,6 +136,8 @@ public sealed record AttemptRuntime(
     Sha256Digest BundleDigest,
     Sha256Digest PolicyDigest,
     Sha256Digest ReleaseDigest,
+    Sha256Digest CapabilityGrantDigest,
+    DateTimeOffset AuthorityExpiresAt,
     AttemptExecutionState State,
     DateTimeOffset UpdatedAt);
 
