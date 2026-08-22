@@ -146,6 +146,13 @@ public sealed class ContractValidationTests
         Assert.Equal(
             "invalid-owner-reference",
             Assert.IsType<Result<Project, ContractValidationError>.Failure>(nullOwner).Error.Code);
+
+        var unsupportedProvider = V1Alpha1Json.DeserializeProject(
+            json.Replace("\"GitHubRelease\"", "\"UnsupportedArchive\"", StringComparison.Ordinal));
+
+        Assert.Equal(
+            "unsupported-provider-profile",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(unsupportedProvider).Error.Code);
     }
 
     [Fact]
@@ -167,10 +174,10 @@ public sealed class ContractValidationTests
                 IsolationProfile.IsolatedContainer,
                 new GitHubIssue(42),
                 new SchedulingRequirements(
-                    null,
-                    ImmutableArray<Toleration>.Empty,
-                    null,
-                    null,
+                    new LabelSelector(ImmutableDictionary<string, string>.Empty.Add("os", "macos")),
+                    [new Toleration("dedicated", "Equal", "armada", TaintEffect.NoSchedule)],
+                    new LabelSelector(ImmutableDictionary<string, string>.Empty.Add("region", "ap-southeast-2")),
+                    new LabelSelector(ImmutableDictionary<string, string>.Empty.Add("host", "other")),
                     new ResourceRequirements(1000, 0, 1024, 2048),
                     12m,
                     "Preferred"),
@@ -180,12 +187,12 @@ public sealed class ContractValidationTests
             new WorkloadStatus(
                 Status(),
                 WorkloadLifecycleState.StartApproved,
-                null,
-                null,
-                null,
-                null,
-                null,
-                null));
+                ResourceId.New(),
+                new ActorId("issue-master"),
+                new ActorId("successor"),
+                DateTimeOffset.Parse("2026-08-22T00:05:00Z"),
+                DateTimeOffset.Parse("2026-08-22T00:10:00Z"),
+                new GitHubPullRequest(84, "PR_kwDO")));
 
         var json = V1Alpha1Json.Serialize(workload);
         using var document = JsonDocument.Parse(json);
@@ -205,6 +212,13 @@ public sealed class ContractValidationTests
         Assert.Equal(
             "invalid-isolation-profile",
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(invalidEnum).Error.Code);
+
+        var invalidTaint = V1Alpha1Json.DeserializeWorkload(
+            json.Replace("\"NoSchedule\"", "\"UnsupportedTaint\"", StringComparison.Ordinal));
+
+        Assert.Equal(
+            "invalid-taint-effect",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(invalidTaint).Error.Code);
     }
 
     [Fact]
