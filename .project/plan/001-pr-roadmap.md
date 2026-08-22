@@ -129,8 +129,8 @@ tooling. GitHub remains a non-authoritative human view and archive boundary.
   explicitly non-scientific canary.
 - Focused adversarial/replay tests pass with 87.39% application and 93.82%
   GitHub adapter line coverage. The repository's tracked PostgreSQL
-  verification remains required in CI because the local host has no PostgreSQL
-  service.
+  verification passed in GitHub Actions run 32583199545; the local host
+  explicitly rejects missing PostgreSQL coverage rather than skipping it.
 
 **Compatibility:** consumes only the accepted v1 GitHub/GitHubRelease typed
 profiles. It creates no product-root `.armada/` configuration and introduces no

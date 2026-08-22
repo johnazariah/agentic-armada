@@ -1,6 +1,6 @@
 # 2026-08-23: GitHub projection, evidence archive and PFQE observer tooling
 
-**Status:** implementation complete; PostgreSQL CI verification pending  
+**Status:** complete  
 **Related:** ADR 0003, ADR 0004, ADR 0005; specs 001, 003, 007; threat model 001; migration 001; plan 001
 
 ## Work recorded
@@ -28,8 +28,9 @@
 
 `dotnet msbuild eng/Verify.proj /t:Verify` was invoked locally. The environment
 has no Docker daemon or `ARMADA_POSTGRES_CONNECTION`, so PostgreSQL integration
-coverage failed explicitly as required rather than being skipped. The tracked CI
-workflow supplies PostgreSQL 16 and remains the pending verification step.
+coverage failed explicitly as required rather than being skipped. GitHub Actions
+run 32583199545 then supplied PostgreSQL 16 and passed the tracked `Verify`
+target, including its PostgreSQL integration coverage.
 
 ## Deferred boundaries
 
