@@ -240,6 +240,9 @@ public sealed class ContractValidationTests
         Assert.Equal("GitHubCopilot", root.GetProperty("spec").GetProperty("sessionProvider").GetString());
         Assert.Equal("GitHubRelease", root.GetProperty("spec").GetProperty("evidence").GetProperty("archiveProvider").GetString());
         Assert.Equal("start-approved", root.GetProperty("status").GetProperty("lifecycle").GetString());
+        var scheduling = root.GetProperty("spec").GetProperty("scheduling");
+        Assert.Equal(12m, scheduling.GetProperty("maxEstimatedCost").GetDecimal());
+        Assert.False(scheduling.TryGetProperty("maximumEstimatedCost", out _));
         Assert.Equal(
             workload.Spec.BundleDigest,
             Assert.IsType<Result<Workload, ContractValidationError>.Success>(roundTrip).Value.Spec.BundleDigest);
@@ -256,6 +259,13 @@ public sealed class ContractValidationTests
         Assert.Equal(
             "invalid-taint-effect",
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(invalidTaint).Error.Code);
+
+        var negativeSchemaCost = V1Alpha1Json.DeserializeWorkload(
+            json.Replace("\"maxEstimatedCost\":12", "\"maxEstimatedCost\":-1", StringComparison.Ordinal));
+
+        Assert.Equal(
+            "invalid-maximum-estimated-cost",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(negativeSchemaCost).Error.Code);
     }
 
     [Fact]

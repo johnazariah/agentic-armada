@@ -537,7 +537,7 @@ public sealed record V1Alpha1SessionProfileWire(string Provider, string ProfileD
 public sealed record V1Alpha1WorkloadSpecWire(string BundleDigest, string PolicyDigest, string SourceProvider, string Repository, string SourceRevision, string ConfigDigest, IReadOnlyList<string>? ActionSchemas, string SessionProvider, string SessionAuthority, string IsolationProfile, V1Alpha1GitHubIssueWire? GithubIssue, V1Alpha1SchedulingWire? Scheduling, V1Alpha1WorkloadEvidenceWire? Evidence);
 public sealed record V1Alpha1GitHubIssueWire(int Number, string? NodeId);
 public sealed record V1Alpha1WorkloadEvidenceWire(string ArchiveProvider, string ArchiveRepository, string RetentionClass);
-public sealed record V1Alpha1SchedulingWire(V1Alpha1LabelSelectorWire? HostSelector, IReadOnlyList<V1Alpha1TolerationWire>? Tolerations, V1Alpha1LabelSelectorWire? Affinity, V1Alpha1LabelSelectorWire? AntiAffinity, V1Alpha1ResourceRequirementsWire? Resources, decimal? MaximumEstimatedCost, string? CheckpointMode);
+public sealed record V1Alpha1SchedulingWire(V1Alpha1LabelSelectorWire? HostSelector, IReadOnlyList<V1Alpha1TolerationWire>? Tolerations, V1Alpha1LabelSelectorWire? Affinity, V1Alpha1LabelSelectorWire? AntiAffinity, V1Alpha1ResourceRequirementsWire? Resources, [property: JsonPropertyName("maxEstimatedCost")] decimal? MaximumEstimatedCost, string? CheckpointMode);
 public sealed record V1Alpha1LabelSelectorWire(ImmutableDictionary<string, string>? MatchLabels);
 public sealed record V1Alpha1TolerationWire(string Key, string Operator, string? Value, string Effect);
 public sealed record V1Alpha1ResourceRequirementsWire(int CpuMillicores, int GpuCount, long MemoryBytes, long StorageBytes);
