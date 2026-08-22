@@ -178,6 +178,11 @@ public static class V1Alpha1Json
                 isolation,
                 lifecycle);
         }
+        if (metadataSuccess.Value.ProjectId is null)
+        {
+            return Failure<Workload>("project-scope-required", "Workload metadata requires a projectId.");
+        }
+
         if (scheduling is Result<SchedulingRequirements, ContractValidationError>.Failure schedulingFailure)
         {
             return new Result<Workload, ContractValidationError>.Failure(schedulingFailure.Error);

@@ -271,6 +271,21 @@ public sealed class ContractValidationTests
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
     }
 
+    [Fact]
+    public void Workload_wire_requires_project_scoped_metadata()
+    {
+        var wire = ValidWorkloadWire() with
+        {
+            Metadata = ValidWorkloadWire().Metadata! with { ProjectId = null }
+        };
+
+        var result = V1Alpha1Json.FromWire(wire);
+
+        Assert.Equal(
+            "project-scope-required",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
     [Theory]
     [InlineData("invalid-resource-id")]
     [InlineData("invalid-lifecycle")]
