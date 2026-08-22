@@ -121,17 +121,20 @@ public sealed class ReleaseDistributionTests
     }
 
     [Fact]
-    public async Task Failed_staging_does_not_confirm_health_activate_or_rollback_an_unstaged_release()
+    public async Task Failed_staging_is_treated_as_partially_mutated_and_rolls_back_before_returning()
     {
         var fixture = new ReleaseFixture();
         var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
-        var staging = new RecordingStaging(stage: Failure<bool>("stage-failed", "The staging volume is unavailable."));
+        var staging = new RecordingStaging(
+            stage: Failure<bool>("stage-failed", "The staging volume is unavailable."),
+            stageLeavesStagedOnFailure: true);
         var coordinator = new NodeUpgradeCoordinator(new InMemoryJournal(), staging, new FixedClock(fixture.Now));
 
         var result = await coordinator.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
 
-        Assert.Equal("stage-failed", Failure(result).Code);
-        Assert.Equal(["stage"], staging.Operations);
+        Assert.True(Success(result).RolledBack);
+        Assert.Equal("stage-failed", Success(result).Code);
+        Assert.Equal(["stage", "rollback"], staging.Operations);
     }
 
     [Fact]
@@ -343,22 +346,24 @@ public sealed class ReleaseDistributionTests
         var statusRefusal = new RecordingStaging(
             statusResult: Failure<UpgradePlatformStatus>("status-unavailable", "The platform state cannot be queried."));
 
+        var inProgressStaging = new RecordingStaging();
         var inProgress = await new NodeUpgradeCoordinator(
             journal,
-            new RecordingStaging(),
+            inProgressStaging,
             new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
         var unavailable = await new NodeUpgradeCoordinator(
             new InMemoryJournal(),
             statusRefusal,
             new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
 
-        Assert.Equal("upgrade-transition-in-progress", Failure(inProgress).Code);
+        Assert.True(Success(inProgress).RolledBack);
+        Assert.Equal(["rollback"], inProgressStaging.Operations);
         Assert.Empty(statusRefusal.Operations);
         Assert.Equal("status-unavailable", Failure(unavailable).Code);
     }
 
     [Fact]
-    public async Task False_stage_response_is_refused_before_health_or_activation()
+    public async Task False_stage_response_rolls_back_before_health_or_activation()
     {
         var fixture = new ReleaseFixture();
         var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
@@ -369,8 +374,9 @@ public sealed class ReleaseDistributionTests
             staging,
             new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
 
-        Assert.Equal("upgrade-operation-refused", Failure(result).Code);
-        Assert.Equal(["stage"], staging.Operations);
+        Assert.True(Success(result).RolledBack);
+        Assert.Equal("upgrade-operation-refused", Success(result).Code);
+        Assert.Equal(["stage", "rollback"], staging.Operations);
     }
 
     [Fact]
@@ -505,6 +511,34 @@ public sealed class ReleaseDistributionTests
 
         Assert.True(Success(result).Activated);
         Assert.True(staging.Renewals > 3);
+    }
+
+    [Fact]
+    public async Task Failed_rollback_blocks_forward_reconciliation_until_recovery_retries_it()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var failing = new RecordingStaging(
+            health: Failure<bool>("health-failed", "Health failed."),
+            rollback: Failure<bool>("rollback-failed", "Rollback transport failed."));
+        var first = new NodeUpgradeCoordinator(journal, failing, new FixedClock(fixture.Now));
+
+        var failed = await first.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+        var recovery = new RecordingStaging(initialStatus: UpgradePlatformStatus.Staged);
+        var restarted = new NodeUpgradeCoordinator(
+            journal,
+            recovery,
+            new FixedClock(fixture.Now.AddMinutes(6)));
+        var recovered = await restarted.ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+        var entries = Success(await journal.ReadAsync(CancellationToken.None));
+
+        Assert.Equal("rollback-failed", Failure(failed).Code);
+        Assert.True(Success(recovered).RolledBack);
+        Assert.Equal(["rollback"], recovery.Operations);
+        Assert.DoesNotContain("health", recovery.Operations);
+        Assert.DoesNotContain("activate", recovery.Operations);
+        Assert.Equal(UpgradePhase.RolledBack, entries.Last().Upgrade!.Phase);
     }
 
     private static T Success<T, TFailure>(Result<T, TFailure> result) =>
@@ -715,7 +749,8 @@ public sealed class ReleaseDistributionTests
         Result<bool, UpgradeFailure>? activation = null,
         Result<bool, UpgradeFailure>? rollback = null,
         UpgradePlatformStatus initialStatus = UpgradePlatformStatus.NotStaged,
-        Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = null) : IUpgradeStaging
+        Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = null,
+        bool stageLeavesStagedOnFailure = false) : IUpgradeStaging
     {
         private UpgradePlatformStatus status = initialStatus;
         private readonly Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = statusResult;
@@ -753,7 +788,8 @@ public sealed class ReleaseDistributionTests
             }
             Operations.Add("stage");
             var result = stage ?? Success<bool, UpgradeFailure>(true);
-            if (result is Result<bool, UpgradeFailure>.Success { Value: true })
+            if (result is Result<bool, UpgradeFailure>.Success { Value: true } ||
+                stageLeavesStagedOnFailure)
             {
                 status = UpgradePlatformStatus.Staged;
             }

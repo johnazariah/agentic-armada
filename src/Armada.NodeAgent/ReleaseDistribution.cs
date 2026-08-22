@@ -314,10 +314,16 @@ public sealed class NodeUpgradeCoordinator(
             return new Result<UpgradeExecutionResult, UpgradeFailure>.Success(terminal);
         }
 
+        var historyValues = ((Result<IReadOnlyList<UpgradeJournalEvent>, UpgradeFailure>.Success)history).Value;
+        if (HasPhase(historyValues, UpgradePhase.RollbackClaimed))
+        {
+            return await ResumeRollbackAsync(identity, plan, cancellationToken);
+        }
+
         var staged = await EnsureStageAsync(identity, plan, cancellationToken);
         if (staged is Result<bool, UpgradeFailure>.Failure stageFailure)
         {
-            return Failure(stageFailure.Error);
+            return await RollbackAfterFailureAsync(identity, plan, stageFailure.Error, cancellationToken);
         }
 
         var healthy = await EnsureHealthAsync(identity, plan, cancellationToken);
@@ -518,6 +524,7 @@ public sealed class NodeUpgradeCoordinator(
         {
             return Failure(claimFailure.Error);
         }
+
         var fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)claim).Value;
 
         var status = await staging.GetStatusAsync(plan, cancellationToken);
@@ -554,6 +561,18 @@ public sealed class NodeUpgradeCoordinator(
             : new Result<UpgradeExecutionResult, UpgradeFailure>.Success(
                 new(false, true, failure.Code, failure.Message));
     }
+
+    private async Task<Result<UpgradeExecutionResult, UpgradeFailure>> ResumeRollbackAsync(
+        NodeDeviceIdentity identity,
+        UpgradePlan plan,
+        CancellationToken cancellationToken) =>
+        await RollbackAfterFailureAsync(
+            identity,
+            plan,
+            new(
+                "rollback-pending",
+                "A prior upgrade left a durable rollback claim that must complete before forward reconciliation can resume."),
+            cancellationToken);
 
     private async Task<Result<UpgradeOperationFence, UpgradeFailure>> ClaimAsync(
         NodeDeviceIdentity identity,

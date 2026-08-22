@@ -22,7 +22,10 @@ threat model 001 and security-review package 002.
   platform status after a stale stage, health, activation, or rollback claim
   and never blindly repeats activation. Each staging operation observes a
   renewable monotonic fence; once a successor takes an expired claim, the
-  superseded operation cannot stage or record completion.
+  superseded operation cannot stage or record completion. An uncertain stage
+  result now requires rollback, and a failed rollback remains a durable
+  rollback-pending state that blocks all forward upgrade reconciliation until
+  recovery completes it.
 - Added compatibility, release-process, and security-review gate records under
   `.project/releases/`.
 
@@ -34,7 +37,8 @@ protocol ordering (`alpha10` versus `alpha2`), compatibility, channel pinning,
 revocation, replay/downgrade/anchor refusal, atomic journal claims, recovery
 after each claimed effect boundary, expired in-flight fencing, hostile
 null-shaped manifests/signatures, health-gated activation, failed activation
-rollback, and journal replay.
+rollback, partial-stage rollback, failed-rollback restart recovery, and
+journal replay.
 
 ## Remaining blockers
 
