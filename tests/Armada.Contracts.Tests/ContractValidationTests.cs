@@ -1,4 +1,6 @@
 using Armada.Contracts;
+using System.Reflection;
+using System.Text.Json;
 
 namespace Armada.Contracts.Tests;
 
@@ -57,6 +59,19 @@ public sealed class ContractValidationTests
         var result = Sha256Digest.Parse(value);
 
         Assert.Equal(isValid, result.IsSuccess);
+    }
+
+    [Fact]
+    public void Sha256_digest_has_no_public_constructor_and_json_validation_is_fail_closed()
+    {
+        Assert.Empty(typeof(Sha256Digest).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+        Assert.Throws<JsonException>(
+            () => JsonSerializer.Deserialize<Sha256Digest>("\"sha256:not-a-digest\""));
+
+        var digest = Digest('c');
+        var roundTrip = JsonSerializer.Deserialize<Sha256Digest>(JsonSerializer.Serialize(digest));
+
+        Assert.Equal(digest, roundTrip);
     }
 
     [Fact]

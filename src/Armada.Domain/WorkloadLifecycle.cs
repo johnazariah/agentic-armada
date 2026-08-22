@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Globalization;
 using Armada.Contracts;
 
 namespace Armada.Domain;
@@ -13,10 +14,9 @@ public enum TerminalOutcome
 
 public sealed record LifecycleFailure(string Code, string Message);
 
-public sealed record AppliedTransition(LifecycleCommand Command)
-{
-    public TransitionId Id => Command.Id;
-}
+public sealed record AppliedTransition(
+    TransitionId Id,
+    string CanonicalPayload);
 
 public sealed record WorkloadLifecycle(
     ResourceId WorkloadId,
@@ -26,6 +26,8 @@ public sealed record WorkloadLifecycle(
     ResourceId? AdmissionDecisionReference,
     ResourceId? AdmittedNodeReference,
     SessionAuthority? AdmittedSessionAuthority,
+    Sha256Digest? AdmittedBundleDigest,
+    Sha256Digest? AdmittedPolicyDigest,
     ResourceId? AssignedNodeReference,
     ResourceId? AttemptReference,
     ResourceId? LeaseReference,
@@ -42,6 +44,8 @@ public sealed record WorkloadLifecycle(
             generation,
             resourceVersion,
             WorkloadLifecycleState.Desired,
+            null,
+            null,
             null,
             null,
             null,
@@ -159,9 +163,10 @@ public static class WorkloadLifecycleTransitions
         LifecycleCommand command)
     {
         var replay = lifecycle.AppliedTransitions.FirstOrDefault(applied => applied.Id == command.Id);
+        var canonicalPayload = LifecycleCommandIdentity.Create(command);
         if (replay is not null)
         {
-            return replay.Command == command
+            return replay.CanonicalPayload == canonicalPayload
                 ? new Result<WorkloadLifecycle, LifecycleFailure>.Success(lifecycle)
                 : Failure(
                     "transition-replay-conflict",
@@ -228,7 +233,9 @@ public static class WorkloadLifecycleTransitions
             WorkloadLifecycleState.Admitted,
             admissionDecisionReference: decision.Metadata.Uid,
             admittedNodeReference: decision.Spec.NodeReference,
-            admittedSessionAuthority: decision.Spec.SessionAuthority);
+            admittedSessionAuthority: decision.Spec.SessionAuthority,
+            admittedBundleDigest: decision.Spec.BundleDigest,
+            admittedPolicyDigest: decision.Spec.PolicyDigest);
     }
 
     private static Result<WorkloadLifecycle, LifecycleFailure> ApplyAssignment(
@@ -266,14 +273,18 @@ public static class WorkloadLifecycleTransitions
         var attempt = command.Attempt;
         if (lifecycle.AdmissionDecisionReference is null ||
             lifecycle.AssignedNodeReference is null ||
+            lifecycle.AdmittedBundleDigest is null ||
+            lifecycle.AdmittedPolicyDigest is null ||
             attempt.Spec.WorkloadReference != lifecycle.WorkloadId ||
             attempt.Spec.WorkloadGeneration != lifecycle.Generation ||
             attempt.Spec.NodeReference != lifecycle.AssignedNodeReference ||
-            attempt.Spec.AdmissionDecisionReference != lifecycle.AdmissionDecisionReference)
+            attempt.Spec.AdmissionDecisionReference != lifecycle.AdmissionDecisionReference ||
+            attempt.Spec.BundleDigest != lifecycle.AdmittedBundleDigest ||
+            attempt.Spec.PolicyDigest != lifecycle.AdmittedPolicyDigest)
         {
             return Failure(
                 "invalid-attempt-binding",
-                "Claim requires an attempt bound to the workload generation, selected node, and admitted decision.");
+                "Claim requires an attempt bound to the workload generation, selected node, admitted decision, bundle, and policy.");
         }
 
         return Succeed(
@@ -420,6 +431,8 @@ public static class WorkloadLifecycleTransitions
         ResourceId? admissionDecisionReference = null,
         ResourceId? admittedNodeReference = null,
         SessionAuthority? admittedSessionAuthority = null,
+        Sha256Digest? admittedBundleDigest = null,
+        Sha256Digest? admittedPolicyDigest = null,
         ResourceId? assignedNodeReference = null,
         ResourceId? attemptReference = null,
         ResourceId? leaseReference = null,
@@ -433,13 +446,15 @@ public static class WorkloadLifecycleTransitions
                 AdmissionDecisionReference = admissionDecisionReference ?? lifecycle.AdmissionDecisionReference,
                 AdmittedNodeReference = admittedNodeReference ?? lifecycle.AdmittedNodeReference,
                 AdmittedSessionAuthority = admittedSessionAuthority ?? lifecycle.AdmittedSessionAuthority,
+                AdmittedBundleDigest = admittedBundleDigest ?? lifecycle.AdmittedBundleDigest,
+                AdmittedPolicyDigest = admittedPolicyDigest ?? lifecycle.AdmittedPolicyDigest,
                 AssignedNodeReference = assignedNodeReference ?? lifecycle.AssignedNodeReference,
                 AttemptReference = attemptReference ?? lifecycle.AttemptReference,
                 LeaseReference = leaseReference ?? lifecycle.LeaseReference,
                 RunningSessionReference = runningSessionReference ?? lifecycle.RunningSessionReference,
                 PendingOutcome = pendingOutcome,
                 AppliedTransitions = lifecycle.AppliedTransitions.Add(
-                    new(command))
+                    new(command.Id, LifecycleCommandIdentity.Create(command)))
             });
 
     private static Result<WorkloadLifecycle, LifecycleFailure> InvalidPredecessor(
@@ -453,4 +468,134 @@ public static class WorkloadLifecycleTransitions
         string code,
         string message) =>
         new Result<WorkloadLifecycle, LifecycleFailure>.Failure(new(code, message));
+}
+
+internal static class LifecycleCommandIdentity
+{
+    public static string Create(LifecycleCommand command) =>
+        Combine(
+            command.GetType().Name,
+            command.Id.ToString(),
+            command.ExpectedResourceVersion.Value,
+            command.ResultingResourceVersion.Value,
+            Number(command.ExpectedGeneration),
+            command switch
+            {
+                AdmitWorkload admit => Admission(admit),
+                AssignWorkload assign => assign.NodeReference.ToString(),
+                ClaimWorkload claim => Attempt(claim.Attempt),
+                ApproveStart approve => Combine(Lease(approve.Lease), Timestamp(approve.EvaluatedAt)),
+                StartWorkload start => Combine(Session(start.Session), Lease(start.Lease), Timestamp(start.EvaluatedAt)),
+                SubmitTerminalObservation terminal => Combine(
+                    terminal.Outcome.ToString(),
+                    terminal.ObservingSessionReference.ToString()),
+                FinaliseTerminalState finalise => Combine(
+                    finalise.Outcome.ToString(),
+                    Evidence(finalise.Evidence)),
+                _ => throw new ArgumentOutOfRangeException(nameof(command), command, "Unsupported lifecycle command.")
+            });
+
+    private static string Admission(AdmitWorkload command)
+    {
+        var decision = command.Decision;
+        var spec = decision.Spec;
+
+        return Combine(
+            decision.Metadata.Uid.ToString(),
+            spec.WorkloadReference.ToString(),
+            Number(spec.WorkloadGeneration),
+            spec.NodeReference.ToString(),
+            spec.BundleDigest.Value,
+            spec.PolicyDigest.Value,
+            Values(spec.ApprovedActions),
+            spec.SessionAuthority.ToString(),
+            spec.IsolationProfile.ToString(),
+            Resources(spec.ResourceLimits),
+            Values(spec.CredentialGrantDigests.Select(static digest => digest.Value)),
+            Values(spec.NetworkScope),
+            spec.EvidenceRequirementsDigest.Value,
+            Timestamp(spec.ExpiresAt),
+            decision.Status.Decision.ToString(),
+            decision.Status.DecisionDigest?.Value,
+            Timestamp(command.EvaluatedAt));
+    }
+
+    private static string Attempt(Attempt attempt)
+    {
+        var spec = attempt.Spec;
+
+        return Combine(
+            attempt.Metadata.Uid.ToString(),
+            spec.WorkloadReference.ToString(),
+            Number(spec.WorkloadGeneration),
+            spec.NodeReference.ToString(),
+            spec.AdmissionDecisionReference.ToString(),
+            spec.BundleDigest.Value,
+            spec.PolicyDigest.Value,
+            spec.CapabilityGrantDigest.Value,
+            spec.EnvironmentDigest.Value);
+    }
+
+    private static string Lease(Lease lease)
+    {
+        var spec = lease.Spec;
+
+        return Combine(
+            lease.Metadata.Uid.ToString(),
+            spec.AttemptReference.ToString(),
+            spec.NodeReference.ToString(),
+            Number(spec.HolderEpoch),
+            Timestamp(spec.ExpiresAt),
+            Timestamp(lease.Status.RevokedAt));
+    }
+
+    private static string Session(AgentSession session)
+    {
+        var spec = session.Spec;
+
+        return Combine(
+            session.Metadata.Uid.ToString(),
+            spec.AttemptReference.ToString(),
+            spec.NodeReference.ToString(),
+            spec.Provider.ProfileDigest.Value,
+            spec.Role.ToString(),
+            spec.IdempotencyKey,
+            spec.ParentSessionReference?.ToString());
+    }
+
+    private static string Evidence(EvidenceReceipt evidence)
+    {
+        var spec = evidence.Spec;
+
+        return Combine(
+            evidence.Metadata.Uid.ToString(),
+            spec.AttemptReference.ToString(),
+            spec.ManifestDigest.Value,
+            spec.Archive.Repository.Value,
+            spec.ReleaseId,
+            spec.AssetDigest.Value,
+            evidence.Status.Verification.ToString(),
+            Timestamp(evidence.Status.VerifiedAt));
+    }
+
+    private static string Resources(ResourceRequirements resources) =>
+        Combine(
+            Number(resources.CpuMillicores),
+            Number(resources.GpuCount),
+            Number(resources.MemoryBytes),
+            Number(resources.StorageBytes));
+
+    private static string Values(IEnumerable<string> values) =>
+        Combine(values.OrderBy(static value => value, StringComparer.Ordinal).ToArray());
+
+    private static string? Timestamp(DateTimeOffset? value) =>
+        value?.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private static string Number<TNumber>(TNumber value)
+        where TNumber : IFormattable =>
+        value.ToString(null, CultureInfo.InvariantCulture);
+
+    private static string Combine(params string?[] values) =>
+        string.Concat(values.Select(static value =>
+            $"{value?.Length ?? -1}:{value ?? string.Empty};"));
 }

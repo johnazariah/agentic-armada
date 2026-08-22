@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Armada.Contracts;
 
@@ -32,8 +34,16 @@ public readonly record struct TransitionId(Guid Value)
     public override string ToString() => Value.ToString("D", CultureInfo.InvariantCulture);
 }
 
-public readonly record struct Sha256Digest(string Value)
+[JsonConverter(typeof(Sha256DigestJsonConverter))]
+public sealed record Sha256Digest
 {
+    private Sha256Digest(string value)
+    {
+        Value = value;
+    }
+
+    public string Value { get; }
+
     public static Result<Sha256Digest, ContractValidationError> Parse(string value) =>
         value is not null && value.Length == 71 &&
         value.StartsWith("sha256:", StringComparison.Ordinal) &&
@@ -44,6 +54,27 @@ public readonly record struct Sha256Digest(string Value)
                 new("invalid-sha256-digest", "A digest must be sha256: followed by 64 lowercase hexadecimal characters."));
 
     public override string ToString() => Value;
+}
+
+public sealed class Sha256DigestJsonConverter : JsonConverter<Sha256Digest>
+{
+    public override Sha256Digest Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType != JsonTokenType.String)
+        {
+            throw new JsonException("A SHA-256 digest must be a JSON string.");
+        }
+
+        return Sha256Digest.Parse(reader.GetString() ?? string.Empty) switch
+        {
+            Result<Sha256Digest, ContractValidationError>.Success success => success.Value,
+            Result<Sha256Digest, ContractValidationError>.Failure failure => throw new JsonException(failure.Error.Message),
+            _ => throw new JsonException("Digest validation returned an unsupported result.")
+        };
+    }
+
+    public override void Write(Utf8JsonWriter writer, Sha256Digest value, JsonSerializerOptions options) =>
+        writer.WriteStringValue(value.Value);
 }
 
 public sealed record RepositoryName

@@ -66,16 +66,44 @@ public sealed class WorkloadLifecycleTests
         var admission = fixture.Admit(desired);
         var admitted = Apply(desired, admission);
 
-        var replay = Apply(admitted, admission);
+        var reconstructedReplay = fixture.Admit(desired) with { Id = admission.Id };
+        var replay = Apply(admitted, reconstructedReplay);
         var conflictingReplay = WorkloadLifecycleTransitions.Apply(
             admitted,
-            admission with { ResultingResourceVersion = new ResourceVersion("different") });
+            reconstructedReplay with { ResultingResourceVersion = new ResourceVersion("different") });
 
         Assert.Equal(admitted, replay);
         Assert.Single(replay.AppliedTransitions);
         Assert.Equal(
             "transition-replay-conflict",
             Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(conflictingReplay).Error.Code);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Claim_requires_attempt_bundle_and_policy_to_match_admission(bool bundleMismatch)
+    {
+        var fixture = new LifecycleFixture();
+        var desired = fixture.Desired();
+        var admitted = Apply(desired, fixture.Admit(desired));
+        var assigned = Apply(admitted, fixture.Assign(admitted));
+        var claim = fixture.Claim(assigned);
+        var mismatchedClaim = claim with
+        {
+            Attempt = claim.Attempt with
+            {
+                Spec = bundleMismatch
+                    ? claim.Attempt.Spec with { BundleDigest = fixture.AlternateDigest }
+                    : claim.Attempt.Spec with { PolicyDigest = fixture.AlternateDigest }
+            }
+        };
+
+        var result = WorkloadLifecycleTransitions.Apply(assigned, mismatchedClaim);
+
+        Assert.Equal(
+            "invalid-attempt-binding",
+            Assert.IsType<Result<WorkloadLifecycle, LifecycleFailure>.Failure>(result).Error.Code);
     }
 
     [Theory]
@@ -176,6 +204,10 @@ internal sealed class LifecycleFixture
     private static readonly Sha256Digest Digest =
         Assert.IsType<Result<Sha256Digest, ContractValidationError>.Success>(
             Sha256Digest.Parse($"sha256:{new string('a', 64)}")).Value;
+
+    public Sha256Digest AlternateDigest { get; } =
+        Assert.IsType<Result<Sha256Digest, ContractValidationError>.Success>(
+            Sha256Digest.Parse($"sha256:{new string('b', 64)}")).Value;
 
     public ResourceId WorkloadId { get; } = ResourceId.New();
     public ResourceId NodeId { get; } = ResourceId.New();
