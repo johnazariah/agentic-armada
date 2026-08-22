@@ -106,34 +106,49 @@ public sealed class NodeAgentBoundary
         return new Result<EvidenceObservation, NodeAgentFailure>.Success(observation);
     }
 
-    public Task<Result<AttemptRuntime, NodeAgentFailure>> AuthoriseProcessStartAsync(
+    public async Task<Result<AttemptRuntime, NodeAgentFailure>> AuthoriseProcessStartAsync(
         ResourceId attemptId,
         Sha256Digest capabilityGrantDigest,
         CancellationToken cancellationToken)
     {
         if (!state.Attempts.TryGetValue(attemptId, out var attempt))
         {
-            return Task.FromResult<Result<AttemptRuntime, NodeAgentFailure>>(
-                new Result<AttemptRuntime, NodeAgentFailure>.Failure(
-                    new("unknown-attempt-binding", "Process start requires a locally observed attempt.")));
+            return new Result<AttemptRuntime, NodeAgentFailure>.Failure(
+                new("unknown-attempt-binding", "Process start requires a locally observed attempt."));
+        }
+        if (attempt.State != AttemptExecutionState.Prepared)
+        {
+            return new Result<AttemptRuntime, NodeAgentFailure>.Failure(
+                new("attempt-not-prepared", "Only a durable prepared attempt can start a process."));
         }
         if (attempt.AuthorityExpiresAt <= clock.UtcNow)
         {
-            return Task.FromResult<Result<AttemptRuntime, NodeAgentFailure>>(
-                new Result<AttemptRuntime, NodeAgentFailure>.Failure(
-                    new("expired-authority", "The persisted attempt authority has expired.")));
+            return new Result<AttemptRuntime, NodeAgentFailure>.Failure(
+                new("expired-authority", "The persisted attempt authority has expired."));
         }
         if (capabilityGrantDigest is null ||
             attempt.CapabilityGrantDigest is null ||
             attempt.CapabilityGrantDigest != capabilityGrantDigest)
         {
-            return Task.FromResult<Result<AttemptRuntime, NodeAgentFailure>>(
-                new Result<AttemptRuntime, NodeAgentFailure>.Failure(
-                    new("capability-grant-mismatch", "Process start requires the capability grant bound to the durable attempt.")));
+            return new Result<AttemptRuntime, NodeAgentFailure>.Failure(
+                new("capability-grant-mismatch", "Process start requires the capability grant bound to the durable attempt."));
         }
 
-        return Task.FromResult<Result<AttemptRuntime, NodeAgentFailure>>(
-            new Result<AttemptRuntime, NodeAgentFailure>.Success(attempt));
+        if (ProcessSupervision.MarkStarted(attempt, clock.UtcNow) is not Result<AttemptRuntime, ProcessTransitionFailure>.Success started)
+        {
+            return new Result<AttemptRuntime, NodeAgentFailure>.Failure(
+                new("attempt-not-prepared", "The process start transition is not valid for this attempt."));
+        }
+
+        var entry = JournalEntry.ForAttemptStarted(NextOrdinal(), identity, started.Value, clock.UtcNow);
+        var persisted = await journal.AppendAsync(entry, cancellationToken);
+        if (persisted is Result<JournalEntry, JournalFailure>.Failure failure)
+        {
+            return Failure<AttemptRuntime>(failure.Error);
+        }
+
+        state = AgentState.Apply(state, ((Result<JournalEntry, JournalFailure>.Success)persisted).Value);
+        return new Result<AttemptRuntime, NodeAgentFailure>.Success(started.Value);
     }
 
     private long NextOrdinal() => state.LastJournalOrdinal + 1;

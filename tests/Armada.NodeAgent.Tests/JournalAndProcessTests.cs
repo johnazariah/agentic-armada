@@ -145,19 +145,21 @@ public sealed class JournalAndProcessTests
     }
 
     [Fact]
-    public async Task Journal_fails_closed_when_a_rollback_resistant_anchor_is_unavailable()
+    public async Task Production_journal_fails_closed_without_a_platform_rollback_anchor()
     {
         var path = Path.Combine(Path.GetTempPath(), $"armada-journal-{Guid.NewGuid():N}.log");
         var journal = new EncryptedFileJournal(
             path,
-            new AesGcmJournalProtector(RandomNumberGenerator.GetBytes(32)),
-            new UnavailableRollbackAnchorStore());
+            new AesGcmJournalProtector(RandomNumberGenerator.GetBytes(32)));
 
         var result = await journal.ReadAsync(CancellationToken.None);
 
         Assert.Equal(
-            "rollback-anchor-unavailable",
+            "rollback-anchor-platform-unavailable",
             Assert.IsType<Result<IReadOnlyList<JournalEntry>, JournalFailure>.Failure>(result).Error.Code);
+        Assert.DoesNotContain(
+            typeof(EncryptedFileJournal).GetConstructors(),
+            constructor => constructor.GetParameters().Any(parameter => parameter.ParameterType == typeof(IRollbackAnchorStore)));
     }
 
     [Fact]

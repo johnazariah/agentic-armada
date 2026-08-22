@@ -8,6 +8,7 @@ namespace Armada.NodeAgent;
 public enum JournalEntryType
 {
     CommandDecision,
+    AttemptStarted,
     EvidenceObservation
 }
 
@@ -118,6 +119,52 @@ public sealed record JournalEntry(
             observation.ManifestDigest,
             observation.OutputDigest,
             observation.ObservedAt);
+
+    public static JournalEntry ForAttemptStarted(
+        long ordinal,
+        NodeDeviceIdentity identity,
+        AttemptRuntime attempt,
+        DateTimeOffset recordedAt) =>
+        new(
+            ordinal,
+            JournalEntryType.AttemptStarted,
+            identity.NodeId,
+            identity.IdentityEpoch,
+            0,
+            0,
+            Guid.Empty,
+            Guid.Empty,
+            $"attempt-start:{attempt.AttemptId}",
+            ProtocolIdentity.Join(
+                attempt.ProjectId.ToString(),
+                attempt.WorkloadId.ToString(),
+                attempt.AttemptId.ToString(),
+                attempt.AdmissionDecisionReference.ToString(),
+                attempt.LeaseReference.ToString(),
+                attempt.BundleDigest.Value,
+                attempt.PolicyDigest.Value,
+                attempt.ReleaseDigest.Value,
+                attempt.CapabilityGrantDigest.Value,
+                attempt.AuthorityExpiresAt.ToUniversalTime().ToString("O")),
+            true,
+            false,
+            "attempt-started",
+            "The attempt entered durable running supervision.",
+            attempt.ProjectId,
+            attempt.WorkloadId,
+            attempt.AttemptId,
+            attempt.AdmissionDecisionReference,
+            attempt.LeaseReference,
+            attempt.IsolationProfile,
+            AttemptExecutionState.Running,
+            attempt.AuthorityExpiresAt,
+            attempt.CapabilityGrantDigest,
+            attempt.BundleDigest,
+            attempt.PolicyDigest,
+            attempt.ReleaseDigest,
+            null,
+            null,
+            recordedAt);
 }
 
 public sealed record EncryptedJournalRecord(string Nonce, string Tag, string Ciphertext);
@@ -193,7 +240,12 @@ public sealed class EncryptedFileJournal : INodeJournal
     private readonly AesGcmJournalProtector protector;
     private readonly IRollbackAnchorStore rollbackAnchorStore;
 
-    public EncryptedFileJournal(
+    public EncryptedFileJournal(string path, AesGcmJournalProtector protector)
+        : this(path, protector, new PlatformRollbackAnchorStore())
+    {
+    }
+
+    internal EncryptedFileJournal(
         string path,
         AesGcmJournalProtector protector,
         IRollbackAnchorStore rollbackAnchorStore)
@@ -541,7 +593,7 @@ public sealed class InMemoryJournal : INodeJournal
             new Result<IReadOnlyList<JournalEntry>, JournalFailure>.Success(entries.ToArray()));
 }
 
-public sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore
+internal sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore
 {
     private RollbackAnchor anchor = RollbackAnchor.Empty;
 
@@ -566,17 +618,19 @@ public sealed class InMemoryRollbackAnchorStore : IRollbackAnchorStore
     }
 }
 
-public sealed class UnavailableRollbackAnchorStore : IRollbackAnchorStore
+public sealed class PlatformRollbackAnchorStore : IRollbackAnchorStore
 {
+    // A TPM, device secure-store, or controller-signed checkpoint adapter is deliberately deferred.
+    // The production journal remains unavailable rather than accepting a colocated filesystem fallback.
     public Task<Result<RollbackAnchor, JournalFailure>> ReadAsync(CancellationToken cancellationToken) =>
         Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
             new Result<RollbackAnchor, JournalFailure>.Failure(
-                new("rollback-anchor-unavailable", "A rollback-resistant anchor store is required before restoring the journal.")));
+                new("rollback-anchor-platform-unavailable", "A TPM, device secure-store, or controller-signed rollback anchor is required before restoring the journal.")));
 
     public Task<Result<RollbackAnchor, JournalFailure>> AdvanceAsync(
         RollbackAnchor next,
         CancellationToken cancellationToken) =>
         Task.FromResult<Result<RollbackAnchor, JournalFailure>>(
             new Result<RollbackAnchor, JournalFailure>.Failure(
-                new("rollback-anchor-unavailable", "A rollback-resistant anchor store is required before recording the journal.")));
+                new("rollback-anchor-platform-unavailable", "A TPM, device secure-store, or controller-signed rollback anchor is required before recording the journal.")));
 }

@@ -99,6 +99,17 @@ public sealed record AgentState(
                     new("journal-attempt-binding-invalid", "A cancellation journal entry must bind to an existing attempt."));
             }
 
+            if (entry.Type == JournalEntryType.AttemptStarted &&
+                (entry.AttemptId is not { } startedAttempt ||
+                 !state.Attempts.TryGetValue(startedAttempt, out var existingAttempt) ||
+                 existingAttempt.State != AttemptExecutionState.Prepared ||
+                 entry.CapabilityGrantDigest != existingAttempt.CapabilityGrantDigest ||
+                 entry.AuthorityExpiresAt != existingAttempt.AuthorityExpiresAt))
+            {
+                return new Result<AgentState, JournalFailure>.Failure(
+                    new("journal-attempt-transition-invalid", "A durable process start must transition the matching prepared attempt."));
+            }
+
             state = Apply(state, entry);
         }
 
@@ -181,6 +192,21 @@ public sealed record AgentState(
                     _ => nextState
                 };
             }
+        }
+        else if (entry.Type == JournalEntryType.AttemptStarted &&
+                 entry.AttemptId is { } startedAttempt &&
+                 nextState.Attempts.TryGetValue(startedAttempt, out var existingAttempt))
+        {
+            nextState = nextState with
+            {
+                Attempts = nextState.Attempts.SetItem(
+                    startedAttempt,
+                    existingAttempt with
+                    {
+                        State = AttemptExecutionState.Running,
+                        UpdatedAt = entry.RecordedAt
+                    })
+            };
         }
         else if (entry.Type == JournalEntryType.EvidenceObservation &&
                  entry.AttemptId is { } evidenceAttemptId &&
@@ -320,6 +346,10 @@ public static class CommandValidation
         if (!state.Attempts.TryGetValue(command.AttemptId, out var attempt) || attempt.ProjectId != command.ProjectId)
         {
             return Reject(envelope, "unknown-attempt-binding", "Cancellation must bind to a locally observed attempt in the same project.", advancesSequence: true);
+        }
+        if (command.LeaseReference != attempt.LeaseReference)
+        {
+            return Reject(envelope, "lease-binding-mismatch", "Cancellation must bind to the lease recorded for the attempt.", advancesSequence: true);
         }
 
         return Accept(

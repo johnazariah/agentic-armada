@@ -308,6 +308,44 @@ public sealed class NodeAgentBoundaryTests
     }
 
     [Fact]
+    public async Task Cancellation_requires_the_exact_attempt_lease()
+    {
+        var fixture = new NodeAgentFixture();
+        var boundary = fixture.Boundary(new InMemoryJournal());
+        await boundary.ReceiveAsync(fixture.StartEnvelope(sequence: 1), CancellationToken.None);
+        var cancellation = fixture.CancelEnvelope(sequence: 2) with
+        {
+            Payload = Cancel(fixture.CancelEnvelope(sequence: 2)) with { LeaseReference = ResourceId.New() }
+        };
+
+        var result = await boundary.ReceiveAsync(cancellation, CancellationToken.None);
+
+        Assert.Equal("lease-binding-mismatch", Value(result).Code);
+    }
+
+    [Fact]
+    public async Task Restarted_cancelled_attempt_cannot_be_resurrected_for_process_start()
+    {
+        var fixture = new NodeAgentFixture();
+        var journal = new InMemoryJournal();
+        var first = fixture.Boundary(journal);
+        var start = fixture.StartEnvelope(sequence: 1);
+        await first.ReceiveAsync(start, CancellationToken.None);
+        await first.ReceiveAsync(fixture.CancelEnvelope(sequence: 2), CancellationToken.None);
+
+        var restarted = fixture.Boundary(journal);
+        await restarted.ReconcileAsync(fixture.Inventory, fixture.Health, CancellationToken.None);
+        var result = await restarted.AuthoriseProcessStartAsync(
+            fixture.AttemptId,
+            Start(start).CapabilityGrantDigest,
+            CancellationToken.None);
+
+        Assert.Equal(
+            "attempt-not-prepared",
+            Assert.IsType<Result<AttemptRuntime, NodeAgentFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
     public async Task Persistence_failures_are_returned_and_never_acknowledged_as_success()
     {
         var fixture = new NodeAgentFixture();
@@ -359,6 +397,9 @@ public sealed class NodeAgentBoundaryTests
 
     private static StartAttemptCommand Start(OutboundEnvelope<NodeCommand> envelope) =>
         Assert.IsType<StartAttemptCommand>(envelope.Payload);
+
+    private static CancelAttemptCommand Cancel(OutboundEnvelope<NodeCommand> envelope) =>
+        Assert.IsType<CancelAttemptCommand>(envelope.Payload);
 }
 
 internal sealed class NodeAgentFixture
@@ -368,6 +409,8 @@ internal sealed class NodeAgentFixture
     public ResourceId ProjectId { get; } = ResourceId.New();
     public ResourceId WorkloadId { get; } = ResourceId.New();
     public ResourceId AttemptId { get; } = ResourceId.New();
+    public ResourceId AdmissionDecisionId { get; } = ResourceId.New();
+    public ResourceId LeaseId { get; } = ResourceId.New();
     public InventoryObservation Inventory { get; }
     public HealthObservation Health { get; }
 
@@ -416,8 +459,8 @@ internal sealed class NodeAgentFixture
                 WorkloadId,
                 attemptId ?? AttemptId,
                 expiresAt ?? Now.AddMinutes(5),
-                ResourceId.New(),
-                ResourceId.New(),
+                AdmissionDecisionId,
+                LeaseId,
                 profile,
                 Digest('a'),
                 Digest('b'),
@@ -444,7 +487,7 @@ internal sealed class NodeAgentFixture
                 ProjectId,
                 attemptId ?? AttemptId,
                 Now.AddMinutes(5),
-                ResourceId.New(),
+                LeaseId,
                 "Operator requested cancellation."));
 
     public Sha256Digest Digest(char character) =>
