@@ -135,3 +135,31 @@ tooling. GitHub remains a non-authoritative human view and archive boundary.
 **Compatibility:** consumes only the accepted v1 GitHub/GitHubRelease typed
 profiles. It creates no product-root `.armada/` configuration and introduces no
 scientific, live-deployment or provider authority path.
+
+## PR 4: Major Domo and capability-scoped session orchestration
+
+**Scope:** add a pure Major Domo reconciliation core, a capability-scoped
+session-adapter port with deterministic in-memory interpreter, and the typed
+`GitHubCopilot` supported-local-integration boundary.
+
+**Acceptance evidence:**
+
+- Reconciliation derives one stable Issue Master idempotency key from node UID,
+  workload UID and workload generation; duplicate active sessions produce a
+  structured `Blocked` condition instead of another create effect.
+- Idle sessions are woken, disappeared owners are handed to their durable
+  successor before replacement, and invalid ownership/deadline/heartbeat
+  bindings fail closed.
+- Child creation requires `IssueMasterWithChildren` in the capability envelope;
+  observation and plan-decision bindings require exact AgentSession, Attempt,
+  correlation ID and envelope digest, and proposed actions remain within both
+  the envelope and admission decision.
+- Terminal sessions are archived only after an independently verified
+  `EvidenceReceipt` for the current attempt.
+- `GitHubCopilot` construction accepts only a matching supported local
+  integration/capability contract. No runtime automation, browser scraping,
+  broad GitHub token or raw credential path is introduced.
+
+**Compatibility:** consumes existing `armada.io/v1alpha1` resources and does
+not add GitHub projections, live Copilot orchestration, node process logic or
+consumer `.armada/` configuration.
