@@ -4,13 +4,9 @@ var builder = WebApplication.CreateBuilder(args);
 var options = builder.Configuration.GetSection(ControlPlaneOptions.SectionName).Get<ControlPlaneOptions>()
     ?? new ControlPlaneOptions();
 
-if (ControlPlaneConfiguration.TryGetLoopbackListenUrl(options, out var listenUrl))
-{
-    builder.WebHost.UseUrls(listenUrl);
-}
-
+ControlPlaneHostBootstrap.Configure(builder, options);
 builder.Services.AddSingleton(options);
-builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<IRestoreEvidenceVerifier, LocalRestoreEvidenceVerifier>();
 builder.Services.AddSingleton<IPostgresReadinessProbe, PostgresReadinessProbe>();
 builder.Services.AddSingleton<IControlPlaneReadiness, ControlPlaneReadiness>();
 

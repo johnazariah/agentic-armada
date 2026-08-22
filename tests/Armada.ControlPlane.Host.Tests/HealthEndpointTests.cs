@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
@@ -23,6 +24,22 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
         Assert.Equal(System.Net.HttpStatusCode.ServiceUnavailable, ready.StatusCode);
     }
 
+    [Fact]
+    public void Injected_kestrel_endpoint_is_rejected_before_a_server_starts()
+    {
+        var builder = WebApplication.CreateBuilder();
+        builder.Configuration.AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["Kestrel:Endpoints:external:Url"] = "http://0.0.0.0:5080"
+            });
+
+        var error = Assert.Throws<InvalidOperationException>(
+            () => ControlPlaneHostBootstrap.Configure(builder, ControlPlaneConfigurationTests.ValidOptions()));
+
+        Assert.Contains("Kestrel endpoint configuration is prohibited", error.ToString());
+    }
+
     public sealed class UnconfiguredHostFactory : WebApplicationFactory<Program>
     {
         protected override void ConfigureWebHost(IWebHostBuilder builder)
@@ -36,5 +53,7 @@ public sealed class HealthEndpointTests : IClassFixture<HealthEndpointTests.Unco
                     });
             });
         }
+
     }
+
 }

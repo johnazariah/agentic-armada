@@ -8,8 +8,10 @@ To prepare a disposable local run, copy `appsettings.Lab.example.json` to
 `appsettings.Lab.json`, replace every `replace-with-*` value, and provide the
 PostgreSQL connection string through
 `ARMADA_ControlPlane__Postgres__ConnectionString`. The connection must point to
-a loopback PostgreSQL instance. `LastRestoreVerifiedAtUtc` and
-`RestoreEvidenceReference` must name a current, durable restore drill.
+a loopback PostgreSQL instance. Configure an absolute path to a local,
+regular-file restore-drill artifact and its exact `sha256:` digest. The host
+reads the file and rejects missing, directory, symlink, or changed content; it
+does not trust a timestamp or free-text configuration claim as evidence.
 
 Run with:
 
@@ -18,5 +20,7 @@ ASPNETCORE_ENVIRONMENT=Lab dotnet run --project src/Armada.ControlPlane.Host
 ```
 
 The host remains not-ready until explicit lab mode, loopback identity/binding,
-operator-applied schema management, current restore evidence, and PostgreSQL
-reachability all pass. It never runs migrations automatically.
+operator-applied schema management, verified local restore evidence, and
+PostgreSQL reachability all pass. It rejects `Kestrel:Endpoints` and `urls`
+configuration and configures only its validated loopback listener. It never
+runs migrations automatically.

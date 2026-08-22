@@ -6,6 +6,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Armada.Application\Armada.Application.csproj" />
+    <ProjectReference Include="..\Armada.Contracts\Armada.Contracts.csproj" />
     <ProjectReference Include="..\Armada.Infrastructure.Postgres\Armada.Infrastructure.Postgres.csproj" />
   </ItemGroup>
 </Project>

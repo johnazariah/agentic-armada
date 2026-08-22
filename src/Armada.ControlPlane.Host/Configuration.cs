@@ -1,5 +1,7 @@
 using System.Collections.Immutable;
 using System.Net;
+using Armada.Contracts;
+using Microsoft.Extensions.Configuration;
 using Npgsql;
 
 namespace Armada.ControlPlane.Host;
@@ -60,22 +62,28 @@ public sealed record StorageOptions
 
 public sealed record BackupPrerequisiteOptions
 {
-    public string RestoreEvidenceReference { get; init; } = string.Empty;
+    public LocalRestoreEvidenceOptions RestoreEvidence { get; init; } = new();
+}
 
-    public DateTimeOffset? LastRestoreVerifiedAtUtc { get; init; }
+public sealed record LocalRestoreEvidenceOptions
+{
+    public string ArtifactPath { get; init; } = string.Empty;
 
-    public int MaximumEvidenceAgeDays { get; init; } = 30;
+    public string ContentDigest { get; init; } = string.Empty;
 }
 
 public sealed record ControlPlaneConfigurationFailure(string Code, string Message);
+
+public sealed record HostBindingConfigurationFailure(string Code, string Message);
+
+public sealed record LocalRestoreEvidenceReference(string ArtifactPath, Sha256Digest ContentDigest);
 
 public static class ControlPlaneConfiguration
 {
     public const string LabTopology = "mac-control-plane-wsl-disposable-node";
 
     public static ImmutableArray<ControlPlaneConfigurationFailure> Validate(
-        ControlPlaneOptions options,
-        DateTimeOffset now)
+        ControlPlaneOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
 
@@ -119,46 +127,46 @@ public static class ControlPlaneConfiguration
             failures.Add(new("invalid-schema-management-boundary", "Schema changes must remain operator-applied in the lab baseline."));
         }
 
-        ValidateBackupPrerequisites(options.Storage.Backup, now, failures);
+        if (!TryGetRestoreEvidenceReference(options.Storage.Backup, out _))
+        {
+            failures.Add(new("invalid-restore-evidence-reference", "A local restore evidence artifact requires an absolute path and SHA-256 digest."));
+        }
+
         return failures.ToImmutable();
     }
 
-    public static bool TryGetLoopbackListenUrl(ControlPlaneOptions options, out string listenUrl)
+    public static bool TryGetLoopbackListenEndpoint(ControlPlaneOptions options, out IPEndPoint endpoint)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        if (TryParseLoopbackHttpUrl(options.Binding.ListenUrl, out var uri) && uri is not null)
+        if (TryParseLoopbackHttpUrl(options.Binding.ListenUrl, out var uri) &&
+            uri is not null &&
+            IPAddress.TryParse(uri.Host, out var address))
         {
-            listenUrl = uri.AbsoluteUri;
+            endpoint = new(address, uri.Port);
             return true;
         }
 
-        listenUrl = string.Empty;
+        endpoint = default!;
         return false;
     }
 
-    private static void ValidateBackupPrerequisites(
+    public static bool TryGetRestoreEvidenceReference(
         BackupPrerequisiteOptions backup,
-        DateTimeOffset now,
-        ImmutableArray<ControlPlaneConfigurationFailure>.Builder failures)
+        out LocalRestoreEvidenceReference reference)
     {
-        if (string.IsNullOrWhiteSpace(backup.RestoreEvidenceReference))
+        ArgumentNullException.ThrowIfNull(backup);
+
+        if (string.IsNullOrWhiteSpace(backup.RestoreEvidence.ArtifactPath) ||
+            !Path.IsPathFullyQualified(backup.RestoreEvidence.ArtifactPath) ||
+            Sha256Digest.Parse(backup.RestoreEvidence.ContentDigest) is not Result<Sha256Digest, ContractValidationError>.Success digest)
         {
-            failures.Add(new("missing-restore-evidence-reference", "A durable restore-drill evidence reference is required before readiness."));
+            reference = default!;
+            return false;
         }
 
-        if (backup.MaximumEvidenceAgeDays is < 1 or > 90)
-        {
-            failures.Add(new("invalid-restore-evidence-age", "Restore-drill evidence must have a maximum age between one and ninety days."));
-        }
-
-        if (backup.LastRestoreVerifiedAtUtc is null ||
-            backup.LastRestoreVerifiedAtUtc > now ||
-            (backup.MaximumEvidenceAgeDays is >= 1 and <= 90 &&
-             now - backup.LastRestoreVerifiedAtUtc > TimeSpan.FromDays(backup.MaximumEvidenceAgeDays)))
-        {
-            failures.Add(new("stale-restore-evidence", "A current restore-drill verification is required before readiness."));
-        }
+        reference = new(Path.GetFullPath(backup.RestoreEvidence.ArtifactPath), digest.Value);
+        return true;
     }
 
     private static bool IsValidPostgresConfiguration(string connectionString)
@@ -192,7 +200,8 @@ public static class ControlPlaneConfiguration
     {
         if (Uri.TryCreate(value, UriKind.Absolute, out var parsed) &&
             parsed.Scheme == Uri.UriSchemeHttp &&
-            parsed.IsLoopback &&
+            IPAddress.TryParse(parsed.Host, out var address) &&
+            IPAddress.IsLoopback(address) &&
             parsed.AbsolutePath == "/" &&
             string.IsNullOrEmpty(parsed.Query) &&
             string.IsNullOrEmpty(parsed.Fragment))
@@ -208,4 +217,32 @@ public static class ControlPlaneConfiguration
     private static bool IsLoopbackHost(string value) =>
         string.Equals(value, "localhost", StringComparison.OrdinalIgnoreCase) ||
         (IPAddress.TryParse(value, out var address) && IPAddress.IsLoopback(address));
+}
+
+public static class HostBindingConfiguration
+{
+    public static ImmutableArray<HostBindingConfigurationFailure> Validate(
+        IConfiguration configuration,
+        string? hostUrls)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+
+        var failures = ImmutableArray.CreateBuilder<HostBindingConfigurationFailure>();
+        var endpoints = configuration.GetSection("Kestrel:Endpoints");
+        if (!string.IsNullOrWhiteSpace(endpoints.Value) || endpoints.GetChildren().Any())
+        {
+            failures.Add(new(
+                "configured-kestrel-endpoint",
+                "Kestrel endpoint configuration is prohibited because the lab host configures only its validated loopback listener."));
+        }
+
+        if (!string.IsNullOrWhiteSpace(configuration["urls"]) || !string.IsNullOrWhiteSpace(hostUrls))
+        {
+            failures.Add(new(
+                "configured-host-url",
+                "URL configuration is prohibited because the lab host configures only its validated loopback listener."));
+        }
+
+        return failures.ToImmutable();
+    }
 }

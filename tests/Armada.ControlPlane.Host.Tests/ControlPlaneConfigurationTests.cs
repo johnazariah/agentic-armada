@@ -1,31 +1,30 @@
 using Armada.ControlPlane.Host;
+using Microsoft.Extensions.Configuration;
 
 namespace Armada.ControlPlane.Host.Tests;
 
 public sealed class ControlPlaneConfigurationTests
 {
-    private static readonly DateTimeOffset Now = new(2026, 8, 23, 0, 0, 0, TimeSpan.Zero);
-
     [Fact]
     public void Defaults_fail_closed()
     {
-        var failures = ControlPlaneConfiguration.Validate(new(), Now);
+        var failures = ControlPlaneConfiguration.Validate(new());
 
         Assert.Contains(failures, static failure => failure.Code == "lab-mode-disabled");
         Assert.Contains(failures, static failure => failure.Code == "invalid-postgres-connection");
-        Assert.Contains(failures, static failure => failure.Code == "missing-restore-evidence-reference");
+        Assert.Contains(failures, static failure => failure.Code == "invalid-restore-evidence-reference");
     }
 
     [Fact]
     public void Explicit_disposable_lab_configuration_is_accepted()
     {
-        var failures = ControlPlaneConfiguration.Validate(ValidOptions(), Now);
+        var failures = ControlPlaneConfiguration.Validate(ValidOptions());
 
         Assert.Empty(failures);
     }
 
     [Fact]
-    public void Remote_binding_and_stale_backup_evidence_are_rejected()
+    public void Remote_binding_is_rejected()
     {
         var options = ValidOptions() with
         {
@@ -37,19 +36,13 @@ public sealed class ControlPlaneConfigurationTests
             Storage = new()
             {
                 SchemaManagement = StorageManagementMode.OperatorApplied,
-                Backup = new()
-                {
-                    RestoreEvidenceReference = "lab://restore-drill/001",
-                    LastRestoreVerifiedAtUtc = Now.AddDays(-31),
-                    MaximumEvidenceAgeDays = 30
-                }
+                Backup = ValidBackup()
             }
         };
 
-        var failures = ControlPlaneConfiguration.Validate(options, Now);
+        var failures = ControlPlaneConfiguration.Validate(options);
 
         Assert.Contains(failures, static failure => failure.Code == "invalid-public-base-url");
-        Assert.Contains(failures, static failure => failure.Code == "stale-restore-evidence");
     }
 
     [Fact]
@@ -63,25 +56,28 @@ public sealed class ControlPlaneConfigurationTests
                 SchemaManagement = StorageManagementMode.Unspecified,
                 Backup = new()
                 {
-                    RestoreEvidenceReference = "lab://restore-drill/001",
-                    LastRestoreVerifiedAtUtc = Now.AddDays(-1),
-                    MaximumEvidenceAgeDays = 0
+                    RestoreEvidence = new()
+                    {
+                        ArtifactPath = "relative-evidence.json",
+                        ContentDigest = "sha256:not-a-digest"
+                    }
                 }
             }
         };
 
-        var failures = ControlPlaneConfiguration.Validate(options, Now);
+        var failures = ControlPlaneConfiguration.Validate(options);
 
         Assert.Contains(failures, static failure => failure.Code == "invalid-postgres-connection");
         Assert.Contains(failures, static failure => failure.Code == "invalid-schema-management-boundary");
-        Assert.Contains(failures, static failure => failure.Code == "invalid-restore-evidence-age");
+        Assert.Contains(failures, static failure => failure.Code == "invalid-restore-evidence-reference");
     }
 
     [Fact]
     public void Only_a_loopback_listener_can_be_applied()
     {
-        Assert.True(ControlPlaneConfiguration.TryGetLoopbackListenUrl(ValidOptions(), out var listenUrl));
-        Assert.Equal("http://127.0.0.1:5080/", listenUrl);
+        Assert.True(ControlPlaneConfiguration.TryGetLoopbackListenEndpoint(ValidOptions(), out var endpoint));
+        Assert.Equal(System.Net.IPAddress.Loopback, endpoint.Address);
+        Assert.Equal(5080, endpoint.Port);
 
         var rejected = ValidOptions() with
         {
@@ -92,7 +88,25 @@ public sealed class ControlPlaneConfigurationTests
             }
         };
 
-        Assert.False(ControlPlaneConfiguration.TryGetLoopbackListenUrl(rejected, out _));
+        Assert.False(ControlPlaneConfiguration.TryGetLoopbackListenEndpoint(rejected, out _));
+    }
+
+    [Fact]
+    public void Kestrel_endpoint_and_url_inputs_are_rejected()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(
+                new Dictionary<string, string?>
+                {
+                    ["Kestrel:Endpoints:public:Url"] = "http://0.0.0.0:5080",
+                    ["urls"] = "http://0.0.0.0:5081"
+                })
+            .Build();
+
+        var failures = HostBindingConfiguration.Validate(configuration, "http://0.0.0.0:5082");
+
+        Assert.Contains(failures, static failure => failure.Code == "configured-kestrel-endpoint");
+        Assert.Contains(failures, static failure => failure.Code == "configured-host-url");
     }
 
     internal static ControlPlaneOptions ValidOptions() => new()
@@ -111,12 +125,16 @@ public sealed class ControlPlaneConfigurationTests
         Storage = new()
         {
             SchemaManagement = StorageManagementMode.OperatorApplied,
-            Backup = new()
-            {
-                RestoreEvidenceReference = "lab://restore-drill/001",
-                LastRestoreVerifiedAtUtc = Now.AddDays(-1),
-                MaximumEvidenceAgeDays = 30
-            }
+            Backup = ValidBackup()
+        }
+    };
+
+    private static BackupPrerequisiteOptions ValidBackup() => new()
+    {
+        RestoreEvidence = new()
+        {
+            ArtifactPath = "/tmp/armada-host-test-restore-evidence.json",
+            ContentDigest = "sha256:0000000000000000000000000000000000000000000000000000000000000000"
         }
     };
 }

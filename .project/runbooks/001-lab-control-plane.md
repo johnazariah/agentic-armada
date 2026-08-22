@@ -13,11 +13,15 @@ public base URL, so it is not reachable from WSL or any network peer.
 
 1. Copy `src/Armada.ControlPlane.Host/appsettings.Lab.example.json` to
    `appsettings.Lab.json`; it is intentionally Git-ignored.
-2. Replace the identity and restore-evidence placeholders. Set the PostgreSQL
+2. Replace the identity and restore-evidence placeholders. The artifact path
+   must be absolute, name a regular local file, and have its exact digest in
+   `sha256:` lower-case hexadecimal form (for example, `shasum -a 256
+   /absolute/path/to/restore-drill-evidence.json`). Set the PostgreSQL
    connection string through
    `ARMADA_ControlPlane__Postgres__ConnectionString`, not a committed file.
 3. Confirm PostgreSQL is local, the schema was applied by an operator, and the
-   restore evidence names a drill performed within the configured age limit.
+   artifact is the reviewed output of a restore drill. Do not substitute a
+   timestamp or free-text path for its digest.
 4. Start the host with `ASPNETCORE_ENVIRONMENT=Lab dotnet run --project
    src/Armada.ControlPlane.Host`.
 5. Query `/health/live` and `/health/ready` over loopback. A `503` readiness
@@ -25,12 +29,12 @@ public base URL, so it is not reachable from WSL or any network peer.
 
 ## Safety boundaries
 
-Do not expose the listener beyond loopback, point it at shared or production
-PostgreSQL, treat liveness as readiness, run migrations from this host, or
-attach the WSL node by ad hoc networking. No mTLS/node enrolment, GitHub App or
-OAuth credential, Copilot adapter, signer/key custody, installer, package
-download, live session control, workload execution, or scientific authority is
-approved by this baseline.
+Do not expose the listener beyond loopback, set `Kestrel:Endpoints` or `urls`,
+point it at shared or production PostgreSQL, treat liveness as readiness, run
+migrations from this host, or attach the WSL node by ad hoc networking. No
+mTLS/node enrolment, GitHub App or OAuth credential, Copilot adapter,
+signer/key custody, installer, package download, live session control, workload
+execution, or scientific authority is approved by this baseline.
 
 Stopping the process changes no workload state because this host has no
 workload endpoint. PostgreSQL backup and restore remain an operator-owned

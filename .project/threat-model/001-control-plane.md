@@ -18,10 +18,13 @@ is an observation, not authority.
 
 The lab control plane and PostgreSQL run on the Mac. The first future node is
 the disposable Ubuntu WSL instance `johnaz-phd-wsl`. The baseline host binds
-only to loopback and has no node transport, so WSL cannot reach it and no node
-may infer enrolment or authority from a liveness response. Readiness requires
+only to an explicitly configured IP-loopback Kestrel listener and has no node
+transport, so WSL cannot reach it and no node may infer enrolment or authority
+from a liveness response. `Kestrel:Endpoints` and `urls` configuration are
+rejected before startup so they cannot add a public listener. Readiness requires
 explicit lab mode, local PostgreSQL configuration and reachability,
-operator-applied schema management, and current restore-drill evidence.
+operator-applied schema management, and a locally verified content-addressed
+restore-drill artifact.
 
 This is a configuration and dependency gate, not evidence that a backup can be
 restored or that a lab deployment is safe. Operators must keep the restore drill
@@ -44,8 +47,9 @@ execution, and production/scientific authority remain unavailable.
 | Credential exfiltration | short-lived workload-scoped grants, no shared token, explicit secret capability and evidence redaction |
 | Cross-project leakage on a shared node | schedule only to an enforceable workload isolation profile: dedicated node, isolated container or ephemeral VM; no concurrent cross-project process-only execution |
 | Operator error/recovery event | least-privileged RBAC, append-only audit, tested backup/restore and named recovery ceremony |
-| Accidental exposure of the lab baseline | explicit lab opt-in, loopback-only binding, liveness/readiness separation, no authority endpoint, and a secret-free checked-in template |
-| Readiness mistaken for deployment approval | readiness checks only local configuration, restore-drill metadata and PostgreSQL reachability; the runbook prohibits node attachment or workload operation |
+| Accidental exposure of the lab baseline | explicit lab opt-in, validated IP-loopback Kestrel binding, rejection of configured endpoint/URL overrides, liveness/readiness separation, no authority endpoint, and a secret-free checked-in template |
+| Forged or changed restore evidence | exact SHA-256 verification of a regular local artifact; missing, directory, symlink, unreadable, and tampered artifacts fail readiness |
+| Readiness mistaken for deployment approval | readiness checks configuration, the byte identity of a local restore artifact, and PostgreSQL reachability; the runbook prohibits node attachment or workload operation |
 
 ## Security gates
 
