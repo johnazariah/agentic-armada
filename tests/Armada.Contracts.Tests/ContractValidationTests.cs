@@ -672,6 +672,40 @@ public sealed class ContractValidationTests
         Assert.Equal("GitHubRelease", Proto.EvidenceReceiptSpec.Parser.ParseFrom(receipt.ToByteArray()).ArchiveProvider);
     }
 
+    [Fact]
+    public void Evidence_receipt_wire_requires_explicit_github_release_archive_provider()
+    {
+        var receipt = new EvidenceReceipt(
+            Metadata(new ProjectId(Guid.Parse("22222222-2222-2222-2222-222222222222"))),
+            new EvidenceReceiptSpec(
+                ResourceId.New(),
+                Digest('a'),
+                new GitHubReleaseEvidenceArchiveProfile(Repository("johnazariah/agentic-armada-evidence")),
+                "release",
+                Digest('b')),
+            new EvidenceReceiptStatus(Status(), EvidenceVerification.Verified, DateTimeOffset.UtcNow));
+        var wire = V1Alpha1Json.ToWire(receipt);
+        var json = V1Alpha1Json.Serialize(receipt);
+
+        Assert.Equal("GitHubRelease", wire.Spec!.ArchiveProvider);
+        Assert.IsType<Result<EvidenceReceipt, ContractValidationError>.Success>(
+            V1Alpha1Json.DeserializeEvidenceReceipt(json));
+        Assert.Equal(
+            "unsupported-provider-profile",
+            Assert.IsType<Result<EvidenceReceipt, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(wire with
+                {
+                    Spec = wire.Spec! with { ArchiveProvider = null! }
+                })).Error.Code);
+        Assert.Equal(
+            "unsupported-provider-profile",
+            Assert.IsType<Result<EvidenceReceipt, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(wire with
+                {
+                    Spec = wire.Spec! with { ArchiveProvider = "Other" }
+                })).Error.Code);
+    }
+
     [Theory]
     [InlineData("name", "invalid-resource-name")]
     [InlineData("resource-version", "invalid-resource-version")]

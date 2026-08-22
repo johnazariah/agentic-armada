@@ -48,7 +48,7 @@ public static partial class V1Alpha1Json
         new(value.Spec.AttemptReference.ToString(), value.Spec.NodeReference.ToString(), new("GitHubCopilot", value.Spec.Provider.ProfileDigest.Value), value.Spec.Role.ToString(), value.Spec.IdempotencyKey, value.Spec.ParentSessionReference?.ToString()),
         new(value.Status.Common.ObservedGeneration, value.Status.Common.Conditions.Select(ToWire).ToArray(), value.Status.Owner?.Value, value.Status.Successor?.Value, value.Status.LastObservedAt, value.Status.ArchiveComplete));
     public static V1Alpha1EvidenceReceiptWire ToWire(EvidenceReceipt value) => new(value.ApiVersion, value.Kind, ToWire(value.Metadata),
-        new(value.Spec.AttemptReference.ToString(), value.Spec.ManifestDigest.Value, value.Spec.Archive.Repository.Value, value.Spec.ReleaseId, value.Spec.AssetDigest.Value),
+        new(value.Spec.AttemptReference.ToString(), value.Spec.ManifestDigest.Value, "GitHubRelease", value.Spec.Archive.Repository.Value, value.Spec.ReleaseId, value.Spec.AssetDigest.Value),
         new(value.Status.Common.ObservedGeneration, value.Status.Common.Conditions.Select(ToWire).ToArray(), value.Status.Verification.ToString(), value.Status.VerifiedAt));
     public static V1Alpha1EventWire ToWire(Event value) => new(value.ApiVersion, value.Kind, ToWire(value.Metadata),
         new(value.Spec.Type, value.Spec.OccurredAt, value.Spec.Actor.Value, value.Spec.CorrelationId.ToString("D"), value.Spec.CausationId?.ToString("D"), value.Spec.PayloadDigest.Value),
@@ -69,7 +69,7 @@ public static partial class V1Alpha1Json
     public static Result<AgentSession, ContractValidationError> FromWire(V1Alpha1AgentSessionWire wire) => MapScoped("AgentSession", wire.ApiVersion, wire.Kind, wire.Metadata, wire.Spec, wire.Status, (m, s, t) =>
         new AgentSession(m, new AgentSessionSpec(Id(s.AttemptRef), Id(s.NodeRef), Profile(s.SessionProfile), EnumValue<AgentSessionRole>(s.Role), Required(s.IdempotencyKey, "idempotencyKey"), OptionalId(s.ParentSessionRef)), new AgentSessionStatus(t, OptionalActor(wire.Status?.Owner), OptionalActor(wire.Status?.Successor), wire.Status?.LastObservedAt, wire.Status?.ArchiveComplete ?? false)));
     public static Result<EvidenceReceipt, ContractValidationError> FromWire(V1Alpha1EvidenceReceiptWire wire) => MapScoped("EvidenceReceipt", wire.ApiVersion, wire.Kind, wire.Metadata, wire.Spec, wire.Status, (m, s, t) =>
-        new EvidenceReceipt(m, new EvidenceReceiptSpec(Id(s.AttemptRef), Digest(s.ManifestDigest), new GitHubReleaseEvidenceArchiveProfile(Repository(s.ArchiveRepository)), Required(s.ReleaseId, "releaseId"), Digest(s.AssetDigest)), new EvidenceReceiptStatus(t, EnumValue<EvidenceVerification>(wire.Status?.Verification), wire.Status?.VerifiedAt)));
+        new EvidenceReceipt(m, new EvidenceReceiptSpec(Id(s.AttemptRef), Digest(s.ManifestDigest), EvidenceArchive(s.ArchiveProvider, s.ArchiveRepository), Required(s.ReleaseId, "releaseId"), Digest(s.AssetDigest)), new EvidenceReceiptStatus(t, EnumValue<EvidenceVerification>(wire.Status?.Verification), wire.Status?.VerifiedAt)));
     public static Result<Event, ContractValidationError> FromWire(V1Alpha1EventWire wire) => Map("Event", wire.ApiVersion, wire.Kind, wire.Metadata, wire.Spec, wire.Status, (m, s, t) =>
         new Event(m, new EventSpec(Required(s.Type, "type"), RequiredTime(s.OccurredAt, "occurredAt"), new ActorId(Required(s.Actor, "actor")), GuidValue(s.CorrelationId, "correlationId"), OptionalGuid(s.CausationId, "causationId"), Digest(s.PayloadDigest)), t));
 
@@ -114,6 +114,11 @@ public static partial class V1Alpha1Json
     {
         if (value?.Provider != "GitHubCopilot") Fail("unsupported-provider-profile", "Session profile provider must be GitHubCopilot.");
         return new GitHubCopilotSessionProfile(Digest(value!.ProfileDigest));
+    }
+    private static GitHubReleaseEvidenceArchiveProfile EvidenceArchive(string? provider, string? repository)
+    {
+        if (provider != "GitHubRelease") Fail("unsupported-provider-profile", "Evidence archive provider must be GitHubRelease.");
+        return new GitHubReleaseEvidenceArchiveProfile(Repository(repository));
     }
     private static ResourceRequirements Requirements(V1Alpha1ResourceRequirementsWire? value)
     {
@@ -160,7 +165,7 @@ public sealed record V1Alpha1AgentSessionWire(string ApiVersion, string Kind, V1
 public sealed record V1Alpha1AgentSessionSpecWire(string AttemptRef, string NodeRef, V1Alpha1SessionProfileWire? SessionProfile, string Role, string IdempotencyKey, string? ParentSessionRef);
 public sealed record V1Alpha1AgentSessionStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, string? Owner, string? Successor, DateTimeOffset? LastObservedAt, bool ArchiveComplete) : IV1Alpha1StatusWire;
 public sealed record V1Alpha1EvidenceReceiptWire(string ApiVersion, string Kind, V1Alpha1MetadataWire? Metadata, V1Alpha1EvidenceReceiptSpecWire? Spec, V1Alpha1EvidenceReceiptStatusWire? Status);
-public sealed record V1Alpha1EvidenceReceiptSpecWire(string AttemptRef, string ManifestDigest, string ArchiveRepository, string ReleaseId, string AssetDigest);
+public sealed record V1Alpha1EvidenceReceiptSpecWire(string AttemptRef, string ManifestDigest, string ArchiveProvider, string ArchiveRepository, string ReleaseId, string AssetDigest);
 public sealed record V1Alpha1EvidenceReceiptStatusWire(long ObservedGeneration, IReadOnlyList<V1Alpha1ConditionWire>? Conditions, string Verification, DateTimeOffset? VerifiedAt) : IV1Alpha1StatusWire;
 public sealed record V1Alpha1EventWire(string ApiVersion, string Kind, V1Alpha1MetadataWire? Metadata, V1Alpha1EventSpecWire? Spec, V1Alpha1EventStatusWire? Status);
 public sealed record V1Alpha1EventSpecWire(string Type, DateTimeOffset OccurredAt, string Actor, string CorrelationId, string? CausationId, string PayloadDigest);

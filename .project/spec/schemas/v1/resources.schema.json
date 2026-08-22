@@ -787,12 +787,13 @@
               "type": "object",
               "additionalProperties": false,
               "required": [
-                "attemptRef", "manifestDigest", "archiveRepository",
+                "attemptRef", "manifestDigest", "archiveProvider", "archiveRepository",
                 "releaseId", "assetDigest"
               ],
               "properties": {
                 "attemptRef": { "$ref": "#/$defs/Uid" },
                 "manifestDigest": { "$ref": "#/$defs/Sha256" },
+                "archiveProvider": { "const": "GitHubRelease" },
                 "archiveRepository": { "type": "string", "pattern": "^[^/]+/[^/]+$" },
                 "releaseId": { "type": "string", "minLength": 1 },
                 "assetDigest": { "$ref": "#/$defs/Sha256" }
