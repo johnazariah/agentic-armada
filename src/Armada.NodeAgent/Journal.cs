@@ -322,6 +322,7 @@ public sealed class AesGcmJournalProtector
         {
             return Failure("journal-ciphertext-invalid", "The encrypted journal record cannot be processed.");
         }
+
     }
 
     public static Result<bool, JournalFailure> ValidateRecord(EncryptedJournalRecord? record)
@@ -466,6 +467,12 @@ public sealed class EncryptedFileJournal : INodeJournal
                 }
 
                 var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                if (claim.Phase != UpgradePhase.RollbackClaimed &&
+                    HasOutstandingRollback(snapshot.Entries, claim.IdempotencyKey))
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions."));
+                }
                 var existing = snapshot.Entries
                     .Where(entry =>
                         entry.Upgrade?.IdempotencyKey == claim.IdempotencyKey &&
@@ -539,6 +546,12 @@ public sealed class EncryptedFileJournal : INodeJournal
                 }
 
                 var snapshot = ((Result<JournalSnapshot, JournalFailure>.Success)loaded).Value;
+                if (fence.ClaimPhase != UpgradePhase.RollbackClaimed &&
+                    HasOutstandingRollback(snapshot.Entries, fence.IdempotencyKey))
+                {
+                    return new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions."));
+                }
                 var currentClaim = snapshot.Entries
                     .Select(static entry => entry.Upgrade)
                     .OfType<UpgradeJournalEvent>()
@@ -901,6 +914,19 @@ public sealed class EncryptedFileJournal : INodeJournal
     private static Result<T, JournalFailure> Failure<T>(string code, string message) =>
         new Result<T, JournalFailure>.Failure(new(code, message));
 
+    private static bool HasOutstandingRollback(
+        IReadOnlyList<JournalEntry> entries,
+        string idempotencyKey)
+    {
+        var upgrades = entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Where(upgrade => upgrade.IdempotencyKey == idempotencyKey)
+            .ToArray();
+        return upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RollbackClaimed) &&
+               !upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RolledBack);
+    }
+
     private sealed record JournalSnapshot(
         IReadOnlyList<JournalEntry> Entries,
         LocalJournalTailMarker Anchor);
@@ -977,6 +1003,13 @@ public sealed class InMemoryJournal : INodeJournal
 
         lock (sync)
         {
+            if (claim.Phase != UpgradePhase.RollbackClaimed &&
+                HasOutstandingRollback(claim.IdempotencyKey))
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions.")));
+            }
             var existing = entries
                 .Where(entry =>
                     entry.Upgrade?.IdempotencyKey == claim.IdempotencyKey &&
@@ -1050,6 +1083,13 @@ public sealed class InMemoryJournal : INodeJournal
 
         lock (sync)
         {
+            if (fence.ClaimPhase != UpgradePhase.RollbackClaimed &&
+                HasOutstandingRollback(fence.IdempotencyKey))
+            {
+                return Task.FromResult<Result<JournalAppendClaim, JournalFailure>>(
+                    new Result<JournalAppendClaim, JournalFailure>.Failure(
+                        new("rollback-pending", "A durable rollback claim blocks all forward upgrade transitions.")));
+            }
             var currentClaim = entries
                 .Select(static entry => entry.Upgrade)
                 .OfType<UpgradeJournalEvent>()
@@ -1065,6 +1105,17 @@ public sealed class InMemoryJournal : INodeJournal
                         new("upgrade-fence-lost", "The journal transition claim was superseded before this effect could be recorded.")))
                 : AppendClaimed(JournalEntry.ForUpgrade(entries.Count + 1L, identity, upgrade));
         }
+    }
+
+    private bool HasOutstandingRollback(string idempotencyKey)
+    {
+        var upgrades = entries
+            .Select(static entry => entry.Upgrade)
+            .OfType<UpgradeJournalEvent>()
+            .Where(upgrade => upgrade.IdempotencyKey == idempotencyKey)
+            .ToArray();
+        return upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RollbackClaimed) &&
+               !upgrades.Any(static upgrade => upgrade.Phase == UpgradePhase.RolledBack);
     }
 }
 

@@ -358,8 +358,9 @@ public sealed class ReleaseDistributionTests
 
         Assert.True(Success(inProgress).RolledBack);
         Assert.Equal(["rollback"], inProgressStaging.Operations);
-        Assert.Empty(statusRefusal.Operations);
-        Assert.Equal("status-unavailable", Failure(unavailable).Code);
+        Assert.Equal(["rollback"], statusRefusal.Operations);
+        Assert.True(Success(unavailable).RolledBack);
+        Assert.Equal("status-unavailable", Success(unavailable).Code);
     }
 
     [Fact]
@@ -539,6 +540,73 @@ public sealed class ReleaseDistributionTests
         Assert.DoesNotContain("health", recovery.Operations);
         Assert.DoesNotContain("activate", recovery.Operations);
         Assert.Equal(UpgradePhase.RolledBack, entries.Last().Upgrade!.Phase);
+    }
+
+    [Fact]
+    public async Task Rollback_claim_atomically_blocks_in_flight_forward_renewal_and_completion()
+    {
+        var fixture = new ReleaseFixture();
+        var journal = new InMemoryJournal();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var stageClaim = Success(await journal.ClaimUpgradeTransitionAsync(
+            fixture.Identity,
+            Transition(fixture, plan, UpgradePhase.StageClaimed, fixture.Now, fixture.Now.AddMinutes(5)),
+            CancellationToken.None));
+        var rollbackClaim = await journal.ClaimUpgradeTransitionAsync(
+            fixture.Identity,
+            Transition(fixture, plan, UpgradePhase.RollbackClaimed, fixture.Now, fixture.Now.AddMinutes(5)),
+            CancellationToken.None);
+        var stageFence = Fence(stageClaim.Entry.Upgrade!);
+        var forwardCompletion = stageClaim.Entry.Upgrade! with
+        {
+            Phase = UpgradePhase.Staged,
+            ClaimExpiresAt = null
+        };
+
+        var renewal = await journal.RenewUpgradeTransitionAsync(
+            fixture.Identity,
+            stageFence,
+            fixture.Now,
+            fixture.Now.AddMinutes(5),
+            CancellationToken.None);
+        var completion = await journal.CompleteUpgradeTransitionAsync(
+            fixture.Identity,
+            forwardCompletion,
+            stageFence,
+            CancellationToken.None);
+        var forwardClaim = await journal.ClaimUpgradeTransitionAsync(
+            fixture.Identity,
+            Transition(fixture, plan, UpgradePhase.HealthClaimed, fixture.Now, fixture.Now.AddMinutes(5)),
+            CancellationToken.None);
+
+        Assert.True(Success(rollbackClaim).Added);
+        Assert.Equal("rollback-pending", Failure(renewal).Code);
+        Assert.Equal("rollback-pending", Failure(completion).Code);
+        Assert.Equal("rollback-pending", Failure(forwardClaim).Code);
+    }
+
+    [Fact]
+    public async Task Status_failure_after_partial_stage_still_invokes_fenced_rollback()
+    {
+        var fixture = new ReleaseFixture();
+        var plan = Success(UpgradePlanning.Plan(fixture.State(), Verified(fixture.Release, fixture.Signer)));
+        var staging = new RecordingStaging(
+            stage: Failure<bool>("stage-response-lost", "The stage response was lost."),
+            stageLeavesStagedOnFailure: true,
+            statusSequence:
+            [
+                new Result<UpgradePlatformStatus, UpgradeFailure>.Success(UpgradePlatformStatus.NotStaged),
+                Failure<UpgradePlatformStatus>("status-unavailable", "The status response was lost.")
+            ]);
+
+        var result = await new NodeUpgradeCoordinator(
+            new InMemoryJournal(),
+            staging,
+            new FixedClock(fixture.Now)).ExecuteAsync(fixture.Identity, plan, CancellationToken.None);
+
+        Assert.True(Success(result).RolledBack);
+        Assert.Equal("stage-response-lost", Success(result).Code);
+        Assert.Equal(["stage", "rollback"], staging.Operations);
     }
 
     private static T Success<T, TFailure>(Result<T, TFailure> result) =>
@@ -750,10 +818,13 @@ public sealed class ReleaseDistributionTests
         Result<bool, UpgradeFailure>? rollback = null,
         UpgradePlatformStatus initialStatus = UpgradePlatformStatus.NotStaged,
         Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = null,
-        bool stageLeavesStagedOnFailure = false) : IUpgradeStaging
+        bool stageLeavesStagedOnFailure = false,
+        IEnumerable<Result<UpgradePlatformStatus, UpgradeFailure>>? statusSequence = null) : IUpgradeStaging
     {
         private UpgradePlatformStatus status = initialStatus;
         private readonly Result<UpgradePlatformStatus, UpgradeFailure>? statusResult = statusResult;
+        private readonly Queue<Result<UpgradePlatformStatus, UpgradeFailure>> statusSequence =
+            statusSequence is null ? [] : new(statusSequence);
         private long currentFence;
         private Guid currentOperationId;
         public List<string> Operations { get; } = [];
@@ -761,7 +832,10 @@ public sealed class ReleaseDistributionTests
         public Task<Result<UpgradePlatformStatus, UpgradeFailure>> GetStatusAsync(
             UpgradePlan plan,
             CancellationToken cancellationToken) =>
-            Task.FromResult(statusResult ?? Success<UpgradePlatformStatus, UpgradeFailure>(status));
+            Task.FromResult(
+                statusSequence.TryDequeue(out var next)
+                    ? next
+                    : statusResult ?? Success<UpgradePlatformStatus, UpgradeFailure>(status));
 
         public Task<Result<bool, UpgradeFailure>> RenewFenceAsync(
             UpgradePlan plan,

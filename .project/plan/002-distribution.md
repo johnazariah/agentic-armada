@@ -24,7 +24,9 @@ threat model 001 and assurance package 002.
   activates before verified health; failed health or activation triggers
   rollback through a narrow staging port. Any failed or uncertain stage is
   rollback-required, and a durable rollback claim blocks all forward
-  reconciliation until rollback completes.
+  reconciliation until rollback completes. The journal enforces that
+  precedence atomically: outstanding rollback rejects every forward claim,
+  renewal, and completion.
 - Templates remain platform abstractions only. No package, installer, release,
   download, shell, package manager, deployment, or node-enrolment effect exists.
 - Deterministic tests cover canonical digest/signature tampering, semantic
@@ -32,8 +34,9 @@ threat model 001 and assurance package 002.
   replay/downgrade/channel/anchor refusal, atomic journal claims, restart after
   stage/health/activation boundaries, expired in-flight fencing, hostile
   null-shaped release records, failed staging/health/activation, rollback,
-  health-first activation, failed-rollback restart recovery, and journal
-  replay.
+  health-first activation, failed-rollback restart recovery, forward-worker
+  suppression under rollback, unavailable rollback-status recovery, and
+  journal replay.
 - The tracked `dotnet msbuild eng/Verify.proj /t:Verify` gate passes with no
   broad coverage exclusions and the PostgreSQL CI service required by the
   repository workflow.

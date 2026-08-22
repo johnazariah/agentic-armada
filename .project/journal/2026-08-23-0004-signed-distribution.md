@@ -25,7 +25,10 @@ threat model 001 and security-review package 002.
   superseded operation cannot stage or record completion. An uncertain stage
   result now requires rollback, and a failed rollback remains a durable
   rollback-pending state that blocks all forward upgrade reconciliation until
-  recovery completes it.
+  recovery completes it. The journal rejects every forward claim, renewal,
+  and completion while that rollback state is outstanding; an unavailable
+  rollback-status observation still invokes fenced rollback rather than
+  abandoning potentially partial state.
 - Added compatibility, release-process, and security-review gate records under
   `.project/releases/`.
 
@@ -38,7 +41,8 @@ revocation, replay/downgrade/anchor refusal, atomic journal claims, recovery
 after each claimed effect boundary, expired in-flight fencing, hostile
 null-shaped manifests/signatures, health-gated activation, failed activation
 rollback, partial-stage rollback, failed-rollback restart recovery, and
-journal replay.
+journal-enforced forward suppression during rollback, unavailable
+rollback-status recovery, and journal replay.
 
 ## Remaining blockers
 

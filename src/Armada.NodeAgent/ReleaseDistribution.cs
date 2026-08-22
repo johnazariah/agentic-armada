@@ -528,12 +528,7 @@ public sealed class NodeUpgradeCoordinator(
         var fence = ((Result<UpgradeOperationFence, UpgradeFailure>.Success)claim).Value;
 
         var status = await staging.GetStatusAsync(plan, cancellationToken);
-        if (status is Result<UpgradePlatformStatus, UpgradeFailure>.Failure statusFailure)
-        {
-            return Failure(statusFailure.Error);
-        }
-
-        if (((Result<UpgradePlatformStatus, UpgradeFailure>.Success)status).Value != UpgradePlatformStatus.RolledBack)
+        if (status is not Result<UpgradePlatformStatus, UpgradeFailure>.Success { Value: UpgradePlatformStatus.RolledBack })
         {
             var rollback = await RunFencedEffectAsync(
                 identity,
