@@ -531,7 +531,7 @@
                     "properties": {
                       "lifecycle": {
                         "enum": [
-                          "desired", "admitted", "assigned", "claimed",
+                          "claimed",
                           "start-approved", "running", "terminal-pending"
                         ]
                       }

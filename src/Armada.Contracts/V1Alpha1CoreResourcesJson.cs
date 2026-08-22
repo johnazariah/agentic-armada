@@ -107,7 +107,7 @@ public static partial class V1Alpha1Json
     private static Sha256Digest? OptionalDigest(string? value) => value is null ? null : Digest(value);
     private static RepositoryName Repository(string? value) => Checked(RepositoryName.Parse(value!));
     private static ActorId? OptionalActor(string? value) => value is null ? null : new ActorId(Required(value, "actor"));
-    private static TEnum EnumValue<TEnum>(string? value) where TEnum : struct, Enum => Enum.TryParse<TEnum>(value, false, out var parsed) ? parsed : throw new WireValidationException("invalid-enum", $"Unknown {typeof(TEnum).Name} value '{value}'.");
+    private static TEnum EnumValue<TEnum>(string? value) where TEnum : struct, Enum => Enum.TryParse<TEnum>(value, false, out var parsed) && Enum.IsDefined(parsed) ? parsed : throw new WireValidationException("invalid-enum", $"Unknown {typeof(TEnum).Name} value '{value}'.");
     private static TEnum? OptionalEnum<TEnum>(string? value) where TEnum : struct, Enum => value is null ? null : EnumValue<TEnum>(value);
     private static WorkloadLifecycleState Lifecycle(string value) => Checked(ParseLifecycle(value));
     private static GitHubCopilotSessionProfile Profile(V1Alpha1SessionProfileWire? value)

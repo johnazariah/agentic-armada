@@ -250,6 +250,10 @@ public static partial class V1Alpha1Json
             or WorkloadLifecycleState.Failed
             or WorkloadLifecycleState.Cancelled
             or WorkloadLifecycleState.Expired;
+        var requiresActiveBindings = lifecycleSuccess.Value is WorkloadLifecycleState.Claimed
+            or WorkloadLifecycleState.StartApproved
+            or WorkloadLifecycleState.Running
+            or WorkloadLifecycleState.TerminalPending;
         if (isTerminal)
         {
             if (evidenceReceiptSuccess.Value is null)
@@ -257,15 +261,16 @@ public static partial class V1Alpha1Json
                 return Failure<Workload>("evidence-receipt-required", "Terminal workloads require an evidence receipt reference.");
             }
         }
-        else if (attemptSuccess.Value is null ||
+        else if (requiresActiveBindings &&
+                 (attemptSuccess.Value is null ||
                  string.IsNullOrWhiteSpace(wire.Status.Owner) ||
                  string.IsNullOrWhiteSpace(wire.Status.Successor) ||
                  wire.Status.ExpectedNextEventAt is null ||
                  wire.Status.ProgressDeadlineAt is null ||
                  heartbeatPolicySuccess.Value is null ||
-                 string.IsNullOrWhiteSpace(wire.Status.Watchdog))
+                 string.IsNullOrWhiteSpace(wire.Status.Watchdog)))
         {
-            return Failure<Workload>("active-binding-required", "Non-terminal workloads require attempt, owner, successor, deadlines, heartbeat policy, and watchdog.");
+            return Failure<Workload>("active-binding-required", "Claimed and executing workloads require attempt, owner, successor, deadlines, heartbeat policy, and watchdog.");
         }
 
         return new Result<Workload, ContractValidationError>.Success(
@@ -440,6 +445,10 @@ public static partial class V1Alpha1Json
         long observedGeneration,
         IEnumerable<V1Alpha1ConditionWire>? conditions)
     {
+        if (observedGeneration < 0)
+        {
+            return Failure<ResourceStatus>("invalid-observed-generation", "Status observedGeneration cannot be negative.");
+        }
         if (conditions is null)
         {
             return Failure<ResourceStatus>("missing-required-status", "Status conditions are required.");
@@ -452,7 +461,8 @@ public static partial class V1Alpha1Json
             {
                 return Failure<ResourceStatus>("invalid-condition", "Condition array entries cannot be null.");
             }
-            if (!Enum.TryParse<ConditionStatus>(wire.Status, false, out var conditionStatus))
+            if (!Enum.TryParse<ConditionStatus>(wire.Status, false, out var conditionStatus) ||
+                !Enum.IsDefined(conditionStatus))
             {
                 return Failure<ResourceStatus>("invalid-condition-status", $"Unknown condition status '{wire.Status}'.");
             }
@@ -532,7 +542,8 @@ public static partial class V1Alpha1Json
             {
                 return Failure<SchedulingRequirements>("invalid-toleration", "Toleration key and operator are invalid.");
             }
-            if (!Enum.TryParse<TaintEffect>(toleration.Effect, false, out var effect))
+            if (!Enum.TryParse<TaintEffect>(toleration.Effect, false, out var effect) ||
+                !Enum.IsDefined(effect))
             {
                 return Failure<SchedulingRequirements>("invalid-taint-effect", $"Unknown taint effect '{toleration.Effect}'.");
             }
@@ -592,7 +603,7 @@ public static partial class V1Alpha1Json
 
     private static Result<TEnum, ContractValidationError> ParseEnum<TEnum>(string value, string code)
         where TEnum : struct, Enum =>
-        Enum.TryParse<TEnum>(value, false, out var parsed)
+        Enum.TryParse<TEnum>(value, false, out var parsed) && Enum.IsDefined(parsed)
             ? Success(parsed)
             : Failure<TEnum>(code, $"Unknown {typeof(TEnum).Name} value '{value}'.");
 

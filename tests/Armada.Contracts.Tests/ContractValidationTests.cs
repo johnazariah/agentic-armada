@@ -298,9 +298,12 @@ public sealed class ContractValidationTests
     [InlineData("progress-deadline")]
     [InlineData("heartbeat-policy")]
     [InlineData("watchdog")]
-    public void Non_terminal_workload_requires_each_durable_active_binding(string binding)
+    public void Claimed_workload_requires_each_durable_active_binding(string binding)
     {
-        var wire = ValidWorkloadWire();
+        var wire = ValidWorkloadWire() with
+        {
+            Status = ValidWorkloadWire().Status! with { Lifecycle = "claimed" }
+        };
         var status = wire.Status!;
         wire = binding switch
         {
@@ -319,6 +322,33 @@ public sealed class ContractValidationTests
         Assert.Equal(
             "active-binding-required",
             Assert.IsType<Result<Workload, ContractValidationError>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Desired_workload_round_trips_without_fabricated_active_bindings()
+    {
+        var wire = ValidWorkloadWire() with
+        {
+            Status = ValidWorkloadWire().Status! with
+            {
+                AttemptRef = null,
+                Owner = null,
+                Successor = null,
+                ExpectedNextEventAt = null,
+                ProgressDeadlineAt = null,
+                HeartbeatPolicy = null,
+                Watchdog = null
+            }
+        };
+
+        var workload = Assert.IsType<Result<Workload, ContractValidationError>.Success>(
+            V1Alpha1Json.FromWire(wire)).Value;
+        var roundTrip = V1Alpha1Json.DeserializeWorkload(V1Alpha1Json.Serialize(workload));
+
+        Assert.Equal(WorkloadLifecycleState.Desired, workload.Status.Lifecycle);
+        Assert.Null(workload.Status.AttemptReference);
+        Assert.Null(workload.Status.Owner);
+        Assert.IsType<Result<Workload, ContractValidationError>.Success>(roundTrip);
     }
 
     [Theory]
@@ -554,6 +584,40 @@ public sealed class ContractValidationTests
         Assert.Equal(
             "invalid-condition-status",
             Assert.IsType<Result<Project, ContractValidationError>.Failure>(statusResult).Error.Code);
+    }
+
+    [Fact]
+    public void Numeric_undefined_enums_and_negative_observed_generation_fail_closed()
+    {
+        var invalidAuthority = ValidWorkloadWire() with
+        {
+            Spec = ValidWorkloadWire().Spec! with { SessionAuthority = "99" }
+        };
+        var invalidCondition = ValidProjectWire() with
+        {
+            Status = ValidProjectWire().Status! with
+            {
+                Conditions = [new V1Alpha1ConditionWire(
+                    "Ready", "99", "Unknown", "Invalid", 1, DateTimeOffset.UtcNow, null)]
+            }
+        };
+        var negativeGeneration = ValidProjectWire() with
+        {
+            Status = ValidProjectWire().Status! with { ObservedGeneration = -1 }
+        };
+
+        Assert.Equal(
+            "invalid-session-authority",
+            Assert.IsType<Result<Workload, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(invalidAuthority)).Error.Code);
+        Assert.Equal(
+            "invalid-condition-status",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(invalidCondition)).Error.Code);
+        Assert.Equal(
+            "invalid-observed-generation",
+            Assert.IsType<Result<Project, ContractValidationError>.Failure>(
+                V1Alpha1Json.FromWire(negativeGeneration)).Error.Code);
     }
 
     [Theory]
