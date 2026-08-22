@@ -158,7 +158,7 @@ message WorkloadStatus {
 }
 
 message AdmissionDecision { Metadata metadata = 1; AdmissionDecisionSpec spec = 2; AdmissionDecisionStatus status = 3; }
-message AdmissionDecisionSpec { string workload_ref = 1; int64 workload_generation = 2; string node_ref = 3; string bundle_digest = 4; string policy_digest = 5; repeated string approved_actions = 6; string session_authority = 7; string isolation_profile = 8; ResourceRequirements resource_limits = 9; repeated string credential_grant_digests = 10; repeated string network_scope = 11; string evidence_requirements_digest = 12; google.protobuf.Timestamp expires_at = 13; }
+message AdmissionDecisionSpec { string workload_ref = 1; int64 workload_generation = 2; string node_ref = 3; string bundle_digest = 4; string policy_digest = 5; repeated string approved_actions = 6; string session_authority = 7; string isolation_profile = 8; ResourceRequirements resource_limits = 9; repeated string credential_grant_digests = 10; repeated string network_scope = 11; string evidence_requirements_digest = 12; google.protobuf.Timestamp expires_at = 13; string source_repository = 14; string source_revision = 15; string config_digest = 16; }
 message AdmissionDecisionStatus { Status common = 1; string decision = 2; optional string decision_digest = 3; }
 
 message Attempt { Metadata metadata = 1; AttemptSpec spec = 2; AttemptStatus status = 3; }

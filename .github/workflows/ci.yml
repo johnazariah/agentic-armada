@@ -9,6 +9,22 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: armada
+          POSTGRES_USER: armada
+          POSTGRES_PASSWORD: armada
+        ports:
+          - "5432:5432"
+        options: >-
+          --health-cmd "pg_isready -U armada -d armada"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      ARMADA_POSTGRES_CONNECTION: Host=localhost;Port=5432;Database=armada;Username=armada;Password=armada
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4

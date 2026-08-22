@@ -336,6 +336,10 @@ internal sealed class LifecycleFixture
                     NodeId,
                     Digest,
                     Digest,
+                    Assert.IsType<Result<RepositoryName, ContractValidationError>.Success>(
+                        RepositoryName.Parse("johnazariah/agentic-armada")).Value,
+                    new string('c', 40),
+                    Digest,
                     ImmutableHashSet.Create("create-worktree"),
                     sessionAuthority,
                     IsolationProfile.IsolatedContainer,

@@ -77,3 +77,33 @@ Contracts test project also excludes only
 `src/Armada.Contracts/obj/**/Resources.cs`, the protobuf compiler output; the
 versioned source `.proto` remains build-validated and the generated file
 contains no hand-written production logic.
+
+## PR 2: Authoritative control plane foundation
+
+**Scope:** add `Armada.Application` resource/admission command ports and the
+`Armada.Infrastructure.Postgres` authoritative current-state, append-only-ledger
+and transactional-outbox schema/repository boundary. HTTP, node, session and
+GitHub adapters remain deferred.
+
+**Acceptance evidence:**
+
+- Resource creation and spec updates validate the typed v1 envelope, use
+  resource-version CAS and write the current resource, ledger event and outbox
+  message as one repository commit.
+- Admission policy remains a port. Only an unexpired typed decision bound to the
+  exact workload generation may be persisted.
+- PostgreSQL schema records current JSON state separately from an append-only
+  ledger and idempotent outbox; the ledger rejects updates and deletes.
+- PostgreSQL migration and repository integration tests cover CAS contention,
+  ledger/outbox atomicity, immutable replay snapshots and duplicate concurrent
+  delivery. CI starts PostgreSQL 16 and passes
+  `ARMADA_POSTGRES_CONNECTION` to the tracked `Verify` target.
+- Local `Verify` requires the same connection variable. For example:
+  `docker run --rm --name armada-postgres -e POSTGRES_DB=armada -e
+  POSTGRES_USER=armada -e POSTGRES_PASSWORD=armada -p 5432:5432 postgres:16`,
+  then set `ARMADA_POSTGRES_CONNECTION='Host=localhost;Port=5432;Database=armada;Username=armada;Password=armada'`.
+  The integration tests fail with this exact prerequisite rather than skipping
+  persistence coverage.
+
+**Compatibility:** consumes existing `armada.io/v1alpha1` contracts without
+introducing a provider or consumer `.armada/` configuration.
