@@ -88,6 +88,45 @@ public sealed class ResourceApplicationTests
         Assert.Single(repository.Outbox);
     }
 
+    [Fact]
+    public async Task Identical_update_replay_returns_the_durable_commit_before_CAS_rejection()
+    {
+        var repository = new InMemoryResourceRepository();
+        var service = new ResourceApplicationService(repository);
+        var resource = Fixture.Project();
+        await service.CreateAsync(Fixture.Create(resource), CancellationToken.None);
+        var command = Fixture.Update(resource.Metadata.Uid, new ResourceVersion("1"), 7);
+
+        await service.UpdateSpecAsync(command, CancellationToken.None);
+        var replay = await service.UpdateSpecAsync(command, CancellationToken.None);
+
+        Assert.IsType<ResourceStoreResult.AlreadyApplied>(
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Success>(replay).Value);
+        Assert.Equal("2", repository.Resources[resource.Metadata.Uid].ResourceVersion.Value);
+        Assert.Equal(2, repository.Ledger.Count);
+    }
+
+    [Fact]
+    public async Task Reusing_an_update_transition_identity_for_a_different_spec_is_rejected()
+    {
+        var repository = new InMemoryResourceRepository();
+        var service = new ResourceApplicationService(repository);
+        var resource = Fixture.Project();
+        await service.CreateAsync(Fixture.Create(resource), CancellationToken.None);
+        var idempotencyKey = TransitionId.New();
+
+        await service.UpdateSpecAsync(
+            Fixture.Update(resource.Metadata.Uid, new ResourceVersion("1"), 7, idempotencyKey),
+            CancellationToken.None);
+        var replay = await service.UpdateSpecAsync(
+            Fixture.Update(resource.Metadata.Uid, new ResourceVersion("1"), 8, idempotencyKey),
+            CancellationToken.None);
+
+        Assert.Equal(
+            "idempotency-key-reused",
+            Assert.IsType<Result<ResourceStoreResult, ResourceCommandFailure>.Failure>(replay).Error.Code);
+    }
+
     [Theory]
     [InlineData("Invalid")]
     [InlineData("non_ascii-é")]
@@ -103,7 +142,7 @@ public sealed class ResourceApplicationTests
         var result = ResourceCommandDecisions.Create(Fixture.Create(project));
 
         Assert.Equal(
-            "invalid-resource-metadata",
+            "invalid-resource-name",
             Assert.IsType<Result<ResourceCommit, ResourceCommandFailure>.Failure>(result).Error.Code);
     }
 
@@ -146,6 +185,86 @@ public sealed class ResourceApplicationTests
 
         Assert.Equal(
             "unsupported-resource-version",
+            Assert.IsType<Result<ResourceCommit, ResourceCommandFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Generic_spec_updates_reject_immutable_admission_decisions()
+    {
+        var workload = Fixture.Workload();
+        var current = ResourceDocuments.From(Fixture.AdmissionDecision(workload));
+
+        var result = ResourceCommandDecisions.UpdateSpec(
+            current,
+            Fixture.Update(current.Id, current.ResourceVersion, 1));
+
+        Assert.Equal(
+            "immutable-resource",
+            Assert.IsType<Result<ResourceCommit, ResourceCommandFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Project_documents_are_canonical_v1alpha1_and_round_trip_through_the_mapper()
+    {
+        var project = Fixture.Project();
+        var document = ResourceDocuments.From(project).Document;
+
+        Assert.Equal(project.Metadata.Uid.ToString(), document.GetProperty("metadata").GetProperty("uid").GetString());
+        Assert.Equal("1", document.GetProperty("metadata").GetProperty("resourceVersion").GetString());
+        Assert.Equal("GitHubRelease", document.GetProperty("spec").GetProperty("evidenceArchive").GetProperty("provider").GetString());
+        Assert.IsType<Result<Project, ContractValidationError>.Success>(
+            V1Alpha1Json.DeserializeProject(document.GetRawText()));
+    }
+
+    [Fact]
+    public void Workload_documents_use_the_canonical_v1alpha1_mapper()
+    {
+        var document = ResourceDocuments.TryFrom(Fixture.Workload());
+
+        var persisted = Assert.IsType<Result<PersistedResource, ResourceCommandFailure>.Success>(document).Value;
+        Assert.Equal("GitHub", persisted.Document.GetProperty("spec").GetProperty("sourceProvider").GetString());
+        Assert.IsType<Result<Workload, ContractValidationError>.Success>(
+            V1Alpha1Json.DeserializeWorkload(persisted.Document.GetRawText()));
+    }
+
+    [Fact]
+    public void Unsupported_resources_are_not_reflection_serialised()
+    {
+        var result = ResourceDocuments.TryFrom(new UnsupportedResource(Fixture.Project().Metadata));
+
+        Assert.Equal(
+            "unsupported-canonical-resource",
+            Assert.IsType<Result<PersistedResource, ResourceCommandFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Update_rejects_an_invalid_persisted_canonical_document()
+    {
+        var current = ResourceDocuments.From(Fixture.Project()) with
+        {
+            Document = JsonSerializer.SerializeToElement(new { invalid = true })
+        };
+
+        var result = ResourceCommandDecisions.UpdateSpec(
+            current,
+            Fixture.Update(current.Id, current.ResourceVersion, 1));
+
+        Assert.Equal(
+            "invalid-persisted-document",
+            Assert.IsType<Result<ResourceCommit, ResourceCommandFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
+    public void Update_rejects_a_command_for_another_resource()
+    {
+        var current = ResourceDocuments.From(Fixture.Project());
+
+        var result = ResourceCommandDecisions.UpdateSpec(
+            current,
+            Fixture.Update(ResourceId.New(), current.ResourceVersion, 1));
+
+        Assert.Equal(
+            "resource-id-mismatch",
             Assert.IsType<Result<ResourceCommit, ResourceCommandFailure>.Failure>(result).Error.Code);
     }
 
@@ -268,6 +387,12 @@ public sealed class ResourceApplicationTests
                 new Result<AdmissionDecision, PolicyFailure>.Success(decision));
     }
 
+    private sealed record UnsupportedResource(ResourceMetadata Metadata) : IArmadaResource
+    {
+        public string ApiVersion => ArmadaApi.V1Alpha1;
+        public string Kind => "Node";
+    }
+
     private sealed class InMemoryResourceRepository : IResourceRepository
     {
         private readonly object gate = new();
@@ -279,6 +404,14 @@ public sealed class ResourceApplicationTests
 
         public Task<PersistedResource?> GetAsync(ResourceId id, CancellationToken cancellationToken) =>
             Task.FromResult(Resources.TryGetValue(id, out var resource) ? resource : null);
+
+        public Task<ResourceCommit?> FindByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken)
+        {
+            lock (gate)
+            {
+                return Task.FromResult(commits.GetValueOrDefault(idempotencyKey));
+            }
+        }
 
         public Task<ResourceStoreResult> CreateAsync(ResourceCommit commit, CancellationToken cancellationToken)
         {
@@ -340,12 +473,7 @@ internal static class Fixture
     public static Project Project() =>
         new(
             Metadata("project-one", null),
-            new(
-                [Repository("johnazariah/agentic-armada")],
-                new(Repository("johnazariah/armada-evidence")),
-                new(Digest()),
-                Digest(),
-                null),
+            CreateProjectSpec(),
             new(new(0, []), null));
 
     public static Workload Workload()
@@ -387,7 +515,7 @@ internal static class Fixture
                 IsolationProfile.DedicatedNode,
                 new(100, 0, 1024, 1024),
                 [],
-                [],
+                ["github.com"],
                 Digest(),
                 Now.AddMinutes(5)),
             new(new(0, []), AdmissionVerdict.Admitted, Digest()));
@@ -395,15 +523,28 @@ internal static class Fixture
     public static CreateResourceCommand Create(IArmadaResource resource) =>
         new(resource, new ActorId("api-user"), Guid.NewGuid(), null, Now);
 
-    public static UpdateResourceSpecCommand Update(ResourceId id, ResourceVersion version, int revision) =>
+    public static UpdateResourceSpecCommand Update(
+        ResourceId id,
+        ResourceVersion version,
+        int revision,
+        TransitionId? idempotencyKey = null) =>
         new(
             id,
             version,
-            JsonSerializer.SerializeToElement(new { revision }),
+            idempotencyKey ?? TransitionId.New(),
+            CreateProjectSpec(revision),
             new ActorId("api-user"),
             Guid.NewGuid(),
             null,
             Now.AddMinutes(1));
+
+    private static ProjectSpec CreateProjectSpec(int revision = 0) =>
+        new(
+            [Repository("johnazariah/agentic-armada")],
+            new(Repository("johnazariah/armada-evidence")),
+            new(Digest()),
+            Digest(),
+            revision == 0 ? null : revision);
 
     private static ResourceMetadata Metadata(string name, ProjectId? projectId) =>
         new(

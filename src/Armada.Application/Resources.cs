@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Armada.Contracts;
 
 namespace Armada.Application;
@@ -54,6 +53,8 @@ public interface IResourceRepository
 {
     Task<PersistedResource?> GetAsync(ResourceId id, CancellationToken cancellationToken);
 
+    Task<ResourceCommit?> FindByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken);
+
     Task<ResourceStoreResult> CreateAsync(ResourceCommit commit, CancellationToken cancellationToken);
 
     Task<ResourceStoreResult> CompareAndSwapAsync(
@@ -74,7 +75,8 @@ public sealed record CreateResourceCommand(
 public sealed record UpdateResourceSpecCommand(
     ResourceId ResourceId,
     ResourceVersion ExpectedResourceVersion,
-    JsonElement Spec,
+    TransitionId IdempotencyKey,
+    ProjectSpec Spec,
     ActorId Actor,
     Guid CorrelationId,
     Guid? CausationId,
@@ -84,13 +86,34 @@ public static class ResourceDocuments
 {
     private static readonly JsonSerializerOptions SerializerOptions = new(JsonSerializerDefaults.Web);
 
-    public static PersistedResource From(IArmadaResource resource)
+    public static PersistedResource From(IArmadaResource resource) =>
+        TryFrom(resource) switch
+        {
+            Result<PersistedResource, ResourceCommandFailure>.Success success => success.Value,
+            Result<PersistedResource, ResourceCommandFailure>.Failure failure =>
+                throw new ArgumentException(failure.Error.Message, nameof(resource)),
+            _ => throw new InvalidOperationException("Unsupported resource serialisation result.")
+        };
+
+    public static Result<PersistedResource, ResourceCommandFailure> TryFrom(IArmadaResource resource)
     {
         ArgumentNullException.ThrowIfNull(resource);
 
-        var document = JsonSerializer.SerializeToElement(resource, resource.GetType(), SerializerOptions);
+        var canonical = resource switch
+        {
+            Project project => Canonical(V1Alpha1Json.Serialize(project), V1Alpha1Json.DeserializeProject),
+            Workload workload => Canonical(V1Alpha1Json.Serialize(workload), V1Alpha1Json.DeserializeWorkload),
+            AdmissionDecision decision => Canonical(V1Alpha1Json.Serialize(decision), V1Alpha1Json.DeserializeAdmissionDecision),
+            _ => new Result<JsonElement, ResourceCommandFailure>.Failure(
+                new("unsupported-canonical-resource", $"No canonical v1alpha1 mapper is available for {resource.Kind}."))
+        };
+        if (canonical is Result<JsonElement, ResourceCommandFailure>.Failure failure)
+        {
+            return new Result<PersistedResource, ResourceCommandFailure>.Failure(failure.Error);
+        }
 
-        return new(
+        var document = ((Result<JsonElement, ResourceCommandFailure>.Success)canonical).Value;
+        return new Result<PersistedResource, ResourceCommandFailure>.Success(new(
             resource.Metadata.Uid,
             resource.Kind,
             resource.Metadata.OrganisationId,
@@ -100,7 +123,7 @@ public static class ResourceDocuments
             resource.Metadata.ResourceVersion,
             document,
             resource.Metadata.CreatedAt,
-            resource.Metadata.UpdatedAt);
+            resource.Metadata.UpdatedAt));
     }
 
     internal static JsonElement EventPayload(PersistedResource resource) =>
@@ -113,6 +136,19 @@ public static class ResourceDocuments
         string Kind,
         long Generation,
         string ResourceVersion);
+
+    private static Result<JsonElement, ResourceCommandFailure> Canonical<T>(
+        string json,
+        Func<string, Result<T, ContractValidationError>> deserialize) =>
+        deserialize(json) switch
+        {
+            Result<T, ContractValidationError>.Success => new Result<JsonElement, ResourceCommandFailure>.Success(
+                JsonDocument.Parse(json).RootElement.Clone()),
+            Result<T, ContractValidationError>.Failure failure => new Result<JsonElement, ResourceCommandFailure>.Failure(
+                new(failure.Error.Code, failure.Error.Message)),
+            _ => throw new InvalidOperationException("Unsupported canonical mapper result.")
+        };
+
 }
 
 public static class ResourceCommandDecisions
@@ -136,7 +172,13 @@ public static class ResourceCommandDecisions
     {
         ArgumentNullException.ThrowIfNull(command);
 
-        var resource = ResourceDocuments.From(command.Resource);
+        var persisted = ResourceDocuments.TryFrom(command.Resource);
+        if (persisted is Result<PersistedResource, ResourceCommandFailure>.Failure serialisationFailure)
+        {
+            return new Result<ResourceCommit, ResourceCommandFailure>.Failure(serialisationFailure.Error);
+        }
+
+        var resource = ((Result<PersistedResource, ResourceCommandFailure>.Success)persisted).Value;
         var validation = ValidateCreation(resource);
         if (validation is Result<bool, ResourceCommandFailure>.Failure failure)
         {
@@ -160,6 +202,11 @@ public static class ResourceCommandDecisions
             return Failure("resource-id-mismatch", "The update command must target the supplied resource.");
         }
 
+        if (current.Kind is not "Project")
+        {
+            return Failure("immutable-resource", $"{current.Kind} cannot be updated through a generic spec command.");
+        }
+
         if (current.ResourceVersion != command.ExpectedResourceVersion)
         {
             return Failure("stale-resource-version", "The supplied resource version is stale.");
@@ -170,35 +217,39 @@ public static class ResourceCommandDecisions
             return Failure("unsupported-resource-version", "The persisted resource version cannot be advanced.");
         }
 
-        var document = JsonNode.Parse(current.Document.GetRawText())?.AsObject();
-        if (document is null || document["metadata"] is not JsonObject metadata)
+        if (V1Alpha1Json.DeserializeProject(current.Document.GetRawText()) is not Result<Project, ContractValidationError>.Success project)
         {
-            return Failure("invalid-persisted-document", "The persisted resource is missing metadata.");
+            return Failure("invalid-persisted-document", "The persisted project does not match the v1alpha1 mapper.");
         }
 
         var nextGeneration = checked(current.Generation + 1);
-        metadata["resourceVersion"] = new JsonObject { ["value"] = nextVersion.Value };
-        metadata["generation"] = nextGeneration;
-        metadata["updatedAt"] = command.OccurredAt;
-        document["spec"] = JsonNode.Parse(command.Spec.GetRawText());
-
-        var updated = current with
+        var updatedProject = project.Value with
         {
-            Generation = nextGeneration,
-            ResourceVersion = nextVersion,
-            Document = JsonSerializer.SerializeToElement(document),
-            UpdatedAt = command.OccurredAt
+            Metadata = project.Value.Metadata with
+            {
+                ResourceVersion = nextVersion,
+                Generation = nextGeneration,
+                UpdatedAt = command.OccurredAt
+            },
+            Spec = command.Spec
         };
+
+        var updated = ResourceDocuments.TryFrom(updatedProject);
+        if (updated is Result<PersistedResource, ResourceCommandFailure>.Failure canonicalFailure)
+        {
+            return Failure("invalid-updated-resource", canonicalFailure.Error.Message);
+        }
 
         return new Result<ResourceCommit, ResourceCommandFailure>.Success(
             Commit(
-                updated,
-                $"{updated.Kind}.spec-updated",
+                ((Result<PersistedResource, ResourceCommandFailure>.Success)updated).Value,
+                $"{current.Kind}.spec-updated",
                 "spec-updated",
                 command.Actor,
                 command.CorrelationId,
                 command.CausationId,
-                command.OccurredAt));
+                command.OccurredAt,
+                command.IdempotencyKey.ToString()));
     }
 
     private static Result<bool, ResourceCommandFailure> ValidateCreation(PersistedResource resource)
@@ -254,8 +305,19 @@ public static class ResourceCommandDecisions
         Guid correlationId,
         Guid? causationId,
         DateTimeOffset occurredAt)
+        => Commit(resource, eventType, operation, actor, correlationId, causationId, occurredAt, null);
+
+    private static ResourceCommit Commit(
+        PersistedResource resource,
+        string eventType,
+        string operation,
+        ActorId actor,
+        Guid correlationId,
+        Guid? causationId,
+        DateTimeOffset occurredAt,
+        string? idempotencyKey)
     {
-        var idempotencyKey = $"{resource.Id}:{resource.ResourceVersion}:{operation}";
+        idempotencyKey ??= $"{resource.Id}:{resource.ResourceVersion}:{operation}";
         var payload = ResourceDocuments.EventPayload(resource);
         var ledgerEvent = new LedgerEvent(
             Guid.NewGuid(),
@@ -330,6 +392,16 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
         UpdateResourceSpecCommand command,
         CancellationToken cancellationToken)
     {
+        var prior = await repository.FindByIdempotencyKeyAsync(command.IdempotencyKey.ToString(), cancellationToken);
+        if (prior is not null)
+        {
+            return IsMatchingReplay(prior, command)
+                ? new Result<ResourceStoreResult, ResourceCommandFailure>.Success(
+                    new ResourceStoreResult.AlreadyApplied(prior))
+                : new Result<ResourceStoreResult, ResourceCommandFailure>.Failure(
+                    new("idempotency-key-reused", "The transition identity was already used for a different update."));
+        }
+
         var current = await repository.GetAsync(command.ResourceId, cancellationToken);
         if (current is null)
         {
@@ -347,5 +419,23 @@ public sealed class ResourceApplicationService(IResourceRepository repository)
                     await repository.CompareAndSwapAsync(success.Value, command.ExpectedResourceVersion, cancellationToken)),
             _ => throw new InvalidOperationException("Unsupported resource command decision.")
         };
+    }
+
+    private static bool IsMatchingReplay(ResourceCommit prior, UpdateResourceSpecCommand command)
+    {
+        if (prior.Resource.Id != command.ResourceId ||
+            !long.TryParse(command.ExpectedResourceVersion.Value, out var expectedVersion) ||
+            !long.TryParse(prior.Resource.ResourceVersion.Value, out var persistedVersion) ||
+            persistedVersion != expectedVersion + 1 ||
+            V1Alpha1Json.DeserializeProject(prior.Resource.Document.GetRawText()) is not Result<Project, ContractValidationError>.Success persistedProject)
+        {
+            return false;
+        }
+
+        var expected = ResourceDocuments.TryFrom(persistedProject.Value with { Spec = command.Spec });
+        return expected is Result<PersistedResource, ResourceCommandFailure>.Success expectedResource &&
+               expectedResource.Value.Document.TryGetProperty("spec", out var expectedSpec) &&
+               prior.Resource.Document.TryGetProperty("spec", out var persistedSpec) &&
+               JsonElement.DeepEquals(expectedSpec, persistedSpec);
     }
 }

@@ -27,6 +27,17 @@ public sealed class PostgresResourceRepository(NpgsqlDataSource dataSource) : IR
         return await reader.ReadAsync(cancellationToken) ? ReadResource(reader) : null;
     }
 
+    public async Task<ResourceCommit?> FindByIdempotencyKeyAsync(
+        string idempotencyKey,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+        var commit = await FindCommitByIdempotencyKeyAsync(connection, transaction, idempotencyKey, cancellationToken);
+        await transaction.RollbackAsync(cancellationToken);
+        return commit;
+    }
+
     public Task<ResourceStoreResult> CreateAsync(ResourceCommit commit, CancellationToken cancellationToken) =>
         CommitAsync(commit, null, cancellationToken);
 
