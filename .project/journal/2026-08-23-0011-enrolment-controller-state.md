@@ -18,6 +18,10 @@ It records liveness only; a normal request cannot replace it, even after expiry.
 The original reservation holder can complete before claim expiry. Otherwise the
 claim remains fail-closed, with no automated abandonment or reissue path in PR B.
 
+Reservation correction: claim expiry and reservation timestamps are derived from
+`clock_timestamp()` while the claim row is locked. A stale caller timestamp cannot
+authorise issuance after a queued reservation reaches database expiry.
+
 The repository deliberately refuses the older direct consume/register paths:
 without a certificate binding they cannot preserve the at-most-one transition.
 Replay is exact only when the full persisted identity matches; sequence, message,

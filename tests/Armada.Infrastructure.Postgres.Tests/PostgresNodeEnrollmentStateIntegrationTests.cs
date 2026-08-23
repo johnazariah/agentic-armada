@@ -237,6 +237,39 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Queued_reservation_cannot_authorise_issuance_after_database_expiry()
+    {
+        await ResetAsync();
+        var secret = Enumerable.Repeat((byte)11, 32).ToArray();
+        var claim = Claim();
+        await SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddSeconds(1));
+        await using var lockConnection = await (dataSource ?? throw new InvalidOperationException()).OpenConnectionAsync();
+        await using var lockTransaction = await lockConnection.BeginTransactionAsync();
+        await using (var lockClaim = new NpgsqlCommand(
+            "SELECT claim_id FROM armada_enrollment_claims WHERE claim_id = @claimId FOR UPDATE;",
+            lockConnection,
+            lockTransaction))
+        {
+            lockClaim.Parameters.AddWithValue("claimId", claim.ClaimId);
+            await lockClaim.ExecuteNonQueryAsync();
+        }
+
+        var reservation = Repository.ReserveAsync(
+            claim,
+            secret,
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow.AddMinutes(-2),
+            CancellationToken.None);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200));
+        await lockTransaction.CommitAsync();
+        var result = await reservation;
+
+        Assert.Equal(
+            "enrollment-claim-expired",
+            Assert.IsType<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
     public async Task Direct_claim_consumption_and_identity_registration_cannot_bypass_atomic_binding()
     {
         await ResetAsync();

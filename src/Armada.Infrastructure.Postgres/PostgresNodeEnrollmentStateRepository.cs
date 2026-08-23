@@ -84,7 +84,8 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                 "The enrolment claim has already been consumed.");
         }
 
-        if (claim.ExpiresAt <= now)
+        var databaseNow = await ReadDatabaseNowAsync(connection, transaction, cancellationToken);
+        if (claim.ExpiresAt <= databaseNow)
         {
             await transaction.RollbackAsync(cancellationToken);
             return ClaimFailure<EnrollmentClaimReservation>(
@@ -100,7 +101,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                 "An issuer reservation already exists for this enrolment claim.");
         }
 
-        var reservationExpiresAt = Min(claim.ExpiresAt, now.AddMinutes(5));
+        var reservationExpiresAt = Min(claim.ExpiresAt, databaseNow.AddMinutes(5));
         await using (var reserve = new NpgsqlCommand(
             """
             UPDATE armada_enrollment_claims
@@ -113,7 +114,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
             transaction))
         {
             reserve.Parameters.AddWithValue("requestId", requestId);
-            reserve.Parameters.AddWithValue("reservedAt", now);
+            reserve.Parameters.AddWithValue("reservedAt", databaseNow);
             reserve.Parameters.AddWithValue("reservationExpiresAt", reservationExpiresAt);
             reserve.Parameters.AddWithValue("claimId", reference.ClaimId);
             await reserve.ExecuteNonQueryAsync(cancellationToken);
@@ -513,6 +514,24 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
 
         return new(
             reader.GetBoolean(0));
+    }
+
+    private static async Task<DateTimeOffset> ReadDatabaseNowAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            "SELECT clock_timestamp();",
+            connection,
+            transaction);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("PostgreSQL did not return its current timestamp.");
+        }
+
+        return reader.GetFieldValue<DateTimeOffset>(0);
     }
 
     private static async Task<bool> InsertIdentityAsync(
