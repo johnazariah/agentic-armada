@@ -564,11 +564,11 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
             """
             INSERT INTO armada_transport_replay_receipts
                 (node_uid, identity_epoch, stream_epoch, sequence, message_id, correlation_id,
-                 idempotency_key, protocol_version, payload_kind, sent_at, payload_digest,
+                 idempotency_key, protocol_version, payload_kind, sent_at, sent_at_ticks, payload_digest,
                  acknowledgement, recorded_at)
             VALUES
                 (@nodeUid, @identityEpoch, @streamEpoch, @sequence, @messageId, @correlationId,
-                 @idempotencyKey, @protocolVersion, @payloadKind, @sentAt, @payloadDigest,
+                 @idempotencyKey, @protocolVersion, @payloadKind, @sentAt, @sentAtTicks, @payloadDigest,
                  CAST(@acknowledgement AS jsonb), @recordedAt)
             ON CONFLICT DO NOTHING;
             """,
@@ -587,7 +587,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         await using var command = new NpgsqlCommand(
             """
             SELECT node_uid, identity_epoch, stream_epoch, sequence, message_id, correlation_id,
-                   idempotency_key, protocol_version, payload_kind, sent_at, payload_digest,
+                   idempotency_key, protocol_version, payload_kind, sent_at_ticks, payload_digest,
                    acknowledgement::text
             FROM armada_transport_replay_receipts
             WHERE (node_uid = @nodeUid AND identity_epoch = @identityEpoch
@@ -621,7 +621,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
             reader.GetString(6),
             reader.GetString(7),
             Enum.Parse<TransportPayloadKind>(reader.GetString(8), ignoreCase: false),
-            reader.GetFieldValue<DateTimeOffset>(9),
+            new DateTimeOffset(reader.GetInt64(9), TimeSpan.Zero),
             ParseDigest(reader.GetString(10)));
         var acknowledgement = JsonSerializer.Deserialize<TransportAcknowledgement>(reader.GetString(11))
             ?? throw new InvalidOperationException("A persisted replay acknowledgement could not be deserialised.");
@@ -689,6 +689,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         command.Parameters.AddWithValue("protocolVersion", identity.ProtocolVersion);
         command.Parameters.AddWithValue("payloadKind", identity.PayloadKind.ToString());
         command.Parameters.AddWithValue("sentAt", identity.SentAt);
+        command.Parameters.AddWithValue("sentAtTicks", identity.SentAt.UtcDateTime.Ticks);
         command.Parameters.AddWithValue("payloadDigest", identity.PayloadDigest.Value);
         command.Parameters.AddWithValue("acknowledgement", JsonSerializer.Serialize(receipt.Acknowledgement));
         command.Parameters.AddWithValue("recordedAt", DateTimeOffset.UtcNow);
@@ -715,7 +716,11 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
     private static bool Matches(StoredIdentity identity, EnrollmentCompletionRequest request)
     {
         var response = ReadResponse(identity.Response);
-        return ToBinding(identity) == request.Identity &&
+        return identity.NodeUid == request.Identity.NodeUid &&
+               identity.IdentityEpoch == request.Identity.IdentityEpoch &&
+               identity.PublicKeyDigest == request.Identity.PublicKeyDigest &&
+               identity.CertificateSerial == request.Identity.CertificateSerial &&
+               identity.CertificateThumbprintSha256 == request.Identity.CertificateThumbprintSha256 &&
                response.ProtocolVersion == request.Response.ProtocolVersion &&
                response.NodeUid == request.Response.NodeUid &&
                response.IdentityEpoch == request.Response.IdentityEpoch &&

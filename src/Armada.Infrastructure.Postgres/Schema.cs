@@ -141,6 +141,7 @@ public static class PostgresSchema
                 protocol_version TEXT NOT NULL,
                 payload_kind TEXT NOT NULL,
                 sent_at TIMESTAMPTZ NOT NULL,
+                sent_at_ticks BIGINT NOT NULL,
                 payload_digest TEXT NOT NULL CHECK (payload_digest ~ '^sha256:[0-9a-f]{64}$'),
                 acknowledgement JSONB NOT NULL,
                 recorded_at TIMESTAMPTZ NOT NULL,
