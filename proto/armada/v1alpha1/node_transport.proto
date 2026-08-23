@@ -1,0 +1,138 @@
+syntax = "proto3";
+
+package armada.node.transport.v1alpha1;
+
+option csharp_namespace = "Armada.Contracts.V1Alpha1";
+
+import "google/protobuf/timestamp.proto";
+
+// Tags and oneof members in this file are append-only. A deployed tag is never
+// repurposed. The v1alpha1 transport family is armada.node.transport/v1alpha1.
+service NodeEnrollment {
+  rpc Enroll(EnrollmentRequest) returns (EnrollmentResponse);
+}
+
+service NodeTransport {
+  rpc Connect(stream NodeToControl) returns (stream ControlToNode);
+}
+
+message EnrollmentInventory {
+  map<string, string> facts = 1;
+  repeated string capabilities = 2;
+}
+
+message EnrollmentRequest {
+  string protocol_version = 1;
+  string claim_id = 2;
+  bytes claim_secret = 3;
+  string node_uid = 4;
+  int64 identity_epoch = 5;
+  bytes device_public_key = 6;
+  bytes public_key_sha256 = 7;
+  bytes certificate_signing_request = 8;
+  EnrollmentInventory inventory = 9;
+  optional bytes attestation = 10;
+  string request_id = 11;
+  google.protobuf.Timestamp sent_at = 12;
+}
+
+message EnrollmentResponse {
+  string protocol_version = 1;
+  string node_uid = 2;
+  int64 identity_epoch = 3;
+  string certificate_serial = 4;
+  google.protobuf.Timestamp expires_at = 5;
+  bytes leaf_certificate_der = 6;
+  bytes issuing_ca_der = 7;
+  string correlation_id = 8;
+}
+
+message Hello {
+  string schema_version = 1;
+  string agent_version = 2;
+  string payload_type = 3;
+}
+
+message FullReconciliationSnapshot {
+  string schema_version = 1;
+  bytes snapshot = 2;
+  string payload_type = 3;
+}
+
+message InventoryObservation {
+  string schema_version = 1;
+  EnrollmentInventory inventory = 2;
+  string payload_type = 3;
+}
+
+message HealthObservation {
+  string schema_version = 1;
+  bool storage_available = 2;
+  string payload_type = 3;
+}
+
+message TransportAck {
+  string schema_version = 1;
+  string acknowledged_message_id = 2;
+  string code = 3;
+  string payload_type = 4;
+}
+
+enum TransportRejectionCode {
+  TRANSPORT_REJECTION_CODE_UNSPECIFIED = 0;
+  TRANSPORT_REJECTION_CODE_INVALID_ENVELOPE = 1;
+  TRANSPORT_REJECTION_CODE_UNSUPPORTED_VERSION = 2;
+  TRANSPORT_REJECTION_CODE_REPLAY_CONFLICT = 3;
+  TRANSPORT_REJECTION_CODE_REVOKED_IDENTITY = 4;
+}
+
+message TransportRejection {
+  string schema_version = 1;
+  TransportRejectionCode code = 2;
+  string message = 3;
+  string payload_type = 4;
+}
+
+message NodeToControl {
+  string protocol_version = 1;
+  string node_uid = 2;
+  int64 identity_epoch = 3;
+  int64 stream_epoch = 4;
+  int64 sequence = 5;
+  string message_id = 6;
+  string correlation_id = 7;
+  string idempotency_key = 8;
+  google.protobuf.Timestamp sent_at = 9;
+  reserved 26 to 29;
+  reserved "command", "admission", "lease", "process", "credential";
+  oneof payload {
+    Hello hello = 20;
+    FullReconciliationSnapshot full_reconciliation_snapshot = 21;
+    InventoryObservation inventory_observation = 22;
+    HealthObservation health_observation = 23;
+    TransportAck transport_ack = 24;
+    TransportRejection transport_rejection = 25;
+  }
+}
+
+message ControlToNode {
+  string protocol_version = 1;
+  string node_uid = 2;
+  int64 identity_epoch = 3;
+  int64 stream_epoch = 4;
+  int64 sequence = 5;
+  string message_id = 6;
+  string correlation_id = 7;
+  string idempotency_key = 8;
+  google.protobuf.Timestamp sent_at = 9;
+  reserved 26 to 29;
+  reserved "command", "admission", "lease", "process", "credential";
+  oneof payload {
+    Hello hello = 20;
+    FullReconciliationSnapshot full_reconciliation_snapshot = 21;
+    InventoryObservation inventory_observation = 22;
+    HealthObservation health_observation = 23;
+    TransportAck transport_ack = 24;
+    TransportRejection transport_rejection = 25;
+  }
+}
