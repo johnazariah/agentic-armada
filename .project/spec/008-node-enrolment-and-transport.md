@@ -59,8 +59,14 @@ The contract validates no chain and issues no certificate.
 
 PR B uses operator-applied PostgreSQL migration 3. Claims store a unique ID,
 SHA-256 verifier, intended node/epoch/key digest, assurance JSON and expiry;
-the raw secret is never stored. A validated request first acquires a short-lived,
-request-bound reservation, so concurrent issuers cannot both proceed. The only completion transition locks the claim,
+the raw secret is never stored. A validated request first acquires a
+request-bound, single-assignment reservation, so concurrent issuers cannot both
+proceed. Reservation expiry is diagnostic only: it never authorises a second
+request, including when the original issuer may still be running. The original
+request may complete while the claim itself remains valid. If it never completes,
+PR B leaves the claim fail-closed; it supplies no automatic abandonment or
+reissue path. A future controller recovery operation must first prove the external
+issuer did not issue and is explicitly outside this PR. The only completion transition locks the claim,
 re-verifies its secret and intended identity, inserts the epoch-bound certificate
 identity and response, consumes the claim, and writes correlated append-only audit
 and outbox records in one transaction. A later retry with the same authenticated

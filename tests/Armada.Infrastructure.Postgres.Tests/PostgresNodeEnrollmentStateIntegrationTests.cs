@@ -188,6 +188,31 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Expired_reservation_is_never_reassigned_while_the_original_issuer_may_still_complete()
+    {
+        await ResetAsync();
+        var secret = Enumerable.Repeat((byte)10, 32).ToArray();
+        var claim = Claim();
+        var original = Completion(claim, secret);
+        await SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddMinutes(10));
+        await SeedReservationAsync(claim.ClaimId, original.RequestId, DateTimeOffset.UtcNow.AddMinutes(-1));
+
+        var competing = await Repository.ReserveAsync(
+            claim,
+            secret,
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+        var originalCompletion = await Repository.CompleteAsync(original, CancellationToken.None);
+
+        Assert.Equal(
+            "enrollment-claim-in-progress",
+            Assert.IsType<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Failure>(competing).Error.Code);
+        Assert.IsType<Result<EnrollmentCompletion, EnrollmentStateStoreFailure>.Success>(originalCompletion);
+        Assert.Equal(1L, await CountAsync("armada_node_certificate_identities"));
+    }
+
+    [Fact]
     public async Task Wrong_secret_hides_whether_the_claim_identity_matches()
     {
         await ResetAsync();

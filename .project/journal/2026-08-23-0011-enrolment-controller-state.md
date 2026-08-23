@@ -13,6 +13,11 @@ in its locked transaction; the caller timestamp remains audit metadata only. Cla
 credential checks hash and compare the secret before disclosing an authenticated
 identity-binding mismatch.
 
+Final recovery correction: reservation expiry is no longer a reassignment lease.
+It records liveness only; a normal request cannot replace it, even after expiry.
+The original reservation holder can complete before claim expiry. Otherwise the
+claim remains fail-closed, with no automated abandonment or reissue path in PR B.
+
 The repository deliberately refuses the older direct consume/register paths:
 without a certificate binding they cannot preserve the at-most-one transition.
 Replay is exact only when the full persisted identity matches; sequence, message,

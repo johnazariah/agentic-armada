@@ -92,12 +92,12 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                 "The enrolment claim has expired.");
         }
 
-        if (claim.ReservationExpiresAt > now)
+        if (claim.ReservationRequestId is not null)
         {
             await transaction.RollbackAsync(cancellationToken);
             return ClaimFailure<EnrollmentClaimReservation>(
                 "enrollment-claim-in-progress",
-                "Another enrolment request currently holds this claim reservation.");
+                "An issuer reservation already exists for this enrolment claim.");
         }
 
         var reservationExpiresAt = Min(claim.ExpiresAt, now.AddMinutes(5));
@@ -219,13 +219,12 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                 "The enrolment claim has expired.");
         }
 
-        if (claim.ReservationRequestId != request.RequestId ||
-            !timing.ReservationIsCurrent)
+        if (claim.ReservationRequestId != request.RequestId)
         {
             await transaction.RollbackAsync(cancellationToken);
             return StateFailure<EnrollmentCompletion>(
                 "enrollment-claim-reservation-mismatch",
-                "The enrolment completion does not hold a current claim reservation.");
+                "The enrolment completion does not own the claim reservation.");
         }
 
         if (!await InsertIdentityAsync(connection, transaction, request, cancellationToken))
@@ -499,8 +498,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
     {
         await using var command = new NpgsqlCommand(
             """
-            SELECT expires_at > clock_timestamp(),
-                   issuance_reservation_expires_at > clock_timestamp()
+            SELECT expires_at > clock_timestamp()
             FROM armada_enrollment_claims
             WHERE claim_id = @claimId;
             """,
@@ -514,8 +512,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         }
 
         return new(
-            reader.GetBoolean(0),
-            !reader.IsDBNull(1) && reader.GetBoolean(1));
+            reader.GetBoolean(0));
     }
 
     private static async Task<bool> InsertIdentityAsync(
@@ -842,7 +839,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         DateTimeOffset ReservationExpiresAt,
         DateTimeOffset? ConsumedAt);
 
-    private sealed record CompletionTiming(bool ClaimIsCurrent, bool ReservationIsCurrent);
+    private sealed record CompletionTiming(bool ClaimIsCurrent);
 
     private sealed record StoredIdentity(
         NodeUid NodeUid,
