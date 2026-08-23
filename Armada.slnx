@@ -8,6 +8,8 @@
     <Project Path="src/Armada.Infrastructure.Postgres/Armada.Infrastructure.Postgres.csproj" />
     <Project Path="src/Armada.ControlPlane.Host/Armada.ControlPlane.Host.csproj" />
     <Project Path="src/Armada.Lab.Mtls/Armada.Lab.Mtls.csproj" />
+    <Project Path="tools/Armada.Lab.Mtls.LiveHarness/Armada.Lab.Mtls.LiveHarness.csproj" />
+    <Project Path="tools/Armada.Lab.Mtls.WslClient/Armada.Lab.Mtls.WslClient.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Armada.Contracts.Tests/Armada.Contracts.Tests.csproj" />
@@ -18,5 +20,6 @@
     <Project Path="tests/Armada.Infrastructure.GitHub.Tests/Armada.Infrastructure.GitHub.Tests.csproj" />
     <Project Path="tests/Armada.ControlPlane.Host.Tests/Armada.ControlPlane.Host.Tests.csproj" />
     <Project Path="tests/Armada.Lab.Mtls.Tests/Armada.Lab.Mtls.Tests.csproj" />
+    <Project Path="tests/Armada.Lab.Mtls.Harness.Tests/Armada.Lab.Mtls.Harness.Tests.csproj" />
   </Folder>
 </Solution>

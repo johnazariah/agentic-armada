@@ -1,0 +1,20 @@
+# C2 live mTLS harness
+
+**Status:** implementation review only. No live run is approved by this runbook.
+
+The harness accepts `--preflight` and explicit `--postgres-admin-connection`,
+`--listen-ip`, `--enrollment-port`, `--stream-port`, `--database`, and
+`--evidence-directory` values. It accepts only a generated
+`armada_c2_<32 lowercase hex>` database name, one exact non-loopback IP, and
+two distinct ports. Preflight deliberately creates no CA, listener, database,
+claim, certificate, or SSH/WSL state.
+
+After a separate execution approval, the required ordering is: publish and
+hash the helper; use stdin-only `ssh -T johnaz-phd-wsl` to create the verified
+WSL `0700` root and return the public device frame; validate its P-256 SPKI,
+digest and CSR; create the disposable database and single verifier claim;
+create the ephemeral CA/listeners; send the secret over stdin or a verified
+`0600` transient file; run the proof; then remove remote state, stop listeners,
+drop only the exact generated database and remove only the verified local root.
+Any cleanup failure fails the run. Retain only redacted evidence digests and
+public certificate fingerprints.

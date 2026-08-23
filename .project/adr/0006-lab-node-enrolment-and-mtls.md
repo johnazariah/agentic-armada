@@ -26,4 +26,7 @@ input, expired/revoked identities, and replay conflicts fail closed.
 PR A supplies immutable contracts, pure validation decisions and narrow ports
 only. It supplies neither a CA nor storage, a listener, a network client, a
 claim-creation path, or a mutation of `NodeIdentity`. PR B owns durable
-claim/identity/replay state; PR C owns the lab-only CA and endpoints.
+claim/identity/replay state; PR C owns the lab-only CA and endpoints. C2 uses two WSL phases: public device
+key/CSR generation and verification precede claim seeding; only then may the
+secret-bearing enrolment phase run. The C2 client owns private raw wire
+marshallers and does not widen C1's internal raw server binder.
