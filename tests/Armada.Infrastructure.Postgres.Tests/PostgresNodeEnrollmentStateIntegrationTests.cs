@@ -34,19 +34,18 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Concurrent_same_claim_binds_one_identity_and_returns_the_durable_response()
+    public async Task Concurrent_same_request_reservations_authorise_one_issuance_and_bind_one_identity()
     {
         await ResetAsync();
         var secret = Enumerable.Repeat((byte)7, 32).ToArray();
         var claim = Claim();
         await SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddMinutes(10));
         var request = Completion(claim, secret);
-        var competingRequest = request with { RequestId = Guid.NewGuid() };
         var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reservations = new[]
         {
             ReserveAfterStartAsync(request, start.Task),
-            ReserveAfterStartAsync(competingRequest, start.Task)
+            ReserveAfterStartAsync(request, start.Task)
         };
         start.SetResult();
         var reservationResults = await Task.WhenAll(reservations);
@@ -55,14 +54,10 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
             "enrollment-claim-in-progress",
             Assert.IsType<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Failure>(
                 Assert.Single(reservationResults, static result => result is Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Failure)).Error.Code);
-        var winner = reservationResults[0] is Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Success
-            ? request
-            : competingRequest;
-
         var completions = new[]
         {
-            CompleteAfterStartAsync(winner, Task.CompletedTask),
-            CompleteAfterStartAsync(winner, Task.CompletedTask)
+            CompleteAfterStartAsync(request, Task.CompletedTask),
+            CompleteAfterStartAsync(request, Task.CompletedTask)
         };
         var results = await Task.WhenAll(completions);
 
@@ -78,8 +73,8 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
                 Value: EnrollmentCompletion.AlreadyCompleted
             })).Value;
         var replayResponse = Assert.IsType<EnrollmentCompletion.AlreadyCompleted>(replay).Response;
-        Assert.Equal(winner.Response.CertificateSerial, replayResponse.CertificateSerial);
-        Assert.True(winner.Response.LeafCertificateDer.SequenceEqual(replayResponse.LeafCertificateDer));
+        Assert.Equal(request.Response.CertificateSerial, replayResponse.CertificateSerial);
+        Assert.True(request.Response.LeafCertificateDer.SequenceEqual(replayResponse.LeafCertificateDer));
         Assert.Equal(1L, await CountAsync("armada_node_certificate_identities"));
         Assert.Equal(1L, await CountAsync("armada_node_transport_audit"));
         Assert.Equal(1L, await CountAsync("armada_node_transport_outbox"));
@@ -172,6 +167,51 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Completion_uses_database_time_not_a_stale_caller_timestamp()
+    {
+        await ResetAsync();
+        var secret = Enumerable.Repeat((byte)5, 32).ToArray();
+        var claim = Claim();
+        var completion = Completion(claim, secret);
+        var expiredAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        await SeedClaimAsync(claim, secret, expiredAt);
+        await SeedReservationAsync(claim.ClaimId, completion.RequestId, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var result = await Repository.CompleteAsync(
+            completion with { OccurredAt = expiredAt.AddMinutes(-1) },
+            CancellationToken.None);
+
+        Assert.Equal(
+            "enrollment-claim-expired",
+            Assert.IsType<Result<EnrollmentCompletion, EnrollmentStateStoreFailure>.Failure>(result).Error.Code);
+        Assert.Equal(0L, await CountAsync("armada_node_certificate_identities"));
+    }
+
+    [Fact]
+    public async Task Wrong_secret_hides_whether_the_claim_identity_matches()
+    {
+        await ResetAsync();
+        var secret = Enumerable.Repeat((byte)6, 32).ToArray();
+        var wrongSecret = Enumerable.Repeat((byte)8, 32).ToArray();
+        var claim = Claim();
+        await SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddMinutes(10));
+
+        var matching = await Repository.VerifyAsync(claim, wrongSecret, DateTimeOffset.UtcNow, CancellationToken.None);
+        var mismatched = await Repository.VerifyAsync(
+            claim with { PublicKeyDigest = Digest('f') },
+            wrongSecret,
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+
+        Assert.Equal(
+            "unauthenticated-enrollment-claim",
+            Assert.IsType<Result<EnrollmentClaimState, EnrollmentClaimStoreFailure>.Failure>(matching).Error.Code);
+        Assert.Equal(
+            FailureCode(matching),
+            FailureCode(mismatched));
+    }
+
+    [Fact]
     public async Task Direct_claim_consumption_and_identity_registration_cannot_bypass_atomic_binding()
     {
         await ResetAsync();
@@ -256,6 +296,25 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
         await command.ExecuteNonQueryAsync();
     }
 
+    private async Task SeedReservationAsync(Guid claimId, Guid requestId, DateTimeOffset expiresAt)
+    {
+        await using var connection = await (dataSource ?? throw new InvalidOperationException()).OpenConnectionAsync();
+        await using var command = new NpgsqlCommand(
+            """
+            UPDATE armada_enrollment_claims
+            SET issuance_request_id = @requestId,
+                issuance_reserved_at = @reservedAt,
+                issuance_reservation_expires_at = @expiresAt
+            WHERE claim_id = @claimId;
+            """,
+            connection);
+        command.Parameters.AddWithValue("claimId", claimId);
+        command.Parameters.AddWithValue("requestId", requestId);
+        command.Parameters.AddWithValue("reservedAt", DateTimeOffset.UtcNow.AddMinutes(-2));
+        command.Parameters.AddWithValue("expiresAt", expiresAt);
+        await command.ExecuteNonQueryAsync();
+    }
+
     private async Task<long> CountAsync(string table)
     {
         await using var connection = await (dataSource ?? throw new InvalidOperationException()).OpenConnectionAsync();
@@ -323,4 +382,7 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
         Sha256Digest.Parse($"sha256:{new string(character, 64)}") is Result<Sha256Digest, ContractValidationError>.Success digest
             ? digest.Value
             : throw new InvalidOperationException("Test digest is invalid.");
+
+    private static string FailureCode<T>(Result<T, EnrollmentClaimStoreFailure> result) =>
+        Assert.IsType<Result<T, EnrollmentClaimStoreFailure>.Failure>(result).Error.Code;
 }

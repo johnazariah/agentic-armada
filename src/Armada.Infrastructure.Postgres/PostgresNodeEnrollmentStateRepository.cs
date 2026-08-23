@@ -92,7 +92,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                 "The enrolment claim has expired.");
         }
 
-        if (claim.ReservationExpiresAt > now && claim.ReservationRequestId != requestId)
+        if (claim.ReservationExpiresAt > now)
         {
             await transaction.RollbackAsync(cancellationToken);
             return ClaimFailure<EnrollmentClaimReservation>(
@@ -206,7 +206,12 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                     new EnrollmentCompletion.AlreadyCompleted(ReadResponse(existing.Response), ToBinding(existing)));
         }
 
-        if (claim.ExpiresAt <= request.OccurredAt)
+        var timing = await ReadCompletionTimingAsync(
+            connection,
+            transaction,
+            request.Claim.ClaimId,
+            cancellationToken);
+        if (!timing.ClaimIsCurrent)
         {
             await transaction.RollbackAsync(cancellationToken);
             return StateFailure<EnrollmentCompletion>(
@@ -215,7 +220,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         }
 
         if (claim.ReservationRequestId != request.RequestId ||
-            claim.ReservationExpiresAt <= request.OccurredAt)
+            !timing.ReservationIsCurrent)
         {
             await transaction.RollbackAsync(cancellationToken);
             return StateFailure<EnrollmentCompletion>(
@@ -465,9 +470,15 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         EnrollmentClaimReference reference,
         ReadOnlyMemory<byte> presentedSecret)
     {
+        var verifier = SHA256.HashData(presentedSecret.Span);
         if (claim is null)
         {
-            return new("unknown-enrollment-claim", "The enrolment claim does not exist.");
+            return new("unauthenticated-enrollment-claim", "The enrolment claim credentials are invalid.");
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(claim.SecretVerifier, verifier))
+        {
+            return new("unauthenticated-enrollment-claim", "The enrolment claim credentials are invalid.");
         }
 
         if (claim.NodeUid != reference.NodeUid ||
@@ -477,14 +488,34 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
             return new("enrollment-claim-identity-mismatch", "The enrolment claim is not intended for this node identity.");
         }
 
-        if (!CryptographicOperations.FixedTimeEquals(
-                claim.SecretVerifier,
-                SHA256.HashData(presentedSecret.Span)))
+        return null;
+    }
+
+    private static async Task<CompletionTiming> ReadCompletionTimingAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid claimId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT expires_at > clock_timestamp(),
+                   issuance_reservation_expires_at > clock_timestamp()
+            FROM armada_enrollment_claims
+            WHERE claim_id = @claimId;
+            """,
+            connection,
+            transaction);
+        command.Parameters.AddWithValue("claimId", claimId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
         {
-            return new("invalid-enrollment-claim-secret", "The enrolment claim secret does not verify.");
+            throw new InvalidOperationException("A locked enrolment claim disappeared before completion.");
         }
 
-        return null;
+        return new(
+            reader.GetBoolean(0),
+            !reader.IsDBNull(1) && reader.GetBoolean(1));
     }
 
     private static async Task<bool> InsertIdentityAsync(
@@ -500,7 +531,7 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                  certificate_thumbprint_sha256, issued_at, expires_at, enrollment_response)
             VALUES
                 (@nodeUid, @identityEpoch, @publicKeyDigest, @certificateSerial,
-                 @certificateThumbprint, @issuedAt, @expiresAt, CAST(@response AS jsonb))
+                 @certificateThumbprint, CURRENT_TIMESTAMP, @expiresAt, CAST(@response AS jsonb))
             ON CONFLICT DO NOTHING;
             """,
             connection,
@@ -510,7 +541,6 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         command.Parameters.AddWithValue("publicKeyDigest", request.Identity.PublicKeyDigest.Value);
         command.Parameters.AddWithValue("certificateSerial", request.Identity.CertificateSerial);
         command.Parameters.AddWithValue("certificateThumbprint", request.Identity.CertificateThumbprintSha256);
-        command.Parameters.AddWithValue("issuedAt", request.OccurredAt);
         command.Parameters.AddWithValue("expiresAt", request.Identity.ExpiresAt);
         command.Parameters.AddWithValue("response", SerializeResponse(request.Response));
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
@@ -811,6 +841,8 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         Guid? ReservationRequestId,
         DateTimeOffset ReservationExpiresAt,
         DateTimeOffset? ConsumedAt);
+
+    private sealed record CompletionTiming(bool ClaimIsCurrent, bool ReservationIsCurrent);
 
     private sealed record StoredIdentity(
         NodeUid NodeUid,

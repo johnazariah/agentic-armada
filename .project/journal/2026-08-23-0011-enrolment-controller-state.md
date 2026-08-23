@@ -6,6 +6,13 @@ only SHA-256 verifiers. A request-bound, expiring reservation prevents concurren
 issuers from proceeding. The durable completion operation locks the claim and commits
 identity, consumption result, immutable audit event and outbox message together.
 
+Post-review correction: a live reservation rejects every contender, including a
+same-request retry, so only its original holder may reach issuance. Completion
+evaluates claim and reservation expiry against PostgreSQL's current database clock
+in its locked transaction; the caller timestamp remains audit metadata only. Claim
+credential checks hash and compare the secret before disclosing an authenticated
+identity-binding mismatch.
+
 The repository deliberately refuses the older direct consume/register paths:
 without a certificate binding they cannot preserve the at-most-one transition.
 Replay is exact only when the full persisted identity matches; sequence, message,
