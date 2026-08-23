@@ -14,7 +14,9 @@ filesystem or NodeIdentity mutation is in scope.
 
 Implement the PR A claim, identity and replay ports with PostgreSQL verifier,
 one-use consumption, certificate identity/revocation bindings and replay
-receipts. It has no CA or network listener.
+receipts. Claim verification is non-consuming before issuance; completion locks
+and consumes the claim while binding the identity and writing transport
+audit/outbox evidence. It has no CA or network listener.
 
 ## PR C: explicit lab adapters
 

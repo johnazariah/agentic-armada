@@ -1,7 +1,7 @@
 # Node enrolment and transport v1alpha1
 
 **Protocol family:** `armada.node.transport/v1alpha1`  
-**Status:** PR A contract; no listener or issuer
+**Status:** PR B durable controller state; no listener or issuer
 
 `NodeEnrollment/Enroll` is unary. `NodeTransport/Connect` is duplex. The
 protobuf source is `proto/armada/v1alpha1/node_transport.proto`; tags and
@@ -55,9 +55,38 @@ URI `spiffe://armada.lab/node/<uid>/epoch/<epoch>`, and UTC validity. Validation
 rejects not-yet-valid, expired, inverted and greater-than-31-day windows.
 The contract validates no chain and issues no certificate.
 
+## Durable controller state
+
+PR B uses operator-applied PostgreSQL migration 3. Claims store a unique ID,
+SHA-256 verifier, intended node/epoch/key digest, assurance JSON and expiry;
+the raw secret is never stored. A validated request first acquires a short-lived,
+request-bound reservation, so concurrent issuers cannot both proceed. The only completion transition locks the claim,
+re-verifies its secret and intended identity, inserts the epoch-bound certificate
+identity and response, consumes the claim, and writes correlated append-only audit
+and outbox records in one transaction. A later retry with the same authenticated
+claim returns the persisted response rather than issuing or binding again.
+
+Certificate identities are immutable by database trigger except for a single
+controller revocation transition. Direct claim consumption and direct identity
+registration ports reject rather than bypassing that transition. Resolve fails
+closed for unknown, revoked and expired identity bindings.
+
+Replay receipts use the node/identity/stream/sequence key plus node-epoch message
+and idempotency uniqueness. The exact complete `ReplayIdentity` returns its stored
+acknowledgement. Any collision with a changed envelope or payload digest returns
+the typed `replay-conflict` failure. Receipt creation writes its own correlated,
+append-only transport audit and outbox record.
+
 ## Evolution
 
 Unknown protocol/schema values, unsupported payloads, absent identities,
 unknown enum states, malformed/truncated DER/PKCS#10, noncanonical or duplicate
 inventory values and values over these bounds are typed rejections. Future
 payloads require a later protocol version and an explicit compatibility record.
+
+## Explicit exclusions
+
+This state layer supplies no CA, key or claim-secret creation tool; no gRPC/HTTP
+listener, host endpoint or network client; no device filesystem key store,
+executable or harness; and no workload, admission, lease, process, credential,
+GitHub, Copilot, signer, installer or production authority.

@@ -74,4 +74,19 @@ public sealed class PostgresSchemaTests
         Assert.Contains("source_event_id UUID NOT NULL REFERENCES armada_event_ledger(event_id)", sql, StringComparison.Ordinal);
         Assert.Contains("PRIMARY KEY (source_event_id, repository, issue_number, summary_name)", sql, StringComparison.Ordinal);
     }
+
+    [Fact]
+    public void Node_transport_migration_stores_only_claim_verifiers_and_immutable_replay_evidence()
+    {
+        var sql = PostgresSchema.Migrations.Single(static migration => migration.Version == 3).Sql;
+
+        Assert.Contains("secret_verifier BYTEA NOT NULL CHECK (octet_length(secret_verifier) = 32)", sql, StringComparison.Ordinal);
+        Assert.DoesNotContain("claim_secret", sql, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS armada_node_certificate_identities", sql, StringComparison.Ordinal);
+        Assert.Contains("CREATE TABLE IF NOT EXISTS armada_transport_replay_receipts", sql, StringComparison.Ordinal);
+        Assert.Contains("PRIMARY KEY (node_uid, identity_epoch, stream_epoch, sequence)", sql, StringComparison.Ordinal);
+        Assert.Contains("UNIQUE (node_uid, identity_epoch, message_id)", sql, StringComparison.Ordinal);
+        Assert.Contains("armada_node_transport_audit is append-only", sql, StringComparison.Ordinal);
+        Assert.Contains("certificate identity is immutable except controller revocation", sql, StringComparison.Ordinal);
+    }
 }

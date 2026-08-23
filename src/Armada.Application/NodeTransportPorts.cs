@@ -9,12 +9,31 @@ public sealed record EnrollmentClaimState(
     DateTimeOffset ExpiresAt,
     bool IsConsumed);
 public sealed record EnrollmentClaimConsumption(EnrollmentClaimReference Reference, DateTimeOffset ConsumedAt, Guid CorrelationId);
+public sealed record EnrollmentClaimReservation(
+    EnrollmentClaimState Claim,
+    Guid RequestId,
+    DateTimeOffset ExpiresAt);
 public sealed record EnrollmentClaimStoreFailure(string Code, string Message);
 
 public interface IEnrollmentClaimStore
 {
     Task<Result<EnrollmentClaimState, EnrollmentClaimStoreFailure>> GetAsync(
         Guid claimId,
+        CancellationToken cancellationToken);
+
+    // This verifies the one-use claim before an external issuer is invoked. It
+    // deliberately leaves consumption to the atomic identity-binding operation.
+    Task<Result<EnrollmentClaimState, EnrollmentClaimStoreFailure>> VerifyAsync(
+        EnrollmentClaimReference reference,
+        ReadOnlyMemory<byte> presentedSecret,
+        DateTimeOffset now,
+        CancellationToken cancellationToken);
+
+    Task<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>> ReserveAsync(
+        EnrollmentClaimReference reference,
+        ReadOnlyMemory<byte> presentedSecret,
+        Guid requestId,
+        DateTimeOffset now,
         CancellationToken cancellationToken);
 
     Task<Result<EnrollmentClaimConsumption, EnrollmentClaimStoreFailure>> ConsumeAsync(
@@ -61,6 +80,42 @@ public interface ITransportReplayReceiptStore
 {
     Task<Result<ReplayReceipt, ReplayReceiptStoreFailure>> RetrieveOrRecordAsync(
         ReplayReceipt receipt,
+        CancellationToken cancellationToken);
+}
+
+public sealed record EnrollmentCompletionRequest(
+    EnrollmentClaimReference Claim,
+    ReadOnlyMemory<byte> PresentedSecret,
+    NodeIdentityBinding Identity,
+    EnrollmentResponseDto Response,
+    Guid RequestId,
+    Guid CorrelationId,
+    DateTimeOffset OccurredAt);
+
+public abstract record EnrollmentCompletion
+{
+    private EnrollmentCompletion()
+    {
+    }
+
+    public sealed record Completed(EnrollmentResponseDto Response, NodeIdentityBinding Identity) : EnrollmentCompletion;
+    public sealed record AlreadyCompleted(EnrollmentResponseDto Response, NodeIdentityBinding Identity) : EnrollmentCompletion;
+}
+
+public sealed record EnrollmentStateStoreFailure(string Code, string Message);
+
+// Claim consumption, certificate identity binding, and their durable evidence
+// are one controller-side transition. This prevents callers from consuming a
+// claim and attempting a separate, lossy identity registration afterwards.
+public interface IEnrollmentStateStore
+{
+    Task<Result<EnrollmentCompletion?, EnrollmentStateStoreFailure>> FindCompletedAsync(
+        EnrollmentClaimReference claim,
+        ReadOnlyMemory<byte> presentedSecret,
+        CancellationToken cancellationToken);
+
+    Task<Result<EnrollmentCompletion, EnrollmentStateStoreFailure>> CompleteAsync(
+        EnrollmentCompletionRequest request,
         CancellationToken cancellationToken);
 }
 
