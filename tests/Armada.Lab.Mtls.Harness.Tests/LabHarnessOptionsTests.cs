@@ -28,10 +28,54 @@ public sealed class LabHarnessOptionsTests
     [Fact]
     public void Bootstrap_has_no_remote_argument_and_uses_the_fixed_dotnet_path()
     {
-        var command = LabHarnessCommandContract.PhaseOneBootstrap(new string('a', 64));
+        var command = LabHarnessCommandContract.PhaseOneBootstrap(
+            new string('a', 64),
+            "armada-c2_0123456789abcdef0123456789abcdef".Replace('_', '-'));
 
         Assert.Contains(LabHarnessCommandContract.WslDotnet, command, StringComparison.Ordinal);
         Assert.DoesNotContain("johnaz-phd-wsl", command, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("relative/evidence")]
+    [InlineData(".")]
+    public void Rejects_relative_evidence_paths(string evidencePath)
+    {
+        var values = Values();
+        values["evidence-directory"] = evidencePath;
+
+        Assert.Throws<ArgumentException>(() => LabHarnessOptions.Parse(values));
+    }
+
+    [Theory]
+    [InlineData("224.0.0.1")]
+    [InlineData("255.255.255.255")]
+    [InlineData("ff02::1")]
+    public void Rejects_non_unicast_listener_addresses(string address)
+    {
+        var values = Values();
+        values["listen-ip"] = address;
+
+        Assert.Throws<ArgumentException>(() => LabHarnessOptions.Parse(values));
+    }
+
+    [Fact]
+    public void Bootstrap_rejects_unsafe_shell_tokens()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            LabHarnessCommandContract.PhaseOneBootstrap("'; touch unsafe; #", "armada-c2-0123456789abcdef0123456789abcdef"));
+        Assert.Throws<ArgumentException>(() =>
+            LabHarnessCommandContract.PhaseTwoBootstrap(new string('a', 64), "../unsafe"));
+    }
+
+    [Fact]
+    public void Public_device_frame_rejects_a_substituted_key_or_csr()
+    {
+        var frame = PublicDeviceFrame.Create(Guid.NewGuid(), 1, [1, 2, 3], [4, 5, 6]);
+        frame.Validate();
+
+        Assert.Throws<ArgumentException>(() =>
+            (frame with { CertificateSigningRequest = [9, 5, 6] }).Validate());
     }
 
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)

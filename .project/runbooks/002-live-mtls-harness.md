@@ -18,3 +18,8 @@ create the ephemeral CA/listeners; send the secret over stdin or a verified
 drop only the exact generated database and remove only the verified local root.
 Any cleanup failure fails the run. Retain only redacted evidence digests and
 public certificate fingerprints.
+
+The remote root name is a generated `armada-c2-<32 lowercase hex>` token, and
+the bootstrap validates its owner/mode and those of `helper` and `device`
+children before use. Helper digests are exactly 64 lower-case hexadecimal
+characters before interpolation into the fixed-token shell script.

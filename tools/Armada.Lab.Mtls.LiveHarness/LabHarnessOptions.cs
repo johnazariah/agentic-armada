@@ -22,11 +22,17 @@ public sealed record LabHarnessOptions(
         var enrollmentPort = ParsePort(Required(values, "enrollment-port"));
         var streamPort = ParsePort(Required(values, "stream-port"));
         var database = Required(values, "database");
-        var evidence = Path.GetFullPath(Required(values, "evidence-directory"));
+        var evidenceInput = Required(values, "evidence-directory");
+        var evidence = Path.GetFullPath(evidenceInput);
 
-        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
+        if (!Path.IsPathFullyQualified(evidenceInput))
         {
-            throw new ArgumentException("listen-ip must be one exact non-loopback address.");
+            throw new ArgumentException("evidence-directory must be absolute.");
+        }
+
+        if (!IsUnicast(address))
+        {
+            throw new ArgumentException("listen-ip must be one exact non-loopback unicast address.");
         }
 
         if (enrollmentPort == streamPort)
@@ -39,12 +45,23 @@ public sealed record LabHarnessOptions(
             throw new ArgumentException("database must be a generated armada_c2_<32 lowercase hex> name.");
         }
 
-        if (!Path.IsPathFullyQualified(evidence))
+        return new(connection, address, enrollmentPort, streamPort, database, evidence);
+    }
+
+    private static bool IsUnicast(IPAddress address)
+    {
+        if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
         {
-            throw new ArgumentException("evidence-directory must be absolute.");
+            return false;
         }
 
-        return new(connection, address, enrollmentPort, streamPort, database, evidence);
+        if (address.IsIPv6Multicast)
+        {
+            return false;
+        }
+
+        var bytes = address.GetAddressBytes();
+        return bytes.Length != 4 || bytes[0] < 224;
     }
 
     private static string Required(IReadOnlyDictionary<string, string?> values, string name) =>
@@ -62,10 +79,24 @@ public static class LabHarnessCommandContract
 {
     public const string SshHost = "johnaz-phd-wsl";
     public const string WslDotnet = "/home/johnaz/.local/share/dotnet/dotnet";
+    private static readonly Regex HelperDigestPattern =
+        new("^[a-f0-9]{64}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex RemoteRootPattern =
+        new("^armada-c2-[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
-    public static string PhaseOneBootstrap(string helperDigest) =>
-        $"umask 077; test \"$(id -u)\" = \"$(stat -c %u .)\"; test '{helperDigest}' = \"$(sha256sum helper/Armada.Lab.Mtls.WslClient.dll | awk '{{print $1}}')\"; exec {WslDotnet} helper/Armada.Lab.Mtls.WslClient.dll phase-one";
+    public static string PhaseOneBootstrap(string helperDigest, string remoteRoot) =>
+        $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
 
-    public static string PhaseTwoBootstrap(string helperDigest) =>
-        $"umask 077; test -f device/public-frame.bin; test '{helperDigest}' = \"$(sha256sum helper/Armada.Lab.Mtls.WslClient.dll | awk '{{print $1}}')\"; exec {WslDotnet} helper/Armada.Lab.Mtls.WslClient.dll phase-two --claim-secret-stdin";
+    public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot) =>
+        $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two --claim-secret-stdin";
+
+    private static string ValidateHelperDigest(string helperDigest) =>
+        HelperDigestPattern.IsMatch(helperDigest)
+            ? helperDigest
+            : throw new ArgumentException("helperDigest must be 64 lowercase hexadecimal characters.");
+
+    private static string ValidateRemoteRoot(string remoteRoot) =>
+        RemoteRootPattern.IsMatch(remoteRoot)
+            ? remoteRoot
+            : throw new ArgumentException("remoteRoot must be an allowlisted generated name.");
 }
