@@ -98,6 +98,37 @@ public sealed class LabHarnessOptionsTests
             PublicDeviceFrame.Create(Guid.NewGuid(), 1, [1, 2, 3], [4, 5, 6]).Validate());
     }
 
+    [Fact]
+    public void Ssh_invocation_supplies_only_the_fixed_host_and_no_remote_command()
+    {
+        var invocation = SshInvocation.CreateStdinOnlyInvocation();
+
+        Assert.Equal(["-T", LabHarnessCommandContract.SshHost], invocation.ArgumentList);
+        Assert.True(invocation.RedirectStandardInput);
+    }
+
+    [Fact]
+    public async Task Cleanup_runs_every_step_and_fails_after_an_error()
+    {
+        var steps = new List<string>();
+        var cleanup = new CleanupCoordinator(
+        [
+            ("server", _ => { steps.Add("server"); return Task.CompletedTask; }),
+            ("database", _ => throw new InvalidOperationException("drop failed")),
+            ("temporary-root", _ => { steps.Add("temporary-root"); return Task.CompletedTask; })
+        ]);
+
+        await Assert.ThrowsAsync<AggregateException>(() => cleanup.CleanupAsync(CancellationToken.None));
+        Assert.Equal(["server", "temporary-root"], steps);
+    }
+
+    [Fact]
+    public void Evidence_rejects_secret_bearing_fields()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            RedactedEvidence.Create([new("claimSecret", "not retained")]));
+    }
+
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)
     {
         ["postgres-admin-connection"] = "Host=localhost;Database=postgres",
