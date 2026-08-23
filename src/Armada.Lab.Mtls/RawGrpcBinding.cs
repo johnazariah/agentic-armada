@@ -8,13 +8,13 @@ using Proto = Armada.Contracts.V1Alpha1;
 
 namespace Armada.Lab.Mtls;
 
-public sealed record RawGrpcMessage(ImmutableArray<byte> Bytes)
+internal sealed record RawGrpcMessage(ImmutableArray<byte> Bytes)
 {
     public static RawGrpcMessage Read(DeserializationContext context) =>
         new(ImmutableArray.CreateRange(context.PayloadAsNewBuffer()));
 }
 
-public static class LabMtlsRawGrpcBinding
+internal static class LabMtlsRawGrpcBinding
 {
     private const string ServiceNamespace = "armada.node.transport.v1alpha1";
 
@@ -33,7 +33,7 @@ public static class LabMtlsRawGrpcBinding
     private static readonly Marshaller<Proto.ControlToNode> ControlToNodeMarshaller =
         MessageMarshaller<Proto.ControlToNode>.Instance;
 
-    public static void Map(
+    internal static void Map(
         WebApplication application,
         LabNodeEnrollmentGrpcService enrollment,
         RawNodeTransportService transport)
@@ -45,7 +45,7 @@ public static class LabMtlsRawGrpcBinding
         application.MapGrpcService(Build(enrollment, transport));
     }
 
-    public static ServerServiceDefinition Build(
+    internal static ServerServiceDefinition Build(
         LabNodeEnrollmentGrpcService enrollment,
         RawNodeTransportService transport)
     {

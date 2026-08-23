@@ -97,7 +97,7 @@ public sealed class LabNodeEnrollmentGrpcService(
             ((Result<EnrollmentCompletion, EnrollmentStateApplicationFailure>.Success)completion).Value));
     }
 
-    public async Task<Proto.EnrollmentResponse> EnrollRawAsync(
+    internal async Task<Proto.EnrollmentResponse> EnrollRawAsync(
         RawGrpcMessage rawRequest,
         ServerCallContext context)
     {

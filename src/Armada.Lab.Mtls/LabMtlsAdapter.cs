@@ -12,18 +12,28 @@ public sealed record LabMtlsAdapterDependencies(
     ITransportReplayReceiptStore ReplayReceipts,
     TimeProvider? Clock = null);
 
-public sealed record LabMtlsAdapterComposition(
-    LabMtlsRuntimeSettings Settings,
-    LabMtlsAdapterDependencies Dependencies)
+public sealed class LabMtlsAdapterComposition
 {
-    public LabNodeEnrollmentGrpcService CreateEnrollmentService() =>
+    internal LabMtlsAdapterComposition(
+        LabMtlsRuntimeSettings settings,
+        LabMtlsAdapterDependencies dependencies)
+    {
+        Settings = settings;
+        Dependencies = dependencies;
+    }
+
+    internal LabMtlsRuntimeSettings Settings { get; }
+
+    internal LabMtlsAdapterDependencies Dependencies { get; }
+
+    internal LabNodeEnrollmentGrpcService CreateEnrollmentService() =>
         new(
             Dependencies.EnrollmentState,
             Dependencies.CertificateIssuer,
             Dependencies.Clock,
             Settings.CertificateLifetime);
 
-    public RawNodeTransportService CreateTransportService() =>
+    internal RawNodeTransportService CreateTransportService() =>
         new(
             Dependencies.Identities,
             Dependencies.ReplayReceipts,

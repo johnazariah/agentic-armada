@@ -9,6 +9,21 @@ namespace Armada.Lab.Mtls.Tests;
 public sealed class LabMtlsConfigurationTests
 {
     [Fact]
+    public void Raw_route_composition_is_not_forgeable_or_publicly_mappable()
+    {
+        var compositionConstructors = typeof(LabMtlsAdapterComposition)
+            .GetConstructors(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance);
+        var rawBinding = typeof(LabMtlsAdapter).Assembly.GetType("Armada.Lab.Mtls.LabMtlsRawGrpcBinding");
+
+        Assert.Empty(compositionConstructors);
+        Assert.NotNull(rawBinding);
+        Assert.False(rawBinding!.IsPublic);
+        Assert.Null(rawBinding.GetMethod(
+            "Map",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static));
+    }
+
+    [Fact]
     public void Defaults_fail_closed()
     {
         var failures = LabMtlsConfiguration.Validate(
