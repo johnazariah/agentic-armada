@@ -77,9 +77,9 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
             {
                 Value: EnrollmentCompletion.AlreadyCompleted
             })).Value;
-        Assert.Equal(
-            request.Response,
-            Assert.IsType<EnrollmentCompletion.AlreadyCompleted>(replay).Response);
+        var replayResponse = Assert.IsType<EnrollmentCompletion.AlreadyCompleted>(replay).Response;
+        Assert.Equal(winner.Response.CertificateSerial, replayResponse.CertificateSerial);
+        Assert.True(winner.Response.LeafCertificateDer.SequenceEqual(replayResponse.LeafCertificateDer));
         Assert.Equal(1L, await CountAsync("armada_node_certificate_identities"));
         Assert.Equal(1L, await CountAsync("armada_node_transport_audit"));
         Assert.Equal(1L, await CountAsync("armada_node_transport_outbox"));
