@@ -66,6 +66,66 @@ public sealed class RawGrpcBindingTests
             routes.Order(StringComparer.Ordinal));
     }
 
+    [Fact]
+    public async Task Raw_unary_enrolment_reaches_state_issuer_and_completion_over_loopback_tls()
+    {
+        var now = TruncateToSecond(DateTimeOffset.UtcNow);
+        var claimId = Guid.NewGuid();
+        var nodeUid = new NodeUid(Guid.NewGuid());
+        var requestId = Guid.NewGuid();
+        const long epoch = 7;
+        var claims = new RecordingEnrollmentClaimStore();
+        var state = new RecordingEnrollmentStateStore();
+        using var issuer = new RecordingCertificateIssuer();
+        await using var server = await EnrollmentLoopbackServer.StartAsync(
+            claims,
+            state,
+            issuer,
+            new FixedTimeProvider(now));
+        using var deviceKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var publicKey = deviceKey.ExportSubjectPublicKeyInfo();
+        var certificateRequest = new CertificateRequest("CN=armada-node", deviceKey, HashAlgorithmName.SHA256);
+        var request = new Proto.EnrollmentRequest
+        {
+            ProtocolVersion = NodeTransportProtocol.Version,
+            ClaimId = claimId.ToString("D"),
+            ClaimSecret = ByteString.CopyFrom(Enumerable.Range(0, 32).Select(static value => (byte)value).ToArray()),
+            NodeUid = nodeUid.ToString(),
+            IdentityEpoch = epoch,
+            DevicePublicKey = ByteString.CopyFrom(publicKey),
+            PublicKeySha256 = ByteString.CopyFrom(SHA256.HashData(publicKey)),
+            CertificateSigningRequest = ByteString.CopyFrom(certificateRequest.CreateSigningRequest()),
+            RequestId = requestId.ToString("D"),
+            SentAt = Timestamp.FromDateTimeOffset(now)
+        };
+        request.Inventory = new Proto.EnrollmentInventory();
+        request.Inventory.Facts.Add("os", "linux");
+        request.Inventory.Capabilities.Add("container");
+
+        var call = server.Client.CreateCallInvoker().AsyncUnaryCall(
+            EnrollmentMethod,
+            host: null,
+            new CallOptions(),
+            new RawGrpcMessage(ImmutableArray.CreateRange(request.ToByteArray())));
+        var response = await call.ResponseAsync;
+
+        Assert.Equal(NodeTransportProtocol.Version, response.ProtocolVersion);
+        Assert.Equal(nodeUid.ToString(), response.NodeUid);
+        Assert.Equal(epoch, response.IdentityEpoch);
+        Assert.NotEmpty(response.LeafCertificateDer);
+        Assert.NotEmpty(response.IssuingCaDer);
+        Assert.True(Guid.TryParseExact(response.CorrelationId, "D", out _));
+        Assert.Equal(1, state.FindCompletedCalls);
+        Assert.Equal(1, claims.ReserveCalls);
+        Assert.Equal(1, issuer.Calls);
+        Assert.Equal(1, state.CompleteCalls);
+        Assert.Equal(claimId, claims.Reference!.ClaimId);
+        Assert.Equal(nodeUid, claims.Reference.NodeUid);
+        Assert.Equal(requestId, claims.RequestId);
+        Assert.Equal(response.CertificateSerial, state.Completion!.Response.CertificateSerial);
+        Assert.Equal(epoch, state.Completion.Identity.IdentityEpoch);
+    }
+
     public static IEnumerable<object[]> InvalidEnrollmentWires =>
     [
         ["unknown outer field", new byte[] { 0x78, 0x01 }],
@@ -254,6 +314,80 @@ public sealed class RawGrpcBindingTests
             ? digest.Value
             : throw new InvalidOperationException();
 
+    private static DateTimeOffset TruncateToSecond(DateTimeOffset value) =>
+        new(value.UtcDateTime.Year, value.UtcDateTime.Month, value.UtcDateTime.Day,
+            value.UtcDateTime.Hour, value.UtcDateTime.Minute, value.UtcDateTime.Second, TimeSpan.Zero);
+
+    private sealed class EnrollmentLoopbackServer : IAsyncDisposable
+    {
+        private readonly X509Certificate2 certificate;
+
+        private EnrollmentLoopbackServer(WebApplication application, GrpcChannel client, X509Certificate2 certificate)
+        {
+            Application = application;
+            Client = client;
+            this.certificate = certificate;
+        }
+
+        public WebApplication Application { get; }
+        public GrpcChannel Client { get; }
+
+        public static async Task<EnrollmentLoopbackServer> StartAsync(
+            IEnrollmentClaimStore claims,
+            IEnrollmentStateStore state,
+            ILabCertificateIssuer issuer,
+            TimeProvider clock)
+        {
+            var certificate = Certificate();
+            var builder = WebApplication.CreateBuilder();
+            builder.WebHost.ConfigureKestrel(options =>
+            {
+                options.Listen(IPAddress.Loopback, 0, listen =>
+                {
+                    listen.Protocols = HttpProtocols.Http2;
+                    listen.UseHttps(new HttpsConnectionAdapterOptions
+                    {
+                        ServerCertificate = certificate,
+                        ClientCertificateMode = ClientCertificateMode.RequireCertificate,
+                        ClientCertificateValidation = static (_, _, _) => true
+                    });
+                });
+            });
+            builder.Services.AddGrpc();
+
+            var application = builder.Build();
+            LabMtlsRawGrpcBinding.Map(
+                application,
+                new LabNodeEnrollmentGrpcService(
+                    new ControllerEnrollmentStateService(claims, state),
+                    issuer,
+                    clock),
+                new RawNodeTransportService(new EmptyIdentityRegistry(), new EmptyReplayReceipts(), clock));
+            await application.StartAsync();
+
+            var address = application.Services.GetRequiredService<IServer>()
+                .Features.Get<IServerAddressesFeature>()!
+                .Addresses.Single();
+            var handler = new SocketsHttpHandler
+            {
+                SslOptions =
+                {
+                    EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ClientCertificates = new X509CertificateCollection { certificate },
+                    RemoteCertificateValidationCallback = static (_, _, _, _) => true
+                }
+            };
+            return new(application, GrpcChannel.ForAddress(address, new GrpcChannelOptions { HttpHandler = handler }), certificate);
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            Client.Dispose();
+            await Application.DisposeAsync();
+            certificate.Dispose();
+        }
+    }
+
     private sealed class LoopbackServer : IAsyncDisposable
     {
         private readonly X509Certificate2 certificate;
@@ -405,6 +539,132 @@ public sealed class RawGrpcBindingTests
         {
             Calls++;
             throw new InvalidOperationException("Certificate issuer must not be called for invalid raw protobuf.");
+        }
+    }
+
+    private sealed class RecordingEnrollmentClaimStore : IEnrollmentClaimStore
+    {
+        public int ReserveCalls { get; private set; }
+        public EnrollmentClaimReference? Reference { get; private set; }
+        public Guid RequestId { get; private set; }
+
+        public Task<Result<EnrollmentClaimState, EnrollmentClaimStoreFailure>> GetAsync(
+            Guid claimId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<Result<EnrollmentClaimState, EnrollmentClaimStoreFailure>> VerifyAsync(
+            EnrollmentClaimReference reference,
+            ReadOnlyMemory<byte> presentedSecret,
+            DateTimeOffset now,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>> ReserveAsync(
+            EnrollmentClaimReference reference,
+            ReadOnlyMemory<byte> presentedSecret,
+            Guid requestId,
+            DateTimeOffset now,
+            CancellationToken cancellationToken)
+        {
+            ReserveCalls++;
+            Reference = reference;
+            RequestId = requestId;
+            var claim = new EnrollmentClaimState(reference, now.AddMinutes(5), false);
+            return Task.FromResult<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>>(
+                new Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Success(
+                    new EnrollmentClaimReservation(claim, requestId, now.AddMinutes(1))));
+        }
+
+        public Task<Result<EnrollmentClaimConsumption, EnrollmentClaimStoreFailure>> ConsumeAsync(
+            EnrollmentClaimReference reference,
+            ReadOnlyMemory<byte> presentedSecret,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingEnrollmentStateStore : IEnrollmentStateStore
+    {
+        public int FindCompletedCalls { get; private set; }
+        public int CompleteCalls { get; private set; }
+        public EnrollmentCompletionRequest? Completion { get; private set; }
+
+        public Task<Result<EnrollmentCompletion?, EnrollmentStateStoreFailure>> FindCompletedAsync(
+            EnrollmentClaimReference claim,
+            ReadOnlyMemory<byte> presentedSecret,
+            CancellationToken cancellationToken)
+        {
+            FindCompletedCalls++;
+            return Task.FromResult<Result<EnrollmentCompletion?, EnrollmentStateStoreFailure>>(
+                new Result<EnrollmentCompletion?, EnrollmentStateStoreFailure>.Success(null));
+        }
+
+        public Task<Result<EnrollmentCompletion, EnrollmentStateStoreFailure>> CompleteAsync(
+            EnrollmentCompletionRequest request,
+            CancellationToken cancellationToken)
+        {
+            CompleteCalls++;
+            Completion = request;
+            return Task.FromResult<Result<EnrollmentCompletion, EnrollmentStateStoreFailure>>(
+                new Result<EnrollmentCompletion, EnrollmentStateStoreFailure>.Success(
+                    new EnrollmentCompletion.Completed(request.Response, request.Identity)));
+        }
+    }
+
+    private sealed class RecordingCertificateIssuer : ILabCertificateIssuer, IDisposable
+    {
+        private readonly ECDsa certificateAuthorityKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        private readonly X509Certificate2 certificateAuthority;
+
+        public RecordingCertificateIssuer()
+        {
+            var request = new CertificateRequest(
+                "CN=armada-enrollment-test-ca",
+                certificateAuthorityKey,
+                HashAlgorithmName.SHA256);
+            request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+            request.CertificateExtensions.Add(
+                new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+            certificateAuthority = request.CreateSelfSigned(
+                DateTimeOffset.UtcNow.AddDays(-1),
+                DateTimeOffset.UtcNow.AddDays(1));
+        }
+
+        public int Calls { get; private set; }
+
+        public Task<Result<IssuedCertificate, CertificateIssuanceFailure>> IssueAsync(
+            CertificateIssuanceRequest request,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            var leafRequest = CertificateRequest.LoadSigningRequest(
+                request.Enrollment.CertificateSigningRequest.ToArray(),
+                HashAlgorithmName.SHA256,
+                CertificateRequestLoadOptions.Default,
+                RSASignaturePadding.Pkcs1);
+            leafRequest.CertificateExtensions.Add(
+                new X509EnhancedKeyUsageExtension(
+                    new OidCollection { new Oid("1.3.6.1.5.5.7.3.2") },
+                    false));
+            var san = new SubjectAlternativeNameBuilder();
+            san.AddUri(new Uri(
+                $"spiffe://armada.lab/node/{request.Enrollment.NodeUid}/epoch/{request.Enrollment.IdentityEpoch}"));
+            leafRequest.CertificateExtensions.Add(san.Build());
+            using var leaf = leafRequest.Create(
+                certificateAuthority,
+                request.NotBefore,
+                request.ExpiresAt,
+                RandomNumberGenerator.GetBytes(16));
+            var issued = new IssuedCertificate(
+                leaf.SerialNumber,
+                ImmutableArray.CreateRange(leaf.Export(X509ContentType.Cert)),
+                ImmutableArray.CreateRange(certificateAuthority.Export(X509ContentType.Cert)),
+                request.ExpiresAt);
+            return Task.FromResult<Result<IssuedCertificate, CertificateIssuanceFailure>>(
+                new Result<IssuedCertificate, CertificateIssuanceFailure>.Success(issued));
+        }
+
+        public void Dispose()
+        {
+            certificateAuthority.Dispose();
+            certificateAuthorityKey.Dispose();
         }
     }
 

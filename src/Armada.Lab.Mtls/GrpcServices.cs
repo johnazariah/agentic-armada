@@ -226,17 +226,17 @@ public sealed class LabNodeEnrollmentGrpcService(
                     case 50:
                     case 58:
                     case 66:
+                    case 82:
+                    case 90:
+                    case 98:
+                        input.ReadBytes();
+                        break;
                     case 74:
                         if (!IsStrictEnrollmentInventory(input.ReadBytes().Span))
                         {
                             return false;
                         }
 
-                        break;
-                    case 82:
-                    case 90:
-                    case 98:
-                        input.ReadBytes();
                         break;
                     case 40:
                         input.ReadInt64();
