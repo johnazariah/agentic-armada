@@ -92,8 +92,13 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
             cancellationToken);
         if (reservationExpiresAt is null)
         {
+            var claimIsCurrent = await IsClaimCurrentAsync(
+                connection,
+                transaction,
+                reference.ClaimId,
+                cancellationToken);
             await transaction.RollbackAsync(cancellationToken);
-            return claim.ReservationRequestId is not null
+            return claimIsCurrent && claim.ReservationRequestId is not null
                 ? ClaimFailure<EnrollmentClaimReservation>(
                     "enrollment-claim-in-progress",
                     "An issuer reservation already exists for this enrolment claim.")
@@ -139,6 +144,25 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         return await reader.ReadAsync(cancellationToken)
             ? reader.GetFieldValue<DateTimeOffset>(0)
             : null;
+    }
+
+    private static async Task<bool> IsClaimCurrentAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid claimId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = new NpgsqlCommand(
+            """
+            SELECT expires_at > clock_timestamp()
+            FROM armada_enrollment_claims
+            WHERE claim_id = @claimId;
+            """,
+            connection,
+            transaction);
+        command.Parameters.AddWithValue("claimId", claimId);
+        var value = await command.ExecuteScalarAsync(cancellationToken);
+        return value is bool current && current;
     }
 
     public async Task<Result<EnrollmentCompletion?, EnrollmentStateStoreFailure>> FindCompletedAsync(

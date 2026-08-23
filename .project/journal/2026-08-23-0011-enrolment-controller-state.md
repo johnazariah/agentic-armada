@@ -27,6 +27,10 @@ Atomic transition correction: reservation creation is one conditional
 reservation predicate. No time read or row lock is treated as an issuance grant;
 zero updated rows fail closed.
 
+Classification correction: after a denied transition, PostgreSQL time decides the
+error only. Terminal claim expiry takes precedence over an existing reservation;
+`in-progress` is reserved for a still-live claim. This read grants no authority.
+
 The repository deliberately refuses the older direct consume/register paths:
 without a certificate binding they cannot preserve the at-most-one transition.
 Replay is exact only when the full persisted identity matches; sequence, message,

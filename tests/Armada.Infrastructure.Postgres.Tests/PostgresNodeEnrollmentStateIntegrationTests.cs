@@ -213,6 +213,27 @@ public sealed class PostgresNodeEnrollmentStateIntegrationTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Expired_reserved_claim_is_classified_as_expired_not_in_progress()
+    {
+        await ResetAsync();
+        var secret = Enumerable.Repeat((byte)12, 32).ToArray();
+        var claim = Claim();
+        await SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddMinutes(-1));
+        await SeedReservationAsync(claim.ClaimId, Guid.NewGuid(), DateTimeOffset.UtcNow.AddMinutes(5));
+
+        var result = await Repository.ReserveAsync(
+            claim,
+            secret,
+            Guid.NewGuid(),
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+
+        Assert.Equal(
+            "enrollment-claim-expired",
+            Assert.IsType<Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Failure>(result).Error.Code);
+    }
+
+    [Fact]
     public async Task Wrong_secret_hides_whether_the_claim_identity_matches()
     {
         await ResetAsync();
