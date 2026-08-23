@@ -116,18 +116,18 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
     {
         await using var reserve = new NpgsqlCommand(
             """
-            WITH current_time AS (
+            WITH reservation_clock AS (
                 SELECT clock_timestamp() AS value
             )
             UPDATE armada_enrollment_claims AS claim
             SET issuance_request_id = @requestId,
-                issuance_reserved_at = current_time.value,
+                issuance_reserved_at = reservation_clock.value,
                 issuance_reservation_expires_at = LEAST(
                     claim.expires_at,
-                    current_time.value + INTERVAL '5 minutes')
-            FROM current_time
+                    reservation_clock.value + INTERVAL '5 minutes')
+            FROM reservation_clock
             WHERE claim.claim_id = @claimId
-              AND claim.expires_at > current_time.value
+              AND claim.expires_at > reservation_clock.value
               AND claim.issuance_request_id IS NULL
             RETURNING claim.issuance_reservation_expires_at;
             """,
