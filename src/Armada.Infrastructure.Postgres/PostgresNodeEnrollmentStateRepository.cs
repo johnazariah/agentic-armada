@@ -84,45 +84,61 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
                 "The enrolment claim has already been consumed.");
         }
 
-        var databaseNow = await ReadDatabaseNowAsync(connection, transaction, cancellationToken);
-        if (claim.ExpiresAt <= databaseNow)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            return ClaimFailure<EnrollmentClaimReservation>(
-                "enrollment-claim-expired",
-                "The enrolment claim has expired.");
-        }
-
-        if (claim.ReservationRequestId is not null)
-        {
-            await transaction.RollbackAsync(cancellationToken);
-            return ClaimFailure<EnrollmentClaimReservation>(
-                "enrollment-claim-in-progress",
-                "An issuer reservation already exists for this enrolment claim.");
-        }
-
-        var reservationExpiresAt = Min(claim.ExpiresAt, databaseNow.AddMinutes(5));
-        await using (var reserve = new NpgsqlCommand(
-            """
-            UPDATE armada_enrollment_claims
-            SET issuance_request_id = @requestId,
-                issuance_reserved_at = @reservedAt,
-                issuance_reservation_expires_at = @reservationExpiresAt
-            WHERE claim_id = @claimId;
-            """,
+        var reservationExpiresAt = await TryReserveAsync(
             connection,
-            transaction))
+            transaction,
+            reference.ClaimId,
+            requestId,
+            cancellationToken);
+        if (reservationExpiresAt is null)
         {
-            reserve.Parameters.AddWithValue("requestId", requestId);
-            reserve.Parameters.AddWithValue("reservedAt", databaseNow);
-            reserve.Parameters.AddWithValue("reservationExpiresAt", reservationExpiresAt);
-            reserve.Parameters.AddWithValue("claimId", reference.ClaimId);
-            await reserve.ExecuteNonQueryAsync(cancellationToken);
+            await transaction.RollbackAsync(cancellationToken);
+            return claim.ReservationRequestId is not null
+                ? ClaimFailure<EnrollmentClaimReservation>(
+                    "enrollment-claim-in-progress",
+                    "An issuer reservation already exists for this enrolment claim.")
+                : ClaimFailure<EnrollmentClaimReservation>(
+                    "enrollment-claim-expired",
+                    "The enrolment claim has expired.");
         }
 
         await transaction.CommitAsync(cancellationToken);
         return new Result<EnrollmentClaimReservation, EnrollmentClaimStoreFailure>.Success(
-            new(new EnrollmentClaimState(reference, claim.ExpiresAt, false), requestId, reservationExpiresAt));
+            new(new EnrollmentClaimState(reference, claim.ExpiresAt, false), requestId, reservationExpiresAt.Value));
+    }
+
+    private static async Task<DateTimeOffset?> TryReserveAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid claimId,
+        Guid requestId,
+        CancellationToken cancellationToken)
+    {
+        await using var reserve = new NpgsqlCommand(
+            """
+            WITH current_time AS (
+                SELECT clock_timestamp() AS value
+            )
+            UPDATE armada_enrollment_claims AS claim
+            SET issuance_request_id = @requestId,
+                issuance_reserved_at = current_time.value,
+                issuance_reservation_expires_at = LEAST(
+                    claim.expires_at,
+                    current_time.value + INTERVAL '5 minutes')
+            FROM current_time
+            WHERE claim.claim_id = @claimId
+              AND claim.expires_at > current_time.value
+              AND claim.issuance_request_id IS NULL
+            RETURNING claim.issuance_reservation_expires_at;
+            """,
+            connection,
+            transaction);
+        reserve.Parameters.AddWithValue("requestId", requestId);
+        reserve.Parameters.AddWithValue("claimId", claimId);
+        await using var reader = await reserve.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? reader.GetFieldValue<DateTimeOffset>(0)
+            : null;
     }
 
     public async Task<Result<EnrollmentCompletion?, EnrollmentStateStoreFailure>> FindCompletedAsync(
@@ -516,24 +532,6 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
             reader.GetBoolean(0));
     }
 
-    private static async Task<DateTimeOffset> ReadDatabaseNowAsync(
-        NpgsqlConnection connection,
-        NpgsqlTransaction transaction,
-        CancellationToken cancellationToken)
-    {
-        await using var command = new NpgsqlCommand(
-            "SELECT clock_timestamp();",
-            connection,
-            transaction);
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-        {
-            throw new InvalidOperationException("PostgreSQL did not return its current timestamp.");
-        }
-
-        return reader.GetFieldValue<DateTimeOffset>(0);
-    }
-
     private static async Task<bool> InsertIdentityAsync(
         NpgsqlConnection connection,
         NpgsqlTransaction transaction,
@@ -828,9 +826,6 @@ public sealed class PostgresNodeEnrollmentStateRepository(NpgsqlDataSource dataS
         Sha256Digest.Parse(value) is Result<Sha256Digest, ContractValidationError>.Success digest
             ? digest.Value
             : throw new InvalidOperationException("A persisted SHA-256 digest is invalid.");
-
-    private static DateTimeOffset Min(DateTimeOffset left, DateTimeOffset right) =>
-        left <= right ? left : right;
 
     private static Result<T, EnrollmentClaimStoreFailure> ClaimFailure<T>(string code, string message) =>
         new Result<T, EnrollmentClaimStoreFailure>.Failure(new(code, message));
