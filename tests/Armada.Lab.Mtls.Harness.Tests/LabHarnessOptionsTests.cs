@@ -1,4 +1,6 @@
 using Armada.Lab.Mtls.LiveHarness;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 
 namespace Armada.Lab.Mtls.Harness.Tests;
 
@@ -71,11 +73,29 @@ public sealed class LabHarnessOptionsTests
     [Fact]
     public void Public_device_frame_rejects_a_substituted_key_or_csr()
     {
-        var frame = PublicDeviceFrame.Create(Guid.NewGuid(), 1, [1, 2, 3], [4, 5, 6]);
+        var frame = Frame();
         frame.Validate();
 
         Assert.Throws<ArgumentException>(() =>
             (frame with { CertificateSigningRequest = [9, 5, 6] }).Validate());
+    }
+
+    [Fact]
+    public void Public_device_frame_rejects_a_csr_for_another_p256_key()
+    {
+        var frame = Frame();
+        using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var otherCsr = new CertificateRequest("CN=other", other, HashAlgorithmName.SHA256).CreateSigningRequest();
+
+        Assert.Throws<ArgumentException>(() =>
+            PublicDeviceFrame.Create(frame.NodeUid, frame.IdentityEpoch, frame.SubjectPublicKeyInfo, otherCsr).Validate());
+    }
+
+    [Fact]
+    public void Public_device_frame_rejects_an_invalid_spki()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            PublicDeviceFrame.Create(Guid.NewGuid(), 1, [1, 2, 3], [4, 5, 6]).Validate());
     }
 
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)
@@ -87,4 +107,12 @@ public sealed class LabHarnessOptionsTests
         ["database"] = "armada_c2_0123456789abcdef0123456789abcdef",
         ["evidence-directory"] = "/tmp/armada-evidence"
     };
+
+    private static PublicDeviceFrame Frame()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var spki = key.ExportSubjectPublicKeyInfo();
+        var csr = new CertificateRequest("CN=armada-node", key, HashAlgorithmName.SHA256).CreateSigningRequest();
+        return PublicDeviceFrame.Create(Guid.NewGuid(), 1, spki, csr);
+    }
 }

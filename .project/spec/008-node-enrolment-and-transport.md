@@ -112,7 +112,10 @@ boundary. It is manually invoked and review-gated: preflight validates explicit
 inputs but creates no state; live execution needs separate approval. Its first
 WSL phase creates a `0700` temporary root and a P-256 device key/CSR, returning
 only an integrity-bound public frame (SPKI, digest, CSR, node UID and epoch).
-Only after the controller validates that frame may it create the disposable
+Frame validation reuses the canonical enrolment decision: it requires DER
+ECDSA P-256 SPKI, matching SHA-256, a signed CSR whose subject public key
+matches that SPKI, and the stated size/identifier bounds. Only after the
+controller validates that frame may it create the disposable
 database claim verifier bound to that exact digest. Its second phase delivers
 the raw claim only over SSH stdin or a re-opened verified `0600` temporary
 file. The device private key, claim secret, CA private key, PostgreSQL

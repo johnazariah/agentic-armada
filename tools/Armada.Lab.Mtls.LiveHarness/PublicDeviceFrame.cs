@@ -1,4 +1,7 @@
 using System.Security.Cryptography;
+using System.Collections.Immutable;
+using Armada.Application;
+using Armada.Contracts;
 
 namespace Armada.Lab.Mtls.LiveHarness;
 
@@ -52,6 +55,25 @@ public sealed record PublicDeviceFrame(
                     CertificateSigningRequest))))
         {
             throw new ArgumentException("The public device frame digest does not match its contents.");
+        }
+
+        var request = new EnrollmentRequestDto(
+            NodeTransportProtocol.Version,
+            Guid.NewGuid().ToString("D"),
+            ImmutableArray.CreateRange(new byte[NodeTransportProtocol.MinimumClaimSecretBytes]),
+            NodeUid.ToString("D"),
+            IdentityEpoch,
+            ImmutableArray.CreateRange(SubjectPublicKeyInfo),
+            ImmutableArray.CreateRange(PublicKeySha256),
+            ImmutableArray.CreateRange(CertificateSigningRequest),
+            new EnrollmentInventory(ImmutableDictionary<string, string>.Empty, ImmutableArray<string>.Empty),
+            null,
+            Guid.NewGuid().ToString("D"),
+            DateTimeOffset.UtcNow);
+        if (NodeEnrollmentDecisions.ValidateEnrollment(request, DateTimeOffset.UtcNow) is
+            Result<ValidatedEnrollmentRequest, NodeTransportValidationError>.Failure failure)
+        {
+            throw new ArgumentException($"The public device frame key material is invalid: {failure.Error.Code}.");
         }
     }
 
