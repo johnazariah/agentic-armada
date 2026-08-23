@@ -7,6 +7,7 @@
     <Project Path="src/Armada.Infrastructure.GitHub/Armada.Infrastructure.GitHub.csproj" />
     <Project Path="src/Armada.Infrastructure.Postgres/Armada.Infrastructure.Postgres.csproj" />
     <Project Path="src/Armada.ControlPlane.Host/Armada.ControlPlane.Host.csproj" />
+    <Project Path="src/Armada.Lab.Mtls/Armada.Lab.Mtls.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/Armada.Contracts.Tests/Armada.Contracts.Tests.csproj" />
@@ -16,5 +17,6 @@
     <Project Path="tests/Armada.Infrastructure.Postgres.Tests/Armada.Infrastructure.Postgres.Tests.csproj" />
     <Project Path="tests/Armada.Infrastructure.GitHub.Tests/Armada.Infrastructure.GitHub.Tests.csproj" />
     <Project Path="tests/Armada.ControlPlane.Host.Tests/Armada.ControlPlane.Host.Tests.csproj" />
+    <Project Path="tests/Armada.Lab.Mtls.Tests/Armada.Lab.Mtls.Tests.csproj" />
   </Folder>
 </Solution>

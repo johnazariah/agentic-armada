@@ -1,6 +1,6 @@
 # Node enrolment and transport threat model
 
-**Status:** PR B durable controller-state evidence
+**Status:** PR C1 raw-wire adapter foundation
 
 | Threat | PR A control | Expected outcome |
 | --- | --- | --- |
@@ -13,8 +13,10 @@
 | Replay collision or changed replay | Complete replay identity, payload digest and sequence/message/idempotency uniqueness | Exact receipt is returned; changed identity fails closed as `replay-conflict` |
 | Audit rewrite or lost notification | Append-only transport audit trigger and same-transaction outbox | Correlated durable evidence is immutable and dispatchable |
 | Resource/readiness scope expansion | No NodeIdentity mutation; observation payloads only | No readiness, admission, command or workload authority |
+| gRPC parser normalises hostile wire data before validation | Public `ServerServiceDefinition` mappings use a raw request wrapper for the exact unary and duplex methods; strict validation occurs before any protobuf object, claim, issuer, identity or replay operation | Unknown, duplicate and malformed outer protobuf fields are rejected before state effect |
 
-PR B does not defend against PostgreSQL disclosure, CA compromise or network MITM:
+PR C1 does not expose a listener or create CA, claim or device-key material.
+It does not defend against PostgreSQL disclosure, CA compromise or network MITM:
 verifiers still require database confidentiality, and concrete CA/listener/mTLS
-controls remain PR C. It intentionally has no claim creation mechanism, signer,
-network endpoint or node key store.
+controls remain the later C2 harness. It intentionally has no claim creation
+mechanism, signer, network endpoint or node key store.

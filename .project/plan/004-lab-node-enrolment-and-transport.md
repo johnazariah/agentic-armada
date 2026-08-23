@@ -20,10 +20,17 @@ audit/outbox evidence. It has no CA or network listener.
 
 ## PR C: explicit lab adapters
 
-Add an ephemeral test/lab CA, device-key adapter, explicitly bound mTLS gRPC
-enrolment/stream endpoints and outbound node transport. It must prove
-response-loss, wrong-CA, replay and revocation failures without adding workload
-commands or general web APIs.
+Split adapter delivery for reviewability:
+
+1. **C1 raw-wire foundation:** register only the exact existing gRPC method
+   names through public `ServerServiceDefinition` with raw request marshallers.
+   The strict parser must see the received bytes before any claim, issuer,
+   identity or replay port. C1 supplies no host process, CA, claim tool or key
+   store.
+2. **C2 live harness:** separately compose the explicit exact-IP listeners,
+   ephemeral CA, Linux device-key adapter and disposable live Mac/WSL proof.
+   It must prove response-loss, wrong-CA, replay and revocation failures
+   without adding workload commands or general web APIs.
 
 ## Compatibility
 
