@@ -19,6 +19,8 @@ public sealed class LabNodeEnrollmentGrpcService(
     private readonly TimeProvider clock = clock ?? TimeProvider.System;
     private readonly TimeSpan certificateLifetime = certificateLifetime ?? TimeSpan.FromDays(1);
 
+    public TimeSpan CertificateLifetime => certificateLifetime;
+
     public override async Task<Proto.EnrollmentResponse> Enroll(
         Proto.EnrollmentRequest request,
         ServerCallContext context)
@@ -225,6 +227,12 @@ public sealed class LabNodeEnrollmentGrpcService(
                     case 58:
                     case 66:
                     case 74:
+                        if (!IsStrictEnrollmentInventory(input.ReadBytes().Span))
+                        {
+                            return false;
+                        }
+
+                        break;
                     case 82:
                     case 90:
                     case 98:
@@ -245,13 +253,74 @@ public sealed class LabNodeEnrollmentGrpcService(
             return false;
         }
     }
-}
 
-public sealed class LabNodeTransportGrpcService : Proto.NodeTransport.NodeTransportBase
-{
-    public override Task Connect(
-        IAsyncStreamReader<Proto.NodeToControl> requestStream,
-        IServerStreamWriter<Proto.ControlToNode> responseStream,
-        ServerCallContext context) =>
-        throw new RawStreamProtobufUnavailableException();
+    private static bool IsStrictEnrollmentInventory(ReadOnlySpan<byte> bytes)
+    {
+        var mapKeys = new HashSet<string>(StringComparer.Ordinal);
+        try
+        {
+            var input = new Google.Protobuf.CodedInputStream(bytes.ToArray());
+            while (!input.IsAtEnd)
+            {
+                switch (input.ReadTag())
+                {
+                    case 10:
+                        if (!TryReadStrictInventoryMapEntry(input.ReadBytes().Span, out var key) ||
+                            !mapKeys.Add(key))
+                        {
+                            return false;
+                        }
+
+                        break;
+                    case 18:
+                        input.ReadString();
+                        break;
+                    default:
+                        return false;
+                }
+            }
+
+            return true;
+        }
+        catch (InvalidProtocolBufferException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadStrictInventoryMapEntry(ReadOnlySpan<byte> bytes, out string key)
+    {
+        var seen = new HashSet<uint>();
+        key = string.Empty;
+        try
+        {
+            var input = new Google.Protobuf.CodedInputStream(bytes.ToArray());
+            while (!input.IsAtEnd)
+            {
+                var tag = input.ReadTag();
+                if (!seen.Add(tag))
+                {
+                    return false;
+                }
+
+                switch (tag)
+                {
+                    case 10:
+                        key = input.ReadString();
+                        break;
+                    case 18:
+                        input.ReadString();
+                        break;
+                    default:
+                        return false;
+                }
+            }
+
+            return !string.IsNullOrEmpty(key);
+        }
+        catch (InvalidProtocolBufferException)
+        {
+            return false;
+        }
+    }
 }

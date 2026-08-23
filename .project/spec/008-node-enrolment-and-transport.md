@@ -15,6 +15,13 @@ service and method names through the public `ServerServiceDefinition` mapping
 API, with a raw request marshaller for both methods and generated response
 marshallers only. It maps no generated `MapGrpcService<T>` route.
 
+For enrolment this check includes `EnrollmentInventory`: unknown nested fields,
+duplicate map-entry fields and duplicate map keys are rejected before
+materialising protobuf's map representation, which would otherwise overwrite a
+prior key. The validated adapter composition carries the exact bounded
+certificate lifetime to the raw unary handler; it must not reconstruct a
+default lifetime while mapping routes.
+
 ## Enrolment
 
 `EnrollmentRequest` has only protocol version, opaque claim ID and secret,

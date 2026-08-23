@@ -12,22 +12,29 @@ public sealed record LabMtlsAdapterDependencies(
     ITransportReplayReceiptStore ReplayReceipts,
     TimeProvider? Clock = null);
 
-public sealed class RawStreamProtobufUnavailableException : InvalidOperationException
+public sealed record LabMtlsAdapterComposition(
+    LabMtlsRuntimeSettings Settings,
+    LabMtlsAdapterDependencies Dependencies)
 {
-    public RawStreamProtobufUnavailableException()
-        : base(
-            "The lab mTLS adapter is blocked: ASP.NET Core's generated gRPC stream binder supplies deserialised " +
-            "NodeToControl messages rather than their received protobuf bytes. Re-serialising would weaken replay " +
-            "validation, so no stream listener is exposed until a byte-preserving gRPC binding is available.")
-    {
-    }
+    public LabNodeEnrollmentGrpcService CreateEnrollmentService() =>
+        new(
+            Dependencies.EnrollmentState,
+            Dependencies.CertificateIssuer,
+            Dependencies.Clock,
+            Settings.CertificateLifetime);
+
+    public RawNodeTransportService CreateTransportService() =>
+        new(
+            Dependencies.Identities,
+            Dependencies.ReplayReceipts,
+            Dependencies.Clock);
 }
 
 public static class LabMtlsAdapter
 {
     // This composes only caller-supplied settings and certificate objects; it never reads
     // a CA, creates claims, persists keys, or starts the application.
-    public static void Compose(
+    public static LabMtlsAdapterComposition Compose(
         WebApplicationBuilder builder,
         LabMtlsRuntimeSettings settings,
         LabMtlsAdapterDependencies dependencies)
@@ -35,11 +42,6 @@ public static class LabMtlsAdapter
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(settings);
         ArgumentNullException.ThrowIfNull(dependencies);
-
-        if (!settings.Enabled)
-        {
-            return;
-        }
 
         var failures = LabMtlsConfiguration.Validate(
             settings,
@@ -52,16 +54,7 @@ public static class LabMtlsAdapter
 
         LabMtlsConfiguration.ComposeKestrel(builder, settings);
         builder.Services.AddGrpc();
-        builder.Services.AddSingleton(new LabNodeEnrollmentGrpcService(
-            dependencies.EnrollmentState,
-            dependencies.CertificateIssuer,
-            dependencies.Clock,
-            settings.CertificateLifetime));
-        builder.Services.AddSingleton(new RawNodeTransportService(
-            dependencies.Identities,
-            dependencies.ReplayReceipts,
-            dependencies.Clock));
-
+        return new(settings, dependencies);
     }
 
     // This registers only custom raw-request service definitions. In particular it
@@ -69,20 +62,14 @@ public static class LabMtlsAdapter
     // the strict wire validators can see duplicate or unknown fields.
     public static void Map(
         WebApplication application,
-        LabMtlsAdapterDependencies dependencies)
+        LabMtlsAdapterComposition composition)
     {
         ArgumentNullException.ThrowIfNull(application);
-        ArgumentNullException.ThrowIfNull(dependencies);
+        ArgumentNullException.ThrowIfNull(composition);
 
         LabMtlsRawGrpcBinding.Map(
             application,
-            new LabNodeEnrollmentGrpcService(
-                dependencies.EnrollmentState,
-                dependencies.CertificateIssuer,
-                dependencies.Clock),
-            new RawNodeTransportService(
-                dependencies.Identities,
-                dependencies.ReplayReceipts,
-                dependencies.Clock));
+            composition.CreateEnrollmentService(),
+            composition.CreateTransportService());
     }
 }

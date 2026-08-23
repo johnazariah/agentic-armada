@@ -69,8 +69,42 @@ public sealed class RawGrpcBindingTests
     public static IEnumerable<object[]> InvalidEnrollmentWires =>
     [
         ["unknown outer field", new byte[] { 0x78, 0x01 }],
-        ["duplicate protocol_version field", new byte[] { 0x0A, 0x01, (byte)'a', 0x0A, 0x01, (byte)'b' }]
+        ["duplicate protocol_version field", new byte[] { 0x0A, 0x01, (byte)'a', 0x0A, 0x01, (byte)'b' }],
+        ["unknown inventory field", EnrollmentWithInventory([0x18, 0x01])],
+        [
+            "duplicate inventory map key",
+            EnrollmentWithInventory(
+                InventoryMapEntry("os", "linux")
+                    .Concat(InventoryMapEntry("os", "ubuntu"))
+                    .ToArray())
+        ]
     ];
+
+    [Fact]
+    public void Composition_carries_the_validated_nondefault_certificate_lifetime_to_raw_enrolment()
+    {
+        using var certificate = Certificate();
+        var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
+        var settings = new LabMtlsRuntimeSettings
+        {
+            Enabled = true,
+            EnrollmentEndpoint = new(IPAddress.Parse("192.0.2.20"), 8443),
+            StreamEndpoint = new(IPAddress.Parse("192.0.2.20"), 9443),
+            ServerCertificate = certificate,
+            ClientCertificateValidation = static (_, _, _) => true,
+            CertificateLifetime = TimeSpan.FromHours(2)
+        };
+        var composition = LabMtlsAdapter.Compose(
+            builder,
+            settings,
+            new(
+                new ControllerEnrollmentStateService(new CountingClaimStore(), new CountingStateStore()),
+                new CountingIssuer(),
+                new EmptyIdentityRegistry(),
+                new EmptyReplayReceipts()));
+
+        Assert.Equal(TimeSpan.FromHours(2), composition.CreateEnrollmentService().CertificateLifetime);
+    }
 
     [Theory]
     [InlineData("unknown field", new byte[] { 0x78, 0x01 })]
@@ -200,6 +234,19 @@ public sealed class RawGrpcBindingTests
                 PayloadType = NodeTransportProtocol.HelloPayloadType
             }
         };
+
+    private static byte[] EnrollmentWithInventory(byte[] inventory) =>
+        [0x4A, checked((byte)inventory.Length), .. inventory];
+
+    private static byte[] InventoryMapEntry(string key, string value)
+    {
+        var entry = new List<byte> { 0x0A, checked((byte)key.Length) };
+        entry.AddRange(System.Text.Encoding.UTF8.GetBytes(key));
+        entry.Add(0x12);
+        entry.Add(checked((byte)value.Length));
+        entry.AddRange(System.Text.Encoding.UTF8.GetBytes(value));
+        return [0x0A, checked((byte)entry.Count), .. entry];
+    }
 
     private static Sha256Digest Digest(ReadOnlySpan<byte> bytes) =>
         Sha256Digest.Parse($"sha256:{Convert.ToHexString(bytes).ToLowerInvariant()}") is
