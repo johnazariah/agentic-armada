@@ -16,7 +16,9 @@ using Microsoft.AspNetCore.Hosting.Server.Features;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Https;
 using Microsoft.Extensions.DependencyInjection;
+using Google.Protobuf.WellKnownTypes;
 using Proto = Armada.Contracts.V1Alpha1;
 
 namespace Armada.Lab.Mtls.Tests;
@@ -70,6 +72,61 @@ public sealed class RawGrpcBindingTests
         ["duplicate protocol_version field", new byte[] { 0x0A, 0x01, (byte)'a', 0x0A, 0x01, (byte)'b' }]
     ];
 
+    [Theory]
+    [InlineData("unknown field", new byte[] { 0x78, 0x01 })]
+    [InlineData("duplicate protocol version", new byte[] { 0x0A, 0x01, (byte)'x' })]
+    [InlineData("truncated field", new byte[] { 0x0A })]
+    public async Task Invalid_raw_node_transport_wire_is_typed_rejection_before_identity_or_replay(
+        string _,
+        byte[] invalidSuffix)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var nodeUid = new NodeUid(Guid.NewGuid());
+        var identities = new ThrowingIdentityRegistry();
+        var receipts = new ThrowingReplayReceipts();
+        await using var server = await LoopbackServer.StartAsync(identities, receipts, new FixedTimeProvider(now));
+        var wire = Hello(nodeUid, now).ToByteArray().Concat(invalidSuffix).ToArray();
+
+        var response = await ConnectAsync(server.Client, wire);
+
+        Assert.Equal(Proto.ControlToNode.PayloadOneofCase.TransportRejection, response.PayloadCase);
+        Assert.Equal(Proto.TransportRejectionCode.InvalidEnvelope, response.TransportRejection.Code);
+        Assert.Equal(0, identities.Calls);
+        Assert.Equal(0, receipts.Calls);
+    }
+
+    [Fact]
+    public async Task Raw_node_transport_binding_accepts_mtls_hello_and_records_canonical_raw_identity()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var nodeUid = new NodeUid(Guid.NewGuid());
+        var identities = new RecordingIdentityRegistry();
+        var receipts = new RecordingReplayReceipts();
+        await using var server = await LoopbackServer.StartAsync(identities, receipts, new FixedTimeProvider(now));
+        identities.Binding = new(
+            nodeUid,
+            1,
+            Digest(new byte[32]),
+            server.Certificate.SerialNumber,
+            Convert.ToHexString(server.Certificate.GetCertHash(HashAlgorithmName.SHA256)),
+            now.AddHours(1),
+            false);
+        var wire = Hello(nodeUid, now).ToByteArray();
+        var expected = NodeEnrollmentDecisions.ValidateTransportEnvelope(wire, now);
+        var expectedIdentity =
+            ((Result<ValidatedTransportEnvelope, NodeTransportValidationError>.Success)expected).Value.ReplayIdentity;
+
+        var response = await ConnectAsync(server.Client, wire);
+
+        Assert.Equal(Proto.ControlToNode.PayloadOneofCase.TransportAck, response.PayloadCase);
+        Assert.Equal("accepted", response.TransportAck.Code);
+        Assert.Equal(1, identities.Calls);
+        Assert.Equal(1, receipts.Calls);
+        Assert.NotNull(receipts.Receipt);
+        Assert.Equal(expectedIdentity, receipts.Receipt.Identity);
+        Assert.Equal(expectedIdentity.PayloadDigest, receipts.Receipt.Identity.PayloadDigest);
+    }
+
     private static readonly Method<RawGrpcMessage, Proto.EnrollmentResponse> EnrollmentMethod =
         new(
             MethodType.Unary,
@@ -90,6 +147,65 @@ public sealed class RawGrpcBindingTests
                     context.Complete();
                 },
                 static context => Proto.EnrollmentResponse.Parser.ParseFrom(context.PayloadAsNewBuffer())));
+
+    private static readonly Method<RawGrpcMessage, Proto.ControlToNode> TransportMethod =
+        new(
+            MethodType.DuplexStreaming,
+            "armada.node.transport.v1alpha1.NodeTransport",
+            "Connect",
+            Marshallers.Create(
+                static (message, context) =>
+                {
+                   context.SetPayloadLength(message.Bytes.Length);
+                   context.Complete(message.Bytes.ToArray());
+                },
+                RawGrpcMessage.Read),
+            Marshallers.Create(
+                static (response, context) =>
+                {
+                   context.SetPayloadLength(response.CalculateSize());
+                   response.WriteTo(context.GetBufferWriter());
+                   context.Complete();
+                },
+                static context => Proto.ControlToNode.Parser.ParseFrom(context.PayloadAsNewBuffer())));
+
+    private static async Task<Proto.ControlToNode> ConnectAsync(GrpcChannel client, byte[] wire)
+    {
+        using var call = client.CreateCallInvoker().AsyncDuplexStreamingCall(
+            TransportMethod,
+            host: null,
+            new CallOptions());
+        await call.RequestStream.WriteAsync(new RawGrpcMessage(ImmutableArray.CreateRange(wire)));
+        await call.RequestStream.CompleteAsync();
+        Assert.True(await call.ResponseStream.MoveNext(CancellationToken.None));
+        return call.ResponseStream.Current;
+    }
+
+    private static Proto.NodeToControl Hello(NodeUid nodeUid, DateTimeOffset now) =>
+        new()
+        {
+            ProtocolVersion = NodeTransportProtocol.Version,
+            NodeUid = nodeUid.ToString(),
+            IdentityEpoch = 1,
+            StreamEpoch = 1,
+            Sequence = 1,
+            MessageId = Guid.NewGuid().ToString("D"),
+            CorrelationId = Guid.NewGuid().ToString("D"),
+            IdempotencyKey = "hello-1",
+            SentAt = Timestamp.FromDateTimeOffset(now),
+            Hello = new()
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                AgentVersion = "1.0.0",
+                PayloadType = NodeTransportProtocol.HelloPayloadType
+            }
+        };
+
+    private static Sha256Digest Digest(ReadOnlySpan<byte> bytes) =>
+        Sha256Digest.Parse($"sha256:{Convert.ToHexString(bytes).ToLowerInvariant()}") is
+            Result<Sha256Digest, ContractValidationError>.Success digest
+            ? digest.Value
+            : throw new InvalidOperationException();
 
     private sealed class LoopbackServer : IAsyncDisposable
     {
@@ -113,11 +229,15 @@ public sealed class RawGrpcBindingTests
 
         public WebApplication Application { get; }
         public GrpcChannel Client { get; }
+        public X509Certificate2 Certificate => certificate;
         public CountingClaimStore Claims { get; }
         public CountingStateStore State { get; }
         public CountingIssuer Issuer { get; }
 
-        public static async Task<LoopbackServer> StartAsync()
+        public static async Task<LoopbackServer> StartAsync(
+            INodeIdentityRegistry? identities = null,
+            ITransportReplayReceiptStore? receipts = null,
+            TimeProvider? clock = null)
         {
             var certificate = Certificate();
             var builder = WebApplication.CreateBuilder();
@@ -126,7 +246,12 @@ public sealed class RawGrpcBindingTests
                 options.Listen(IPAddress.Loopback, 0, listen =>
                 {
                     listen.Protocols = HttpProtocols.Http2;
-                    listen.UseHttps(certificate);
+                    listen.UseHttps(new HttpsConnectionAdapterOptions
+                    {
+                        ServerCertificate = certificate,
+                        ClientCertificateMode = ClientCertificateMode.RequireCertificate,
+                        ClientCertificateValidation = static (_, _, _) => true
+                    });
                 });
             });
             builder.Services.AddGrpc();
@@ -140,7 +265,10 @@ public sealed class RawGrpcBindingTests
                 new LabNodeEnrollmentGrpcService(
                     new ControllerEnrollmentStateService(claims, state),
                     issuer),
-                new RawNodeTransportService(new EmptyIdentityRegistry(), new EmptyReplayReceipts()));
+                new RawNodeTransportService(
+                    identities ?? new EmptyIdentityRegistry(),
+                    receipts ?? new EmptyReplayReceipts(),
+                    clock));
             await application.StartAsync();
 
             var address = application.Services.GetRequiredService<IServer>()
@@ -151,6 +279,7 @@ public sealed class RawGrpcBindingTests
                 SslOptions =
                 {
                     EnabledSslProtocols = SslProtocols.Tls12 | SslProtocols.Tls13,
+                    ClientCertificates = new X509CertificateCollection { certificate },
                     RemoteCertificateValidationCallback = static (_, _, _, _) => true
                 }
             };
@@ -258,6 +387,98 @@ public sealed class RawGrpcBindingTests
         public Task<Result<ReplayReceipt, ReplayReceiptStoreFailure>> RetrieveOrRecordAsync(
             ReplayReceipt receipt,
             CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class ThrowingIdentityRegistry : INodeIdentityRegistry
+    {
+        public int Calls { get; private set; }
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> ResolveAsync(
+            NodeUid nodeUid,
+            long identityEpoch,
+            string certificateSerial,
+            string certificateThumbprintSha256,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            throw new InvalidOperationException("Identity lookup must not occur for an invalid raw protobuf.");
+        }
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RegisterAsync(
+            NodeIdentityBinding binding,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RevokeAsync(
+            NodeUid nodeUid,
+            long identityEpoch,
+            string reason,
+            Guid correlationId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingIdentityRegistry : INodeIdentityRegistry
+    {
+        public int Calls { get; private set; }
+        public NodeIdentityBinding? Binding { get; set; }
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> ResolveAsync(
+            NodeUid nodeUid,
+            long identityEpoch,
+            string certificateSerial,
+            string certificateThumbprintSha256,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>>(
+                Binding is { } binding
+                    ? new Result<NodeIdentityBinding, NodeIdentityRegistryFailure>.Success(binding)
+                    : new Result<NodeIdentityBinding, NodeIdentityRegistryFailure>.Failure(new("not-found", "Not found.")));
+        }
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RegisterAsync(
+            NodeIdentityBinding binding,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RevokeAsync(
+            NodeUid nodeUid,
+            long identityEpoch,
+            string reason,
+            Guid correlationId,
+            CancellationToken cancellationToken) => throw new NotSupportedException();
+    }
+
+    private sealed class ThrowingReplayReceipts : ITransportReplayReceiptStore
+    {
+        public int Calls { get; private set; }
+
+        public Task<Result<ReplayReceipt, ReplayReceiptStoreFailure>> RetrieveOrRecordAsync(
+            ReplayReceipt receipt,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            throw new InvalidOperationException("Replay recording must not occur for an invalid raw protobuf.");
+        }
+    }
+
+    private sealed class RecordingReplayReceipts : ITransportReplayReceiptStore
+    {
+        public int Calls { get; private set; }
+        public ReplayReceipt? Receipt { get; private set; }
+
+        public Task<Result<ReplayReceipt, ReplayReceiptStoreFailure>> RetrieveOrRecordAsync(
+            ReplayReceipt receipt,
+            CancellationToken cancellationToken)
+        {
+            Calls++;
+            Receipt = receipt;
+            return Task.FromResult<Result<ReplayReceipt, ReplayReceiptStoreFailure>>(
+                new Result<ReplayReceipt, ReplayReceiptStoreFailure>.Success(receipt));
+        }
+    }
+
+    private sealed class FixedTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     private static X509Certificate2 Certificate()

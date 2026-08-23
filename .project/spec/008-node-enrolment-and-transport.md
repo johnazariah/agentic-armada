@@ -1,11 +1,19 @@
 # Node enrolment and transport v1alpha1
 
 **Protocol family:** `armada.node.transport/v1alpha1`  
-**Status:** PR B durable controller state; no listener or issuer
+**Status:** PR C1 raw-wire adapter foundation; no listener, issuer or device key store
 
 `NodeEnrollment/Enroll` is unary. `NodeTransport/Connect` is duplex. The
 protobuf source is `proto/armada/v1alpha1/node_transport.proto`; tags and
 oneof members are append-only and deployed tags must never be repurposed.
+
+Any untrusted implementation of these gRPC methods must retain the received
+protobuf bytes until the strict parser has rejected unknown or duplicate fields.
+It must not use generated request deserialisation followed by reserialisation:
+that loses wire distinctions before validation. C1 registers the exact existing
+service and method names through the public `ServerServiceDefinition` mapping
+API, with a raw request marshaller for both methods and generated response
+marshallers only. It maps no generated `MapGrpcService<T>` route.
 
 ## Enrolment
 
@@ -92,7 +100,9 @@ payloads require a later protocol version and an explicit compatibility record.
 
 ## Explicit exclusions
 
-This state layer supplies no CA, key or claim-secret creation tool; no gRPC/HTTP
-listener, host endpoint or network client; no device filesystem key store,
-executable or harness; and no workload, admission, lease, process, credential,
-GitHub, Copilot, signer, installer or production authority.
+This state layer supplies no CA, key or claim-secret creation tool; no
+standalone gRPC/HTTP listener, host endpoint or network client; no device
+filesystem key store, executable or harness; and no workload, admission, lease,
+process, credential, GitHub, Copilot, signer, installer or production
+authority. C1's library is disabled by default and needs explicit later harness
+composition before a Kestrel process can be started.
