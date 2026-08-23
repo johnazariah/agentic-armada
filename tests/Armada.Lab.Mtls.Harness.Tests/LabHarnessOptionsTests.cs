@@ -123,10 +123,45 @@ public sealed class LabHarnessOptionsTests
     }
 
     [Fact]
+    public async Task Cleanup_ignores_a_cancelled_caller_token_and_runs_every_step()
+    {
+        var steps = new List<string>();
+        var cleanup = new CleanupCoordinator(
+        [
+            ("first", token => { Assert.False(token.IsCancellationRequested); steps.Add("first"); return Task.CompletedTask; }),
+            ("second", token => { Assert.False(token.IsCancellationRequested); steps.Add("second"); return Task.CompletedTask; })
+        ]);
+        using var callerCancellation = new CancellationTokenSource();
+        callerCancellation.Cancel();
+
+        await cleanup.CleanupAsync(callerCancellation.Token);
+
+        Assert.Equal(["first", "second"], steps);
+    }
+
+    [Fact]
     public void Evidence_rejects_secret_bearing_fields()
     {
         Assert.Throws<ArgumentException>(() =>
             RedactedEvidence.Create([new("claimSecret", "not retained")]));
+    }
+
+    [Fact]
+    public void Evidence_rejects_sensitive_values_with_an_allowed_field_name()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            RedactedEvidence.Create([new("certificateFingerprint", "Host=postgres;Password=secret")]));
+    }
+
+    [Theory]
+    [InlineData("127.0.0.1")]
+    [InlineData("224.0.0.1")]
+    public void Certificate_plan_requires_the_same_exact_unicast_listener_address(string address)
+    {
+        var listener = new LabListenerPlan("192.0.2.20", 8443, 9443);
+        var plan = new LabCertificatePlan("CN=lab", address, TimeSpan.FromHours(1), true, false);
+
+        Assert.Throws<ArgumentException>(() => plan.ValidateServer(listener));
     }
 
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)

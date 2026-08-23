@@ -1,5 +1,5 @@
 using System.Diagnostics;
-using System.Security.Cryptography.X509Certificates;
+using System.Net;
 
 namespace Armada.Lab.Mtls.LiveHarness;
 
@@ -10,10 +10,14 @@ public sealed record LabCertificatePlan(
     bool ServerAuthentication,
     bool ClientAuthentication)
 {
-    public void ValidateServer()
+    public void ValidateServer(LabListenerPlan listener)
     {
+        ArgumentNullException.ThrowIfNull(listener);
+        listener.Validate();
         if (string.IsNullOrWhiteSpace(Subject) ||
-            !System.Net.IPAddress.TryParse(ExactListenIp, out _) ||
+            !IPAddress.TryParse(ExactListenIp, out var address) ||
+            !LabHarnessOptions.IsExactUnicast(address) ||
+            !string.Equals(ExactListenIp, listener.ExactListenIp, StringComparison.Ordinal) ||
             Lifetime <= TimeSpan.Zero || Lifetime > TimeSpan.FromDays(31) ||
             !ServerAuthentication || ClientAuthentication)
         {
@@ -68,7 +72,10 @@ public static class RedactedEvidence
         var materialised = items.ToArray();
         if (materialised.Any(item =>
             string.IsNullOrWhiteSpace(item.Name) ||
-            Forbidden.Any(forbidden => item.Name.Contains(forbidden, StringComparison.OrdinalIgnoreCase))))
+            string.IsNullOrWhiteSpace(item.Value) ||
+            Forbidden.Any(forbidden =>
+                item.Name.Contains(forbidden, StringComparison.OrdinalIgnoreCase) ||
+                item.Value.Contains(forbidden, StringComparison.OrdinalIgnoreCase))))
         {
             throw new ArgumentException("Evidence may contain only explicitly non-secret fields.");
         }
@@ -82,11 +89,12 @@ public sealed class CleanupCoordinator(IEnumerable<(string Name, Func<Cancellati
     public async Task CleanupAsync(CancellationToken cancellationToken)
     {
         var failures = new List<Exception>();
+        using var cleanupTimeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
         foreach (var (name, action) in actions)
         {
             try
             {
-                await action(cancellationToken);
+                await action(cleanupTimeout.Token);
             }
             catch (Exception exception)
             {

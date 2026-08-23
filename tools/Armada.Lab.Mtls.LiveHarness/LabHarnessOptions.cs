@@ -30,7 +30,7 @@ public sealed record LabHarnessOptions(
             throw new ArgumentException("evidence-directory must be absolute.");
         }
 
-        if (!IsUnicast(address))
+        if (!IsExactUnicast(address))
         {
             throw new ArgumentException("listen-ip must be one exact non-loopback unicast address.");
         }
@@ -48,7 +48,7 @@ public sealed record LabHarnessOptions(
         return new(connection, address, enrollmentPort, streamPort, database, evidence);
     }
 
-    private static bool IsUnicast(IPAddress address)
+    public static bool IsExactUnicast(IPAddress address)
     {
         if (IPAddress.IsLoopback(address) || address.Equals(IPAddress.Any) || address.Equals(IPAddress.IPv6Any))
         {
