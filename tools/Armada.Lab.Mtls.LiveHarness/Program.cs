@@ -6,6 +6,14 @@ if (args.Contains("--help", StringComparer.Ordinal))
     return;
 }
 
+if (args.Contains("--execute", StringComparer.Ordinal))
+{
+    ExecutionGate.RequireLiveApproval(args, Environment.GetEnvironmentVariable);
+    Console.Error.WriteLine("Live lifecycle wiring is review-gated and not available in this checkpoint.");
+    Environment.ExitCode = 3;
+    return;
+}
+
 if (!args.Contains("--preflight", StringComparer.Ordinal))
 {
     Console.Error.WriteLine("Refusing to run live lifecycle. Use --preflight after review approval.");

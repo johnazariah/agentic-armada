@@ -164,6 +164,17 @@ public sealed class LabHarnessOptionsTests
         Assert.Throws<ArgumentException>(() => plan.ValidateServer(listener));
     }
 
+    [Fact]
+    public void Execution_gate_requires_both_command_and_explicit_environment_approval()
+    {
+        Assert.Throws<InvalidOperationException>(() =>
+            ExecutionGate.RequireLiveApproval(["--execute"], _ => null));
+        Assert.Throws<InvalidOperationException>(() =>
+            ExecutionGate.RequireLiveApproval(["--preflight"], _ => "approved"));
+
+        ExecutionGate.RequireLiveApproval(["--execute"], _ => "approved");
+    }
+
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)
     {
         ["postgres-admin-connection"] = "Host=localhost;Database=postgres",

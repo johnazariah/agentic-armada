@@ -9,6 +9,11 @@ The harness accepts `--preflight` and explicit `--postgres-admin-connection`,
 two distinct ports. Preflight deliberately creates no CA, listener, database,
 claim, certificate, or SSH/WSL state.
 
+Live execution additionally requires the `--execute` argument and exact
+`ARMADA_C2_LIVE_APPROVAL=approved`; neither a command argument nor environment
+value alone can cross that gate. The current checkpoint still stops after this
+gate, until the final lifecycle implementation and separate live approval.
+
 After a separate execution approval, the required ordering is: publish and
 hash the helper; use stdin-only `ssh -T johnaz-phd-wsl` to create the verified
 WSL `0700` root and return the public device frame; validate its P-256 SPKI,
