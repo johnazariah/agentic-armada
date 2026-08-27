@@ -41,6 +41,9 @@ public sealed class SshPhaseBridgeTests
             Assert.DoesNotContain(Convert.ToBase64String([1, 2]), stagingCommand, StringComparison.Ordinal);
             Assert.DoesNotContain(Convert.ToBase64String([3]), stagingCommand, StringComparison.Ordinal);
             Assert.DoesNotContain(Convert.ToBase64String([9, 8, 7]), stagingCommand, StringComparison.Ordinal);
+            Assert.Contains("sha256sum --strict --check helper.manifest", stagingCommand, StringComparison.Ordinal);
+            Assert.Contains("manifest:helper.manifest) target", stagingCommand, StringComparison.Ordinal);
+            Assert.Contains("test ! -e \"$target\"", stagingCommand, StringComparison.Ordinal);
             var stagingPayload = Assert.Single(staging.Writes);
             Assert.Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes("a.helper")), stagingPayload, StringComparison.Ordinal);
             Assert.Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes("z.helper")), stagingPayload, StringComparison.Ordinal);
@@ -55,7 +58,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -78,7 +81,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -98,7 +101,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -125,7 +128,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -144,7 +147,57 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_two_refuses_a_tampered_dependency_before_starting_ssh_or_sending_the_secret()
+        {
+            var helperDirectory = CreateHelperDirectory(("Grpc.Net.Client.dll", [1, 2, 3]));
+            try
+            {
+                var options = Options(helperDirectory);
+                var invoker = new FakeSshProcessInvoker();
+                var bridge = new SshPhaseBridge(options, invoker);
+                File.WriteAllBytes(Path.Combine(helperDirectory, "Grpc.Net.Client.dll"), [9, 9, 9]);
+
+                using var authority = Authority();
+                await Assert.ThrowsAsync<IOException>(() => bridge.RunPhaseTwoAsync(
+                    Claim(options), new RecordingIdentityRegistry(), PublicFrame(options), Secret(), authority, CancellationToken.None));
+
+                Assert.Empty(invoker.Started);
+            }
+            finally
+            {
+                DeleteHelperDirectory(helperDirectory);
+            }
+    }
+
+    [Fact]
+    public void Trusted_manifest_rejects_missing_or_unexpected_or_symlinked_helper_files()
+        {
+            var helperDirectory = CreateHelperDirectory(("Armada.Contracts.dll", [1]));
+            try
+            {
+                var manifest = CreateManifest(helperDirectory);
+                File.Delete(Path.Combine(helperDirectory, "Armada.Contracts.dll"));
+                Assert.Throws<IOException>(() => PublishedHelperManifest.LoadAndVerify(manifest, helperDirectory));
+
+                File.WriteAllBytes(Path.Combine(helperDirectory, "Armada.Contracts.dll"), [1]);
+                File.WriteAllBytes(Path.Combine(helperDirectory, "unexpected.dll"), [2]);
+                Assert.Throws<IOException>(() => PublishedHelperManifest.LoadAndVerify(manifest, helperDirectory));
+
+                File.Delete(Path.Combine(helperDirectory, "unexpected.dll"));
+                File.Delete(Path.Combine(helperDirectory, "Armada.Contracts.dll"));
+                File.CreateSymbolicLink(
+                    Path.Combine(helperDirectory, "Armada.Contracts.dll"),
+                    Path.Combine(helperDirectory, "Armada.Lab.Mtls.WslClient.dll"));
+                Assert.Throws<IOException>(() => PublishedHelperManifest.LoadAndVerify(manifest, helperDirectory));
+        }
+        finally
+        {
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -172,7 +225,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -226,7 +279,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -250,7 +303,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -274,7 +327,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -297,7 +350,7 @@ public sealed class SshPhaseBridgeTests
         }
         finally
         {
-            Directory.Delete(helperDirectory, recursive: true);
+            DeleteHelperDirectory(helperDirectory);
         }
     }
 
@@ -310,6 +363,7 @@ public sealed class SshPhaseBridgeTests
         "armada_c2_0123456789abcdef0123456789abcdef",
         Path.Combine(AppContext.BaseDirectory, "evidence"),
         helperDirectory,
+        CreateManifest(helperDirectory),
         Guid.Parse("01234567-89ab-cdef-0123-456789abcdef"),
         1);
 
@@ -324,6 +378,31 @@ public sealed class SshPhaseBridgeTests
         }
 
         return directory;
+    }
+
+    private static string CreateManifest(string helperDirectory)
+    {
+        var manifest = helperDirectory + ".manifest";
+        if (!File.Exists(manifest))
+        {
+            var entries = Directory.EnumerateFiles(helperDirectory)
+                .Select(path => new
+                {
+                    Name = Path.GetFileName(path),
+                    Digest = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(path))).ToLowerInvariant()
+                })
+                .OrderBy(static entry => entry.Name, StringComparer.Ordinal)
+                .Select(static entry => $"{entry.Digest}  {entry.Name}");
+            File.WriteAllText(manifest, string.Join('\n', entries) + '\n', Encoding.ASCII);
+        }
+
+        return manifest;
+    }
+
+    private static void DeleteHelperDirectory(string helperDirectory)
+    {
+        Directory.Delete(helperDirectory, recursive: true);
+        File.Delete(helperDirectory + ".manifest");
     }
 
     private static DevicePublicFrame DeviceFrame(Guid nodeUid, long identityEpoch)

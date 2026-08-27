@@ -58,8 +58,10 @@ public sealed class LabHarnessOptionsTests
         Assert.StartsWith("set -eu;", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/helper\"", command, StringComparison.Ordinal);
+        Assert.Contains("sha256sum --strict --check helper.manifest", command, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root\"", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/helper\"", phaseTwo, StringComparison.Ordinal);
+        Assert.Contains("sha256sum --strict --check helper.manifest", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/device\"", phaseTwo, StringComparison.Ordinal);
     }
 
@@ -318,7 +320,8 @@ public sealed class LabHarnessOptionsTests
         ["stream-port"] = "9443",
         ["database"] = "armada_c2_0123456789abcdef0123456789abcdef",
         ["evidence-directory"] = "/tmp/armada-evidence",
-        ["helper-directory"] = AppContext.BaseDirectory,
+        ["helper-directory"] = Path.GetTempPath(),
+        ["helper-manifest"] = Path.Combine(AppContext.BaseDirectory, "test-helper.manifest"),
         ["node-uid"] = "01234567-89ab-cdef-0123-456789abcdef",
         ["identity-epoch"] = "1"
     };

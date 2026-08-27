@@ -10,6 +10,7 @@ public sealed record LabHarnessOptions(
     string DatabaseName,
     string EvidenceDirectory,
     string HelperDirectory,
+    string HelperManifest,
     Guid NodeUid,
     long IdentityEpoch)
 {
@@ -30,6 +31,7 @@ public sealed record LabHarnessOptions(
         var database = Required(values, "database");
         var evidenceInput = Required(values, "evidence-directory");
         var helperInput = Required(values, "helper-directory");
+        var manifestInput = Required(values, "helper-manifest");
         var nodeUid = Guid.TryParseExact(Required(values, "node-uid"), "D", out var parsedNodeUid) && parsedNodeUid != Guid.Empty
             ? parsedNodeUid
             : throw new ArgumentException("node-uid must be a non-empty canonical UUID.");
@@ -38,6 +40,7 @@ public sealed record LabHarnessOptions(
             : throw new ArgumentException("identity-epoch must be positive.");
         var evidence = Path.GetFullPath(evidenceInput);
         var helper = Path.GetFullPath(helperInput);
+        var manifest = Path.GetFullPath(manifestInput);
 
         if (!Path.IsPathFullyQualified(evidenceInput))
         {
@@ -46,6 +49,11 @@ public sealed record LabHarnessOptions(
         if (!Path.IsPathFullyQualified(helperInput) || !Directory.Exists(helper) || new DirectoryInfo(helper).LinkTarget is not null)
         {
             throw new ArgumentException("helper-directory must be an existing absolute non-link published helper directory.");
+        }
+        if (!Path.IsPathFullyQualified(manifestInput) || !File.Exists(manifest) || new FileInfo(manifest).LinkTarget is not null ||
+            IsContainedBy(manifest, helper))
+        {
+            throw new ArgumentException("helper-manifest must be an existing absolute non-link file outside helper-directory.");
         }
 
         if (!IsExactUnicast(address))
@@ -63,7 +71,7 @@ public sealed record LabHarnessOptions(
             throw new ArgumentException("database must be a generated armada_c2_<32 lowercase hex> name.");
         }
 
-        return new(address, enrollmentPort, streamPort, database, evidence, helper, nodeUid, identityEpoch);
+        return new(address, enrollmentPort, streamPort, database, evidence, helper, manifest, nodeUid, identityEpoch);
     }
 
     public static bool IsExactUnicast(IPAddress address)
@@ -91,6 +99,13 @@ public sealed record LabHarnessOptions(
         int.TryParse(value, out var port) && port is > 0 and <= 65535
             ? port
             : throw new ArgumentException("Ports must be between 1 and 65535.");
+
+    private static bool IsContainedBy(string path, string directory)
+    {
+        var prefix = directory.EndsWith(Path.DirectorySeparatorChar) ? directory : directory + Path.DirectorySeparatorChar;
+        return string.Equals(path, directory, StringComparison.Ordinal) ||
+            path.StartsWith(prefix, StringComparison.Ordinal);
+    }
 }
 
 public static class LabHarnessCommandContract
@@ -103,10 +118,10 @@ public static class LabHarnessCommandContract
         new("^armada-c2-[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public static string PhaseOneBootstrap(string helperDigest, string remoteRoot) =>
-        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/helper.manifest\"; cd \"$root\"; sha256sum --strict --check helper.manifest; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
 
     public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot) =>
-        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/device\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/helper.manifest\"; cd \"$root\"; sha256sum --strict --check helper.manifest; test ! -L \"$root/device\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
 
     private static string ValidateHelperDigest(string helperDigest) =>
         HelperDigestPattern.IsMatch(helperDigest)

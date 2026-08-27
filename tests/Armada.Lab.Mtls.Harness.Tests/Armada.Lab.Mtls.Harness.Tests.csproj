@@ -15,4 +15,7 @@
     <ProjectReference Include="..\..\tools\Armada.Lab.Mtls.LiveHarness\Armada.Lab.Mtls.LiveHarness.csproj" />
     <ProjectReference Include="..\..\tools\Armada.Lab.Mtls.WslClient\Armada.Lab.Mtls.WslClient.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Include="test-helper.manifest" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

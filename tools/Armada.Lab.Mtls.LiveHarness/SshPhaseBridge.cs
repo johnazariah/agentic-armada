@@ -14,6 +14,106 @@ namespace Armada.Lab.Mtls.LiveHarness;
 
 public sealed record SshProcessResult(string StandardOutput, string StandardError, int ExitCode);
 
+public sealed record PublishedHelperManifestEntry(string FileName, string Sha256);
+
+public sealed class PublishedHelperManifest
+{
+    private static readonly Regex FileNamePattern =
+        new("^[A-Za-z0-9_.-]+$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex DigestPattern =
+        new("^[a-f0-9]{64}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+
+    private PublishedHelperManifest(
+        IReadOnlyList<PublishedHelperManifestEntry> entries,
+        string sha256SumContents)
+    {
+        Entries = entries;
+        Sha256SumContents = sha256SumContents;
+    }
+
+    public IReadOnlyList<PublishedHelperManifestEntry> Entries { get; }
+
+    public string Sha256SumContents { get; }
+
+    public static PublishedHelperManifest LoadAndVerify(string manifestPath, string helperDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(manifestPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(helperDirectory);
+        if (new FileInfo(manifestPath).LinkTarget is not null)
+        {
+            throw new IOException("The helper manifest must not be a symbolic link.");
+        }
+
+        var contents = File.ReadAllText(manifestPath, Encoding.ASCII);
+        var entries = Parse(contents);
+        var manifest = new PublishedHelperManifest(entries, string.Join('\n', entries.Select(static entry => $"{entry.Sha256}  helper/{entry.FileName}")) + '\n');
+        manifest.VerifyDirectory(helperDirectory);
+        return manifest;
+    }
+
+    public void VerifyDirectory(string helperDirectory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(helperDirectory);
+        var directory = new DirectoryInfo(helperDirectory);
+        if (!directory.Exists || directory.LinkTarget is not null)
+        {
+            throw new IOException("The published helper directory must be an existing non-symbolic-link directory.");
+        }
+
+        var actual = directory.EnumerateFileSystemInfos("*", SearchOption.TopDirectoryOnly)
+            .OrderBy(static entry => entry.Name, StringComparer.Ordinal)
+            .ToArray();
+        if (actual.Any(static entry => entry is not FileInfo || entry.LinkTarget is not null) ||
+            !actual.Select(static entry => entry.Name).SequenceEqual(Entries.Select(static entry => entry.FileName), StringComparer.Ordinal))
+        {
+            throw new IOException("The published helper files do not exactly match the trusted manifest.");
+        }
+
+        foreach (var entry in Entries)
+        {
+            var digest = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(Path.Combine(helperDirectory, entry.FileName))))
+                .ToLowerInvariant();
+            if (!CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(digest),
+                    Encoding.ASCII.GetBytes(entry.Sha256)))
+            {
+                throw new IOException($"Published helper file '{entry.FileName}' does not match the trusted manifest.");
+            }
+        }
+
+    }
+
+    private static IReadOnlyList<PublishedHelperManifestEntry> Parse(string contents)
+    {
+        if (string.IsNullOrEmpty(contents) || !contents.EndsWith('\n'))
+        {
+            throw new IOException("The trusted helper manifest must be non-empty canonical newline-delimited text.");
+        }
+
+        var entries = contents.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(static line => line.Split("  ", StringSplitOptions.None))
+            .Select(static parts => parts.Length == 2
+                ? new PublishedHelperManifestEntry(parts[1], parts[0])
+                : throw new IOException("The trusted helper manifest contains an invalid entry."))
+            .OrderBy(static entry => entry.FileName, StringComparer.Ordinal)
+            .ToArray();
+        if (entries.Length == 0 ||
+            entries.Any(entry => entry.FileName is "." or ".." ||
+                                 !FileNamePattern.IsMatch(entry.FileName) ||
+                                 !DigestPattern.IsMatch(entry.Sha256)) ||
+            entries.Select(static entry => entry.FileName).Distinct(StringComparer.Ordinal).Count() != entries.Length ||
+            !entries.Any(static entry => entry.FileName == "Armada.Lab.Mtls.WslClient.dll") ||
+            !contents.Split('\n', StringSplitOptions.RemoveEmptyEntries).SequenceEqual(
+                entries.Select(static entry => $"{entry.Sha256}  {entry.FileName}"),
+                StringComparer.Ordinal))
+        {
+            throw new IOException("The trusted helper manifest must have sorted unique file names and lowercase SHA-256 digests.");
+        }
+
+        return entries;
+    }
+}
+
 public interface ISshPhaseProcess : IAsyncDisposable
 {
     Task WriteLineAsync(string value, CancellationToken cancellationToken);
@@ -38,6 +138,7 @@ public sealed class SshPhaseBridge
     private const int MaximumPhaseTwoResultsBytes = 64 * 1024;
     private readonly LabHarnessOptions options;
     private readonly ISshProcessInvoker ssh;
+    private readonly PublishedHelperManifest manifest;
     private readonly string remoteRoot = $"armada-c2-{Guid.NewGuid():N}";
 
     public SshPhaseBridge(LabHarnessOptions options)
@@ -49,6 +150,7 @@ public sealed class SshPhaseBridge
     {
         this.options = options ?? throw new ArgumentNullException(nameof(options));
         this.ssh = ssh ?? throw new ArgumentNullException(nameof(ssh));
+        manifest = PublishedHelperManifest.LoadAndVerify(options.HelperManifest, options.HelperDirectory);
     }
 
     public async Task<PublicDeviceFrame> RunPhaseOneAsync(CancellationToken cancellationToken)
@@ -84,7 +186,8 @@ public sealed class SshPhaseBridge
             throw new ArgumentException("The enrolment claim must match the phase-one public frame.");
         }
 
-        var helperDigest = DigestHelper();
+        manifest.VerifyDirectory(options.HelperDirectory);
+        var helperDigest = MainAssemblyDigest();
         var secretCopy = secret.ToArray();
         string input;
         try
@@ -140,36 +243,35 @@ public sealed class SshPhaseBridge
 
     private async Task<string> StageHelperAsync(CancellationToken cancellationToken)
     {
-        var digest = DigestHelper();
-        const string reader = "while IFS=' ' read -r encoded_name encoded_contents extra; do test -n \"$encoded_name\" && test -n \"$encoded_contents\" && test -z \"$extra\" || exit 1; name=\"$(printf %s \"$encoded_name\" | base64 -d)\" || exit 1; case \"$name\" in \"\"|*[!A-Za-z0-9_.-]*) exit 1;; esac; printf %s \"$encoded_contents\" | base64 -d > \"$root/helper/$name\" || exit 1; done;";
+        manifest.VerifyDirectory(options.HelperDirectory);
+        var digest = MainAssemblyDigest();
+        const string reader = "while IFS=' ' read -r type encoded_name encoded_contents extra; do test -n \"$type\" && test -n \"$encoded_name\" && test -n \"$encoded_contents\" && test -z \"$extra\" || exit 1; name=\"$(printf %s \"$encoded_name\" | base64 -d)\" || exit 1; case \"$type:$name\" in file:|file:*[^A-Za-z0-9_.-]*) exit 1;; file:*) target=\"$root/helper/$name\";; manifest:helper.manifest) target=\"$root/helper.manifest\";; *) exit 1;; esac; test ! -e \"$target\" && test ! -L \"$target\" || exit 1; printf %s \"$encoded_contents\" | base64 -d > \"$target\" || exit 1; done;";
         var payload = new StringBuilder();
-        foreach (var file in Directory.EnumerateFiles(options.HelperDirectory, "*", SearchOption.TopDirectoryOnly)
-                     .OrderBy(static file => file, StringComparer.Ordinal))
+        foreach (var entry in manifest.Entries)
         {
-            var name = Path.GetFileName(file);
-            if (!PublishedFileNamePattern.IsMatch(name) || new FileInfo(file).LinkTarget is not null)
-            {
-                throw new IOException("Published helper contains an unsafe file.");
-            }
-
-            payload.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(name)));
+            payload.Append("file ");
+            payload.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(entry.FileName)));
             payload.Append(' ');
-            payload.Append(Convert.ToBase64String(await File.ReadAllBytesAsync(file, cancellationToken)));
+            payload.Append(Convert.ToBase64String(await File.ReadAllBytesAsync(Path.Combine(options.HelperDirectory, entry.FileName), cancellationToken)));
             payload.Append('\n');
         }
+        payload.Append("manifest ");
+        payload.Append(Convert.ToBase64String("helper.manifest"u8));
+        payload.Append(' ');
+        payload.Append(Convert.ToBase64String(Encoding.ASCII.GetBytes(manifest.Sha256SumContents)));
+        payload.Append('\n');
 
         await RunAsync(
-            $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}",
+            $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}; test ! -L \"$root/helper.manifest\"; chmod 600 \"$root/helper.manifest\"; cd \"$root\"; sha256sum --strict --check helper.manifest",
             payload.ToString(),
             cancellationToken,
             MaximumPhaseTwoResultsBytes);
         return digest;
     }
 
-    private string DigestHelper()
+    private string MainAssemblyDigest()
     {
-        var assembly = Path.Combine(options.HelperDirectory, "Armada.Lab.Mtls.WslClient.dll");
-        return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(assembly))).ToLowerInvariant();
+        return manifest.Entries.Single(entry => entry.FileName == "Armada.Lab.Mtls.WslClient.dll").Sha256;
     }
 
     public static Uri CreateEndpoint(IPAddress address, int port)
@@ -284,8 +386,6 @@ public sealed class SshPhaseBridge
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-    private static readonly Regex PublishedFileNamePattern =
-        new("^[A-Za-z0-9_.-]+$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 }
 
 internal sealed class ProcessSshProcessInvoker : ISshProcessInvoker

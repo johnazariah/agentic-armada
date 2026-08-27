@@ -4,13 +4,21 @@
 
 The harness accepts `--preflight` and explicit `--listen-ip`,
 `--enrollment-port`, `--stream-port`, `--database`, and
-`--evidence-directory`, `--helper-directory`, `--node-uid`, and
+`--evidence-directory`, `--helper-directory`, `--helper-manifest`, `--node-uid`, and
 `--identity-epoch` values. `helper-directory` is an absolute, non-link,
 published WSL client directory; the node UID is canonical and the epoch is
 positive. It accepts only a generated
 `armada_c2_<32 lowercase hex>` database name, one exact non-loopback IP, and
 two distinct ports. Preflight deliberately creates no CA, listener, database,
 claim, certificate, or SSH/WSL state.
+
+`--helper-manifest` is a separately published, absolute, non-link file outside
+`--helper-directory`: canonical sorted `<64 lowercase hex><two spaces><filename>`
+lines, one for every top-level helper runtime file. The bridge snapshots it in
+memory before staging, rejects missing, extra, linked, or changed files, sends
+only those entries, and verifies the same manifest on WSL before both phases.
+It is therefore the integrity anchor, rather than a digest derived from the
+mutable helper directory.
 
 The PostgreSQL administrator connection is never accepted in command-line
 arguments. Preflight neither requires nor reads it. Only after both live gate
