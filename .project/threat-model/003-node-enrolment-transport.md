@@ -14,6 +14,10 @@
 | Audit rewrite or lost notification | Append-only transport audit trigger and same-transaction outbox | Correlated durable evidence is immutable and dispatchable |
 | Resource/readiness scope expansion | No NodeIdentity mutation; observation payloads only | No readiness, admission, command or workload authority |
 | gRPC parser normalises hostile wire data before validation | Public `ServerServiceDefinition` mappings use a raw request wrapper for the exact unary and duplex methods; strict validation occurs before any protobuf object, claim, issuer, identity or replay operation | Unknown, duplicate and malformed outer protobuf fields are rejected before state effect |
+| Claim is seeded for a substituted device key | WSL phase one returns a length-prefixed SHA-256-bound public SPKI/digest/CSR frame; controller validates P-256, CSR signature and node/epoch binding before seeding | The one verifier claim binds only to the WSL-generated key |
+| SSH command, helper or secret substitution | Fixed stdin-only `ssh -T johnaz-phd-wsl` bootstrap, fixed dotnet path, helper SHA-256 verification, `0700` root and `0600` secret file checks | No remote command injection, source checkout, credential copying or secret retention |
+| Incomplete teardown masks a hazardous live run | Every resource has an independently checked cleanup action and errors aggregate into failure | A successful proof cannot conceal a remaining listener, database or temporary root |
+| Lab issuer becomes an ambient signer | `EphemeralLabAuthority` is instantiated only behind the execution gate, has P-256-only keys, bounded certificates and no persisted custody | No production or reusable signing material is created |
 
 PR C1 does not expose a listener or create CA, claim or device-key material.
 It does not defend against PostgreSQL disclosure, CA compromise or network MITM:

@@ -69,7 +69,7 @@ public sealed class RawGrpcBindingTests
     [Fact]
     public async Task Raw_unary_enrolment_reaches_state_issuer_and_completion_over_loopback_tls()
     {
-        var now = TruncateToSecond(DateTimeOffset.UtcNow);
+        var now = TruncateToSecond(DateTimeOffset.UtcNow).AddTicks(1_234_567);
         var claimId = Guid.NewGuid();
         var nodeUid = new NodeUid(Guid.NewGuid());
         var requestId = Guid.NewGuid();

@@ -1,7 +1,7 @@
 # Node enrolment and transport v1alpha1
 
 **Protocol family:** `armada.node.transport/v1alpha1`  
-**Status:** PR C1 raw-wire adapter foundation; no listener, issuer or device key store
+**Status:** PR C2 review-gated live harness implementation; no live run approved
 
 `NodeEnrollment/Enroll` is unary. `NodeTransport/Connect` is duplex. The
 protobuf source is `proto/armada/v1alpha1/node_transport.proto`; tags and
@@ -107,9 +107,18 @@ payloads require a later protocol version and an explicit compatibility record.
 
 ## Explicit exclusions
 
-This state layer supplies no CA, key or claim-secret creation tool; no
-standalone gRPC/HTTP listener, host endpoint or network client; no device
-filesystem key store, executable or harness; and no workload, admission, lease,
-process, credential, GitHub, Copilot, signer, installer or production
-authority. C1's library is disabled by default and needs explicit later harness
-composition before a Kestrel process can be started.
+The C2 harness is the sole lab-only exception to the no-listener/no-device-key
+boundary. It is manually invoked and review-gated: preflight validates explicit
+inputs but creates no state; live execution needs separate approval. Its first
+WSL phase creates a `0700` temporary root and a P-256 device key/CSR, returning
+only an integrity-bound public frame (SPKI, digest, CSR, node UID and epoch).
+Frame validation reuses the canonical enrolment decision: it requires DER
+ECDSA P-256 SPKI, matching SHA-256, a signed CSR whose subject public key
+matches that SPKI, and the stated size/identifier bounds. Only after the
+controller validates that frame may it create the disposable
+database claim verifier bound to that exact digest. Its second phase delivers
+the raw claim only over SSH stdin or a re-opened verified `0600` temporary
+file. The device private key, claim secret, CA private key, PostgreSQL
+credentials and GitHub credentials never enter source, command arguments, logs
+or retained evidence. The client has a private raw-frame marshaller for the
+two exact paths; C1's server raw binding remains internal.
