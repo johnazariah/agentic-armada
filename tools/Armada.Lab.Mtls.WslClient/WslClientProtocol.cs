@@ -2,7 +2,6 @@ using System.Collections.Immutable;
 using System.Formats.Asn1;
 using System.Net;
 using System.Net.Security;
-using System.Security.Authentication;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json;
@@ -529,13 +528,19 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
     private readonly PhaseTwoConfiguration configuration;
     private readonly ECDsa privateKey;
     private readonly GrpcChannel enrollmentChannel;
+    private readonly TlsServerCertificateValidationSignal enrollmentValidation;
     private bool disposed;
 
-    private PhaseTwoClient(PhaseTwoConfiguration configuration, ECDsa privateKey, GrpcChannel enrollmentChannel)
+    private PhaseTwoClient(
+        PhaseTwoConfiguration configuration,
+        ECDsa privateKey,
+        GrpcChannel enrollmentChannel,
+        TlsServerCertificateValidationSignal enrollmentValidation)
     {
         this.configuration = configuration;
         this.privateKey = privateKey;
         this.enrollmentChannel = enrollmentChannel;
+        this.enrollmentValidation = enrollmentValidation;
     }
 
     public static PhaseTwoClient Create(PhaseTwoConfiguration configuration)
@@ -545,10 +550,12 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
         var key = DeviceMaterialStore.LoadMatchingPrivateKey(configuration.VerifiedRemoteRoot, configuration.Device);
         try
         {
+            var enrollment = CreateChannel(configuration.EnrollmentEndpoint, configuration.TrustedCaDer, null);
             return new PhaseTwoClient(
                 configuration,
                 key,
-                CreateChannel(configuration.EnrollmentEndpoint, configuration.TrustedCaDer, null));
+                enrollment.Channel,
+                enrollment.Validation);
         }
         catch
         {
@@ -584,7 +591,15 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
             null,
             new CallOptions(cancellationToken: cancellationToken),
             new RawFrame(request.ToByteArray()));
-        return await call.ResponseAsync.ConfigureAwait(false);
+        try
+        {
+            return await call.ResponseAsync.ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            enrollmentValidation.ThrowIfRejected(exception);
+            throw;
+        }
     }
 
     public TransportProbeConnection OpenTransport(Proto.EnrollmentResponse enrolment, ProbeTrustBundle trustBundle)
@@ -599,19 +614,22 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
         }
 
         var certificate = X509CertificateLoader.LoadCertificate(enrolment.LeafCertificateDer.Span).CopyWithPrivateKey(privateKey);
-        var channel = CreateChannel(configuration.TransportEndpoint, trustBundle.TrustedCaDer, certificate);
+        ValidatedGrpcChannel? transport = null;
         try
         {
-            var call = channel.CreateCallInvoker().AsyncDuplexStreamingCall(
+            transport = CreateChannel(configuration.TransportEndpoint, trustBundle.TrustedCaDer, certificate);
+            var call = transport.Channel.CreateCallInvoker().AsyncDuplexStreamingCall(
                 RawGrpcMethods.Transport,
                 null,
                 new CallOptions());
-            return new TransportProbeConnection(channel, certificate, call);
+            return new TransportProbeConnection(transport.Channel, certificate, transport.Validation, call);
         }
-        catch
+        catch (Exception exception)
         {
-            channel.Dispose();
+            transport?.Channel.Dispose();
+            transport?.Validation.Dispose();
             certificate.Dispose();
+            transport?.Validation.ThrowIfRejected(exception);
             throw;
         }
     }
@@ -625,36 +643,43 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
 
         disposed = true;
         enrollmentChannel.Dispose();
+        enrollmentValidation.Dispose();
         privateKey.Dispose();
     }
 
-    private static GrpcChannel CreateChannel(Uri endpoint, byte[] trustedCaDer, X509Certificate2? clientCertificate)
+    private static ValidatedGrpcChannel CreateChannel(
+        Uri endpoint,
+        byte[] trustedCaDer,
+        X509Certificate2? clientCertificate)
     {
         var endpointAddress = WslTlsValidation.RequireExactUnicastLiteral(endpoint);
-        var authority = X509CertificateLoader.LoadCertificate(trustedCaDer);
+        using var authority = X509CertificateLoader.LoadCertificate(trustedCaDer);
+        var validation = new TlsServerCertificateValidationSignal(authority, endpointAddress);
         var handler = new HttpClientHandler
         {
-            ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
-            {
-                if (certificate is null)
-                {
-                    return false;
-                }
-
-                using var serverCertificate = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
-                return WslTlsValidation.IsTrustedServerCertificate(serverCertificate, authority, endpointAddress);
-            }
+            ServerCertificateCustomValidationCallback = (_, certificate, _, _) => validation.Validate(certificate)
         };
-        if (clientCertificate is not null)
+        try
         {
-            handler.ClientCertificates.Add(clientCertificate);
-        }
+            if (clientCertificate is not null)
+            {
+                handler.ClientCertificates.Add(clientCertificate);
+            }
 
-        return GrpcChannel.ForAddress(endpoint, new GrpcChannelOptions
+            return new(
+                GrpcChannel.ForAddress(endpoint, new GrpcChannelOptions
+                {
+                    HttpHandler = handler,
+                    DisposeHttpClient = true
+                }),
+                validation);
+        }
+        catch
         {
-            HttpHandler = handler,
-            DisposeHttpClient = true
-        });
+            handler.Dispose();
+            validation.Dispose();
+            throw;
+        }
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(disposed, this);
@@ -701,6 +726,10 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
             },
             static context => new MessageParser<T>(() => new T()).ParseFrom(context.PayloadAsNewBuffer()));
     }
+
+    private sealed record ValidatedGrpcChannel(
+        GrpcChannel Channel,
+        TlsServerCertificateValidationSignal Validation);
 }
 
 public static class WslTlsValidation
@@ -711,13 +740,31 @@ public static class WslTlsValidation
     public static IPAddress RequireExactUnicastLiteral(Uri endpoint)
     {
         ArgumentNullException.ThrowIfNull(endpoint);
-        if (!IPAddress.TryParse(endpoint.DnsSafeHost, out var address) ||
+        var host = endpoint.Host.Trim('[', ']');
+        if (endpoint.HostNameType is not (UriHostNameType.IPv4 or UriHostNameType.IPv6) ||
+            !IPAddress.TryParse(host, out var address) ||
             !IsUnicast(address))
         {
             throw new ArgumentException("TLS endpoints must use an exact unicast IP literal.", nameof(endpoint));
         }
 
         return address;
+    }
+
+    public static Uri CreateEndpointUri(IPAddress address, int port)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        if (!IsUnicast(address))
+        {
+            throw new ArgumentException("TLS endpoints must use an exact unicast IP literal.", nameof(address));
+        }
+
+        if (port is <= 0 or > 65535)
+        {
+            throw new ArgumentOutOfRangeException(nameof(port), "Ports must be between 1 and 65535.");
+        }
+
+        return new UriBuilder(Uri.UriSchemeHttps, address.ToString(), port).Uri;
     }
 
     public static bool IsTrustedServerCertificate(
@@ -801,36 +848,102 @@ public static class WslTlsValidation
     }
 }
 
+public sealed class TlsServerCertificateRejectedException(Exception innerException)
+    : HttpRequestException(
+        "The server certificate was explicitly rejected by custom-root, server-authentication EKU, or IP-SAN validation.",
+        innerException);
+
+public sealed class TlsServerCertificateValidationSignal : IDisposable
+{
+    private readonly X509Certificate2 trustedRoot;
+    private readonly IPAddress endpointAddress;
+    private int rejected;
+
+    public TlsServerCertificateValidationSignal(X509Certificate2 trustedRoot, IPAddress endpointAddress)
+    {
+        ArgumentNullException.ThrowIfNull(trustedRoot);
+        this.trustedRoot = X509CertificateLoader.LoadCertificate(trustedRoot.Export(X509ContentType.Cert));
+        this.endpointAddress = endpointAddress ?? throw new ArgumentNullException(nameof(endpointAddress));
+    }
+
+    public bool Validate(X509Certificate2? certificate)
+    {
+        if (certificate is null)
+        {
+            return false;
+        }
+
+        using var serverCertificate = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
+        if (WslTlsValidation.IsTrustedServerCertificate(serverCertificate, trustedRoot, endpointAddress))
+        {
+            return true;
+        }
+
+        Interlocked.Exchange(ref rejected, 1);
+        return false;
+    }
+
+    public void ThrowIfRejected(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        if (Volatile.Read(ref rejected) != 0)
+        {
+            throw new TlsServerCertificateRejectedException(exception);
+        }
+    }
+
+    public void Dispose() => trustedRoot.Dispose();
+}
+
 public sealed class TransportProbeConnection : IProbeDuplexConnection
 {
     private readonly GrpcChannel channel;
     private readonly X509Certificate2 certificate;
+    private readonly TlsServerCertificateValidationSignal validation;
     private readonly AsyncDuplexStreamingCall<RawFrame, Proto.ControlToNode> call;
 
     internal TransportProbeConnection(
         GrpcChannel channel,
         X509Certificate2 certificate,
+        TlsServerCertificateValidationSignal validation,
         AsyncDuplexStreamingCall<RawFrame, Proto.ControlToNode> call)
     {
         this.channel = channel;
         this.certificate = certificate;
+        this.validation = validation;
         this.call = call;
     }
 
-    public Task WriteAsync(ReadOnlyMemory<byte> encodedEnvelope, CancellationToken cancellationToken)
+    public async Task WriteAsync(ReadOnlyMemory<byte> encodedEnvelope, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return call.RequestStream.WriteAsync(new RawFrame(encodedEnvelope.ToArray()));
+        try
+        {
+            await call.RequestStream.WriteAsync(new RawFrame(encodedEnvelope.ToArray())).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            validation.ThrowIfRejected(exception);
+            throw;
+        }
     }
 
     public async Task<Proto.ControlToNode> ReadAsync(CancellationToken cancellationToken)
     {
-        if (!await call.ResponseStream.MoveNext(cancellationToken).ConfigureAwait(false))
+        try
         {
-            throw new RpcException(new Status(StatusCode.Unavailable, "The transport stream closed without a response."));
-        }
+            if (!await call.ResponseStream.MoveNext(cancellationToken).ConfigureAwait(false))
+            {
+                throw new RpcException(new Status(StatusCode.Unavailable, "The transport stream closed without a response."));
+            }
 
-        return call.ResponseStream.Current;
+            return call.ResponseStream.Current;
+        }
+        catch (Exception exception)
+        {
+            validation.ThrowIfRejected(exception);
+            throw;
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -839,6 +952,7 @@ public sealed class TransportProbeConnection : IProbeDuplexConnection
         call.Dispose();
         channel.Dispose();
         certificate.Dispose();
+        validation.Dispose();
     }
 }
 
@@ -1184,7 +1298,7 @@ public static class ProbeResponseInterpreter
             return ProbeDisposition.ControllerDenied;
         }
 
-        return exception is AuthenticationException or HttpRequestException
+        return exception is TlsServerCertificateRejectedException
             ? ProbeDisposition.TlsRejected
             : ProbeDisposition.TransportRejected;
     }

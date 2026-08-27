@@ -185,6 +185,35 @@ public sealed class WslClientProtocolTests
         Assert.False(WslTlsValidation.IsTrustedServerCertificate(validServer, authority, IPAddress.Parse("192.0.2.21")));
         Assert.False(WslTlsValidation.IsTrustedServerCertificate(wrongSan, authority, IPAddress.Parse("192.0.2.20")));
         Assert.False(WslTlsValidation.IsTrustedServerCertificate(missingEku, authority, IPAddress.Parse("192.0.2.20")));
+
+        using var signal = new TlsServerCertificateValidationSignal(authority, IPAddress.Parse("192.0.2.20"));
+        Assert.False(signal.Validate(wrongSan));
+        Assert.Throws<TlsServerCertificateRejectedException>(() =>
+            signal.ThrowIfRejected(new HttpRequestException("TLS connection failed after validation.")));
+
+        using var noCertificateSignal = new TlsServerCertificateValidationSignal(authority, IPAddress.Parse("192.0.2.20"));
+        Assert.False(noCertificateSignal.Validate(null));
+        noCertificateSignal.ThrowIfRejected(new HttpRequestException("No server certificate was received."));
+    }
+
+    [Fact]
+    public void Phase_two_accepts_bracketed_ipv6_literal_same_host_endpoints()
+    {
+        var address = IPAddress.Parse("2001:db8::20");
+        var enrollment = WslTlsValidation.CreateEndpointUri(address, 8443);
+        var transport = WslTlsValidation.CreateEndpointUri(address, 9443);
+        var configuration = new PhaseTwoConfiguration(
+            "/",
+            Frame(),
+            enrollment,
+            transport,
+            Guid.NewGuid().ToString("D"),
+            RandomNumberGenerator.GetBytes(32),
+            [1]);
+
+        Assert.Equal("https://[2001:db8::20]:8443/", enrollment.AbsoluteUri);
+        Assert.Equal("https://[2001:db8::20]:9443/", transport.AbsoluteUri);
+        configuration.Validate();
     }
 
     [Fact]
@@ -247,7 +276,11 @@ public sealed class WslClientProtocolTests
         Assert.Equal(
             (ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity),
             ProbeResponseInterpreter.Transport(revoked));
-        Assert.Equal(ProbeDisposition.TlsRejected, ProbeResponseInterpreter.Failure(new HttpRequestException()));
+        Assert.Equal(ProbeDisposition.TransportRejected, ProbeResponseInterpreter.Failure(new HttpRequestException()));
+        Assert.Equal(
+            ProbeDisposition.TlsRejected,
+            ProbeResponseInterpreter.Failure(
+                new TlsServerCertificateRejectedException(new HttpRequestException())));
         Assert.Equal(
             ProbeDisposition.ControllerDenied,
             ProbeResponseInterpreter.Failure(
@@ -351,6 +384,22 @@ public sealed class WslClientProtocolTests
         Assert.Equal(ProbeDisposition.TransportRejected, results[^1].Disposition);
     }
 
+    [Fact]
+    public async Task Wrong_ca_probe_does_not_treat_a_connection_failure_as_tls_rejection()
+    {
+        var trust = TrustBundle();
+        var results = await new WslProbeRunner(new OfflineProbeTransport(trust, signalWrongCaRejection: false)).RunAsync(
+            Frame(),
+            trust,
+            new ImmediateRevocationPhase(),
+            new DateTimeOffset(2026, 8, 27, 2, 0, 0, TimeSpan.Zero),
+            CancellationToken.None);
+
+        var wrongCa = Assert.Single(results, static result => result.Kind == ProbeKind.WrongCertificateAuthority);
+        Assert.Equal(ProbeDisposition.TransportRejected, wrongCa.Disposition);
+        Assert.Throws<InvalidOperationException>(() => WslProbePlan.EnsureSatisfied(results));
+    }
+
     private static PhaseTwoConfiguration Configuration(string root, DevicePublicFrame frame, byte[]? trustedCa = null) =>
         new(
             root,
@@ -421,7 +470,9 @@ public sealed class WslClientProtocolTests
         return root;
     }
 
-    private sealed class OfflineProbeTransport(ProbeTrustBundle enrolledTrust) : IProbeTransportClient
+    private sealed class OfflineProbeTransport(
+        ProbeTrustBundle enrolledTrust,
+        bool signalWrongCaRejection = true) : IProbeTransportClient
     {
         private readonly ProbeTrustBundle enrolledTrust = enrolledTrust;
         public List<byte[]> Envelopes { get; } = [];
@@ -457,7 +508,10 @@ public sealed class WslClientProtocolTests
             openCount++;
             if (!trustBundle.TrustedCaDer.SequenceEqual(enrolledTrust.TrustedCaDer))
             {
-                return Task.FromResult<IProbeDuplexConnection>(new OfflineConnection(Envelopes, null, new HttpRequestException()));
+                var failure = signalWrongCaRejection
+                    ? new TlsServerCertificateRejectedException(new HttpRequestException())
+                    : new HttpRequestException();
+                return Task.FromResult<IProbeDuplexConnection>(new OfflineConnection(Envelopes, null, failure));
             }
 
             return Task.FromResult<IProbeDuplexConnection>(openCount switch
