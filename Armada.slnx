@@ -22,4 +22,7 @@
     <Project Path="tests/Armada.Lab.Mtls.Tests/Armada.Lab.Mtls.Tests.csproj" />
     <Project Path="tests/Armada.Lab.Mtls.Harness.Tests/Armada.Lab.Mtls.Harness.Tests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/Armada.NodeAgent.Bootstrap/Armada.NodeAgent.Bootstrap.csproj" />
+  </Folder>
 </Solution>
