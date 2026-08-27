@@ -1,27 +1,36 @@
+using System.Text.Json;
 using Armada.Lab.Mtls.WslClient;
-using Google.Protobuf;
-using Grpc.Core;
-using Proto = Armada.Contracts.V1Alpha1;
 
-if (args.Length == 0 || args[0] is "--help" or "help")
+if (args.Length != 1 || args[0] is "--help" or "help")
 {
-    Console.WriteLine("Private C2 WSL helper. phase-one and phase-two are invoked only by the reviewed stdin-only harness.");
+    Console.WriteLine("Usage: Armada.Lab.Mtls.WslClient phase-one|phase-two < stdin-json");
     return;
 }
 
-var enrollment = new Method<RawFrame, Proto.EnrollmentResponse>(
-    MethodType.Unary,
-    "armada.node.transport.v1alpha1.NodeEnrollment",
-    "Enroll",
-    RawFrame.Marshaller,
-    Marshallers.Create(
-        static (response, context) =>
-        {
-            context.SetPayloadLength(response.CalculateSize());
-            context.Complete(response.ToByteArray());
-        },
-        static context => Proto.EnrollmentResponse.Parser.ParseFrom(context.PayloadAsNewBuffer())));
+var input = await Console.In.ReadToEndAsync();
+if (string.IsNullOrWhiteSpace(input))
+{
+    throw new ArgumentException("The helper accepts phase configuration only from standard input.");
+}
 
-_ = enrollment;
-Console.Error.WriteLine("Refusing direct execution: helper must be launched by the reviewed harness bootstrap.");
-Environment.ExitCode = 2;
+switch (args[0])
+{
+    case "phase-one":
+    {
+        var request = JsonSerializer.Deserialize<DeviceProvisioningRequest>(input, DevicePublicFrameJson.Options)
+            ?? throw new ArgumentException("A phase-one request is required.");
+        var frame = DeviceMaterialStore.Provision(request);
+        Console.Out.WriteLine(JsonSerializer.Serialize(frame, DevicePublicFrameJson.Options));
+        break;
+    }
+    case "phase-two":
+    {
+        var configuration = JsonSerializer.Deserialize<PhaseTwoConfiguration>(input, DevicePublicFrameJson.Options)
+            ?? throw new ArgumentException("A phase-two configuration is required.");
+        using var client = PhaseTwoClient.Create(configuration);
+        Console.Out.WriteLine(JsonSerializer.Serialize(WslProbePlan.Create(), DevicePublicFrameJson.Options));
+        break;
+    }
+    default:
+        throw new ArgumentException("Only phase-one and phase-two commands are supported.");
+}

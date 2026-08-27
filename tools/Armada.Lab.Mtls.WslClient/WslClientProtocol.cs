@@ -1,0 +1,674 @@
+using System.Collections.Immutable;
+using System.Formats.Asn1;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text.Json;
+using Armada.Contracts;
+using Google.Protobuf;
+using Google.Protobuf.WellKnownTypes;
+using Grpc.Core;
+using Grpc.Net.Client;
+using Proto = Armada.Contracts.V1Alpha1;
+
+namespace Armada.Lab.Mtls.WslClient;
+
+public sealed record DeviceProvisioningRequest(string VerifiedRemoteRoot, Guid NodeUid, long IdentityEpoch)
+{
+    public void Validate()
+    {
+        if (NodeUid == Guid.Empty || IdentityEpoch <= 0)
+        {
+            throw new ArgumentException("The node UID and identity epoch must be present.");
+        }
+
+        _ = DeviceMaterialStore.VerifyRemoteRoot(VerifiedRemoteRoot);
+    }
+}
+
+public sealed record DevicePublicFrame(
+    Guid NodeUid,
+    long IdentityEpoch,
+    byte[] SubjectPublicKeyInfo,
+    byte[] PublicKeySha256,
+    byte[] CertificateSigningRequest,
+    byte[] FrameSha256)
+{
+    private const int DigestLength = 32;
+
+    public static DevicePublicFrame Create(
+        Guid nodeUid,
+        long identityEpoch,
+        byte[] subjectPublicKeyInfo,
+        byte[] certificateSigningRequest)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(identityEpoch);
+        ArgumentNullException.ThrowIfNull(subjectPublicKeyInfo);
+        ArgumentNullException.ThrowIfNull(certificateSigningRequest);
+        var keyDigest = SHA256.HashData(subjectPublicKeyInfo);
+        return new(
+            nodeUid,
+            identityEpoch,
+            subjectPublicKeyInfo,
+            keyDigest,
+            certificateSigningRequest,
+            SHA256.HashData(CanonicalBytes(nodeUid, identityEpoch, subjectPublicKeyInfo, keyDigest, certificateSigningRequest)));
+    }
+
+    public void Validate()
+    {
+        if (NodeUid == Guid.Empty || IdentityEpoch <= 0 ||
+            SubjectPublicKeyInfo.Length is 0 or > NodeTransportProtocol.MaximumPublicKeyBytes ||
+            CertificateSigningRequest.Length is 0 or > NodeTransportProtocol.MaximumCsrBytes ||
+            PublicKeySha256.Length != DigestLength || FrameSha256.Length != DigestLength)
+        {
+            throw new ArgumentException("The public device frame is structurally invalid.");
+        }
+
+        if (!CryptographicOperations.FixedTimeEquals(PublicKeySha256, SHA256.HashData(SubjectPublicKeyInfo)) ||
+            !CryptographicOperations.FixedTimeEquals(
+                FrameSha256,
+                SHA256.HashData(CanonicalBytes(
+                    NodeUid,
+                    IdentityEpoch,
+                    SubjectPublicKeyInfo,
+                    PublicKeySha256,
+                    CertificateSigningRequest))) ||
+            !DeviceMaterialStore.CsrBindsToP256Key(CertificateSigningRequest, SubjectPublicKeyInfo))
+        {
+            throw new ArgumentException("The public device frame does not bind a P-256 key and CSR.");
+        }
+    }
+
+    internal static byte[] CanonicalBytes(
+        Guid nodeUid,
+        long identityEpoch,
+        byte[] subjectPublicKeyInfo,
+        byte[] publicKeySha256,
+        byte[] certificateSigningRequest)
+    {
+        var bytes = new byte[
+            16 + sizeof(long) +
+            sizeof(int) + subjectPublicKeyInfo.Length +
+            sizeof(int) + publicKeySha256.Length +
+            sizeof(int) + certificateSigningRequest.Length];
+        var offset = 0;
+        nodeUid.TryWriteBytes(bytes.AsSpan(offset, 16));
+        offset += 16;
+        BitConverter.TryWriteBytes(bytes.AsSpan(offset, sizeof(long)), identityEpoch);
+        offset += sizeof(long);
+        Write(subjectPublicKeyInfo);
+        Write(publicKeySha256);
+        Write(certificateSigningRequest);
+        return bytes;
+
+        void Write(byte[] value)
+        {
+            BitConverter.TryWriteBytes(bytes.AsSpan(offset, sizeof(int)), value.Length);
+            offset += sizeof(int);
+            value.CopyTo(bytes, offset);
+            offset += value.Length;
+        }
+    }
+}
+
+public static class DeviceMaterialStore
+{
+    private const UnixFileMode OwnerDirectoryMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+    private const UnixFileMode OwnerFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+    public static DevicePublicFrame Provision(DeviceProvisioningRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        request.Validate();
+
+        var root = VerifyRemoteRoot(request.VerifiedRemoteRoot);
+        var directory = RequireChild(root, $"{request.NodeUid:D}-{request.IdentityEpoch}");
+        if (OperatingSystem.IsWindows())
+        {
+            Directory.CreateDirectory(directory);
+        }
+        else
+        {
+            Directory.CreateDirectory(directory, OwnerDirectoryMode);
+        }
+        VerifyOwnedDirectory(directory);
+
+        var keyPath = RequireChild(directory, "device-key.pkcs8");
+        var csrPath = RequireChild(directory, "device.csr.der");
+        if (File.Exists(keyPath) != File.Exists(csrPath))
+        {
+            throw new IOException("Device key material is incomplete.");
+        }
+
+        if (!File.Exists(keyPath))
+        {
+            using var generated = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+            var key = generated.ExportPkcs8PrivateKey();
+            var csr = new CertificateRequest(
+                $"CN=armada-node-{request.NodeUid:D}",
+                generated,
+                HashAlgorithmName.SHA256).CreateSigningRequest();
+            WriteOwnerOnly(keyPath, key);
+            WriteOwnerOnly(csrPath, csr);
+            CryptographicOperations.ZeroMemory(key);
+        }
+
+        var privateKey = File.ReadAllBytes(keyPath);
+        try
+        {
+            var csr = File.ReadAllBytes(csrPath);
+            using var key = ECDsa.Create();
+            key.ImportPkcs8PrivateKey(privateKey, out var bytesRead);
+            if (bytesRead != privateKey.Length)
+            {
+                throw new ArgumentException("The persisted device key is not canonical PKCS#8.");
+            }
+
+            var frame = DevicePublicFrame.Create(
+                request.NodeUid,
+                request.IdentityEpoch,
+                key.ExportSubjectPublicKeyInfo(),
+                csr);
+            frame.Validate();
+            return frame;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(privateKey);
+        }
+    }
+
+    public static string VerifyRemoteRoot(string root)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root))
+        {
+            throw new ArgumentException("The verified remote root must be an absolute path.", nameof(root));
+        }
+
+        var fullRoot = Path.GetFullPath(root);
+        var info = new DirectoryInfo(fullRoot);
+        if (!info.Exists || info.LinkTarget is not null)
+        {
+            throw new IOException("The verified remote root must be an existing non-link directory.");
+        }
+
+        for (var candidate = info.Parent; candidate is not null; candidate = candidate.Parent)
+        {
+            if (candidate.LinkTarget is not null)
+            {
+                throw new IOException("The verified remote root must not descend from a symbolic link.");
+            }
+        }
+
+        var fileSystemRoot = Path.GetPathRoot(info.FullName);
+        return string.Equals(info.FullName, fileSystemRoot, StringComparison.Ordinal)
+            ? info.FullName
+            : info.FullName.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    internal static bool CsrBindsToP256Key(byte[] csr, byte[] expectedSpki)
+    {
+        try
+        {
+            using var expected = ECDsa.Create();
+            expected.ImportSubjectPublicKeyInfo(expectedSpki, out var expectedBytesRead);
+            if (expectedBytesRead != expectedSpki.Length || !IsP256(expected))
+            {
+                return false;
+            }
+
+            if (!IsCanonicalP256Spki(expectedSpki))
+            {
+                return false;
+            }
+
+            var request = CertificateRequest.LoadSigningRequest(
+                csr,
+                HashAlgorithmName.SHA256,
+                CertificateRequestLoadOptions.Default);
+            using var csrKey = request.PublicKey.GetECDsaPublicKey();
+            return csrKey is not null &&
+                IsP256(csrKey) &&
+                CryptographicOperations.FixedTimeEquals(
+                    request.PublicKey.ExportSubjectPublicKeyInfo(),
+                    expected.ExportSubjectPublicKeyInfo());
+        }
+        catch (CryptographicException)
+        {
+            return false;
+        }
+        catch (AsnContentException)
+        {
+            return false;
+        }
+    }
+
+    internal static ECDsa LoadMatchingPrivateKey(string verifiedRemoteRoot, DevicePublicFrame frame)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        frame.Validate();
+        var root = VerifyRemoteRoot(verifiedRemoteRoot);
+        var directory = RequireChild(root, $"{frame.NodeUid:D}-{frame.IdentityEpoch}");
+        var keyPath = RequireChild(directory, "device-key.pkcs8");
+        var csrPath = RequireChild(directory, "device.csr.der");
+        if (new DirectoryInfo(directory).LinkTarget is not null ||
+            !File.Exists(keyPath) || !File.Exists(csrPath) ||
+            new FileInfo(keyPath).LinkTarget is not null || new FileInfo(csrPath).LinkTarget is not null)
+        {
+            throw new IOException("Persisted device material is missing or substituted.");
+        }
+
+        var keyBytes = File.ReadAllBytes(keyPath);
+        try
+        {
+            var key = ECDsa.Create();
+            key.ImportPkcs8PrivateKey(keyBytes, out var bytesRead);
+            if (bytesRead != keyBytes.Length ||
+                !CryptographicOperations.FixedTimeEquals(
+                    key.ExportSubjectPublicKeyInfo(),
+                    frame.SubjectPublicKeyInfo) ||
+                !CryptographicOperations.FixedTimeEquals(File.ReadAllBytes(csrPath), frame.CertificateSigningRequest))
+            {
+                key.Dispose();
+                throw new ArgumentException("Persisted key material does not match the public frame.");
+            }
+
+            return key;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(keyBytes);
+        }
+    }
+
+    private static bool IsP256(ECDsa key) =>
+        string.Equals(
+            key.ExportParameters(false).Curve.Oid.Value,
+            ECCurve.NamedCurves.nistP256.Oid.Value,
+            StringComparison.Ordinal);
+
+    private static bool IsCanonicalP256Spki(byte[] spki)
+    {
+        try
+        {
+            var reader = new AsnReader(spki, AsnEncodingRules.DER);
+            var subjectPublicKeyInfo = reader.ReadSequence();
+            var algorithm = subjectPublicKeyInfo.ReadSequence();
+            var algorithmOid = algorithm.ReadObjectIdentifier();
+            var curveOid = algorithm.ReadObjectIdentifier();
+            algorithm.ThrowIfNotEmpty();
+            subjectPublicKeyInfo.ReadBitString(out _);
+            subjectPublicKeyInfo.ThrowIfNotEmpty();
+            reader.ThrowIfNotEmpty();
+            return algorithmOid == "1.2.840.10045.2.1" &&
+                curveOid == "1.2.840.10045.3.1.7";
+        }
+        catch (AsnContentException)
+        {
+            return false;
+        }
+    }
+
+    private static string RequireChild(string root, string name)
+    {
+        var child = Path.GetFullPath(Path.Combine(root, name));
+        var prefix = root.EndsWith(Path.DirectorySeparatorChar) ? root : root + Path.DirectorySeparatorChar;
+        if (!child.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            throw new IOException("Refusing to access material outside the verified remote root.");
+        }
+
+        return child;
+    }
+
+    private static void VerifyOwnedDirectory(string directory)
+    {
+        if (new DirectoryInfo(directory).LinkTarget is not null)
+        {
+            throw new IOException("Device material directory must not be a symbolic link.");
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(directory, OwnerDirectoryMode);
+            if (File.GetUnixFileMode(directory) != OwnerDirectoryMode)
+            {
+                throw new IOException("Device material directory must be owner-only.");
+            }
+        }
+    }
+
+    private static void WriteOwnerOnly(string path, byte[] contents)
+    {
+        if (File.Exists(path) || new FileInfo(path).LinkTarget is not null)
+        {
+            throw new IOException("Refusing to replace persisted device material.");
+        }
+
+        using (var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+        {
+            stream.Write(contents);
+            stream.Flush(flushToDisk: true);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(path, OwnerFileMode);
+            if (File.GetUnixFileMode(path) != OwnerFileMode)
+            {
+                throw new IOException("Device material must be owner-only.");
+            }
+        }
+    }
+}
+
+public sealed record PhaseTwoConfiguration(
+    string VerifiedRemoteRoot,
+    DevicePublicFrame Device,
+    Uri EnrollmentEndpoint,
+    Uri TransportEndpoint,
+    string ClaimId,
+    byte[] ClaimSecret,
+    byte[] TrustedCaDer)
+{
+    public void Validate()
+    {
+        if (EnrollmentEndpoint is null || TransportEndpoint is null || ClaimSecret is null || TrustedCaDer is null ||
+            !EnrollmentEndpoint.IsAbsoluteUri || !TransportEndpoint.IsAbsoluteUri ||
+            EnrollmentEndpoint.Scheme != Uri.UriSchemeHttps || TransportEndpoint.Scheme != Uri.UriSchemeHttps ||
+            !Guid.TryParseExact(ClaimId, "D", out var claim) || claim == Guid.Empty ||
+            ClaimSecret.Length is < NodeTransportProtocol.MinimumClaimSecretBytes or > NodeTransportProtocol.MaximumClaimSecretBytes ||
+            TrustedCaDer.Length == 0)
+        {
+            throw new ArgumentException("Phase two requires complete stdin-provided TLS and enrolment configuration.");
+        }
+
+        if (Device is null)
+        {
+        throw new ArgumentException("Phase two requires a public device frame.");
+        }
+
+        Device.Validate();
+    }
+}
+
+public static class WslGrpcPaths
+{
+    public const string EnrollmentService = "armada.node.transport.v1alpha1.NodeEnrollment";
+    public const string EnrollmentMethod = "Enroll";
+    public const string TransportService = "armada.node.transport.v1alpha1.NodeTransport";
+    public const string TransportMethod = "Connect";
+}
+
+public sealed class PhaseTwoClient : IDisposable
+{
+    private readonly PhaseTwoConfiguration configuration;
+    private readonly ECDsa privateKey;
+    private readonly GrpcChannel enrollmentChannel;
+    private bool disposed;
+
+    private PhaseTwoClient(PhaseTwoConfiguration configuration, ECDsa privateKey, GrpcChannel enrollmentChannel)
+    {
+        this.configuration = configuration;
+        this.privateKey = privateKey;
+        this.enrollmentChannel = enrollmentChannel;
+    }
+
+    public static PhaseTwoClient Create(PhaseTwoConfiguration configuration)
+    {
+        ArgumentNullException.ThrowIfNull(configuration);
+        configuration.Validate();
+        var key = DeviceMaterialStore.LoadMatchingPrivateKey(configuration.VerifiedRemoteRoot, configuration.Device);
+        try
+        {
+            return new PhaseTwoClient(
+                configuration,
+                key,
+                CreateChannel(configuration.EnrollmentEndpoint, configuration.TrustedCaDer, null));
+        }
+        catch
+        {
+            key.Dispose();
+            throw;
+        }
+    }
+
+    public async Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfDisposed();
+        var request = new Proto.EnrollmentRequest
+        {
+            ProtocolVersion = NodeTransportProtocol.Version,
+            ClaimId = configuration.ClaimId,
+            ClaimSecret = ByteString.CopyFrom(configuration.ClaimSecret),
+            NodeUid = configuration.Device.NodeUid.ToString("D"),
+            IdentityEpoch = configuration.Device.IdentityEpoch,
+            DevicePublicKey = ByteString.CopyFrom(configuration.Device.SubjectPublicKeyInfo),
+            PublicKeySha256 = ByteString.CopyFrom(configuration.Device.PublicKeySha256),
+            CertificateSigningRequest = ByteString.CopyFrom(configuration.Device.CertificateSigningRequest),
+            Inventory = new Proto.EnrollmentInventory(),
+            RequestId = Guid.NewGuid().ToString("D"),
+            SentAt = Timestamp.FromDateTime(DateTime.UtcNow)
+        };
+        var call = enrollmentChannel.CreateCallInvoker().AsyncUnaryCall(
+            RawGrpcMethods.Enrollment,
+            null,
+            new CallOptions(cancellationToken: cancellationToken),
+            new RawFrame(request.ToByteArray()));
+        return await call.ResponseAsync.ConfigureAwait(false);
+    }
+
+    public TransportProbeConnection OpenTransport(Proto.EnrollmentResponse enrolment)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(enrolment);
+        if (enrolment.LeafCertificateDer.IsEmpty)
+        {
+            throw new ArgumentException("The enrolment response has no client certificate.", nameof(enrolment));
+        }
+
+        var certificate = X509CertificateLoader.LoadCertificate(enrolment.LeafCertificateDer.Span).CopyWithPrivateKey(privateKey);
+        var channel = CreateChannel(configuration.TransportEndpoint, configuration.TrustedCaDer, certificate);
+        try
+        {
+            var call = channel.CreateCallInvoker().AsyncDuplexStreamingCall(
+                RawGrpcMethods.Transport,
+                null,
+                new CallOptions());
+            return new TransportProbeConnection(channel, certificate, call);
+        }
+        catch
+        {
+            channel.Dispose();
+            certificate.Dispose();
+            throw;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+        enrollmentChannel.Dispose();
+        privateKey.Dispose();
+    }
+
+    private static GrpcChannel CreateChannel(Uri endpoint, byte[] trustedCaDer, X509Certificate2? clientCertificate)
+    {
+        var authority = X509CertificateLoader.LoadCertificate(trustedCaDer);
+        var handler = new HttpClientHandler
+        {
+            ServerCertificateCustomValidationCallback = (_, certificate, _, _) =>
+            {
+                if (certificate is null)
+                {
+                    return false;
+                }
+
+                using var chain = new X509Chain();
+                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+                chain.ChainPolicy.CustomTrustStore.Add(authority);
+                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+                return chain.Build(X509CertificateLoader.LoadCertificate(certificate.GetRawCertData()));
+            }
+        };
+        if (clientCertificate is not null)
+        {
+            handler.ClientCertificates.Add(clientCertificate);
+        }
+
+        return GrpcChannel.ForAddress(endpoint, new GrpcChannelOptions
+        {
+            HttpHandler = handler,
+            DisposeHttpClient = true
+        });
+    }
+
+    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(disposed, this);
+
+    private static class RawGrpcMethods
+    {
+        internal static readonly Method<RawFrame, Proto.EnrollmentResponse> Enrollment = new(
+            MethodType.Unary,
+            WslGrpcPaths.EnrollmentService,
+            WslGrpcPaths.EnrollmentMethod,
+            RawFrame.Marshaller,
+            MessageMarshaller<Proto.EnrollmentResponse>.Instance);
+
+        internal static readonly Method<RawFrame, Proto.ControlToNode> Transport = new(
+            MethodType.DuplexStreaming,
+            WslGrpcPaths.TransportService,
+            WslGrpcPaths.TransportMethod,
+            RawFrame.Marshaller,
+            MessageMarshaller<Proto.ControlToNode>.Instance);
+    }
+
+    private sealed class MessageMarshaller<T> where T : IMessage<T>, new()
+    {
+        internal static readonly Marshaller<T> Instance = Marshallers.Create(
+            static (message, context) =>
+            {
+                context.SetPayloadLength(message.CalculateSize());
+                message.WriteTo(context.GetBufferWriter());
+                context.Complete();
+            },
+            static context => new MessageParser<T>(() => new T()).ParseFrom(context.PayloadAsNewBuffer()));
+    }
+}
+
+public sealed class TransportProbeConnection : IAsyncDisposable
+{
+    private readonly GrpcChannel channel;
+    private readonly X509Certificate2 certificate;
+    private readonly AsyncDuplexStreamingCall<RawFrame, Proto.ControlToNode> call;
+
+    internal TransportProbeConnection(
+        GrpcChannel channel,
+        X509Certificate2 certificate,
+        AsyncDuplexStreamingCall<RawFrame, Proto.ControlToNode> call)
+    {
+        this.channel = channel;
+        this.certificate = certificate;
+        this.call = call;
+    }
+
+    public Task WriteAsync(Proto.NodeToControl message) =>
+        call.RequestStream.WriteAsync(new RawFrame(message.ToByteArray()));
+
+    public Task<bool> MoveNextAsync(CancellationToken cancellationToken) =>
+        call.ResponseStream.MoveNext(cancellationToken);
+
+    public Proto.ControlToNode Current => call.ResponseStream.Current;
+
+    public async ValueTask DisposeAsync()
+    {
+        await call.RequestStream.CompleteAsync().ConfigureAwait(false);
+        call.Dispose();
+        channel.Dispose();
+        certificate.Dispose();
+    }
+}
+
+public enum ProbeKind
+{
+    Enrollment,
+    Hello,
+    Snapshot,
+    Inventory,
+    Health,
+    ExactReplay,
+    ChangedReplay,
+    WrongCertificateAuthority,
+    MismatchedCsrKey,
+    PostRevocation
+}
+
+public enum ProbeDisposition
+{
+    EnrollmentAccepted,
+    TransportAcknowledged,
+    TlsRejected,
+    ClientRejected,
+    TransportRejected
+}
+
+public sealed record ProbeExpectation(ProbeKind Kind, ProbeDisposition Disposition, Proto.TransportRejectionCode? RejectionCode = null);
+
+public static class WslProbePlan
+{
+    public static ImmutableArray<ProbeExpectation> Create() =>
+    [
+        new(ProbeKind.Enrollment, ProbeDisposition.EnrollmentAccepted),
+        new(ProbeKind.Hello, ProbeDisposition.TransportAcknowledged),
+        new(ProbeKind.Snapshot, ProbeDisposition.TransportAcknowledged),
+        new(ProbeKind.Inventory, ProbeDisposition.TransportAcknowledged),
+        new(ProbeKind.Health, ProbeDisposition.TransportAcknowledged),
+        new(ProbeKind.ExactReplay, ProbeDisposition.TransportAcknowledged),
+        new(ProbeKind.ChangedReplay, ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.ReplayConflict),
+        new(ProbeKind.WrongCertificateAuthority, ProbeDisposition.TlsRejected),
+        new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ClientRejected),
+        new(ProbeKind.PostRevocation, ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity)
+    ];
+}
+
+public static class ProbeResponseInterpreter
+{
+    public static ProbeDisposition Enrollment(Proto.EnrollmentResponse response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return response.LeafCertificateDer.IsEmpty || response.IssuingCaDer.IsEmpty
+            ? ProbeDisposition.TransportRejected
+            : ProbeDisposition.EnrollmentAccepted;
+    }
+
+    public static (ProbeDisposition Disposition, Proto.TransportRejectionCode? RejectionCode) Transport(Proto.ControlToNode response)
+    {
+        ArgumentNullException.ThrowIfNull(response);
+        return response.PayloadCase switch
+        {
+            Proto.ControlToNode.PayloadOneofCase.TransportAck => (ProbeDisposition.TransportAcknowledged, null),
+            Proto.ControlToNode.PayloadOneofCase.TransportRejection =>
+                (ProbeDisposition.TransportRejected, response.TransportRejection.Code),
+            _ => (ProbeDisposition.TransportRejected, null)
+        };
+    }
+
+    public static ProbeDisposition Failure(Exception exception)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        return exception is AuthenticationException or HttpRequestException
+            ? ProbeDisposition.TlsRejected
+            : ProbeDisposition.TransportRejected;
+    }
+}
+
+internal static class DevicePublicFrameJson
+{
+    internal static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web);
+}

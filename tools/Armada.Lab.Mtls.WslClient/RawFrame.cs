@@ -6,6 +6,11 @@ namespace Armada.Lab.Mtls.WslClient;
 // This client-only wire container intentionally does not expose C1 server binding types.
 internal sealed record RawFrame(ImmutableArray<byte> Bytes)
 {
+    public RawFrame(byte[] bytes)
+        : this(ImmutableArray.CreateRange(bytes ?? throw new ArgumentNullException(nameof(bytes))))
+    {
+    }
+
     public static RawFrame Read(DeserializationContext context) =>
         new(ImmutableArray.CreateRange(context.PayloadAsNewBuffer()));
 

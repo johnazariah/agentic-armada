@@ -11,5 +11,8 @@
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
   </ItemGroup>
   <ItemGroup><Using Include="Xunit" /></ItemGroup>
-  <ItemGroup><ProjectReference Include="..\..\tools\Armada.Lab.Mtls.LiveHarness\Armada.Lab.Mtls.LiveHarness.csproj" /></ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\tools\Armada.Lab.Mtls.LiveHarness\Armada.Lab.Mtls.LiveHarness.csproj" />
+    <ProjectReference Include="..\..\tools\Armada.Lab.Mtls.WslClient\Armada.Lab.Mtls.WslClient.csproj" />
+  </ItemGroup>
 </Project>
