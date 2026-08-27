@@ -33,6 +33,8 @@ public interface ISshProcessInvoker
 
 public sealed class SshPhaseBridge
 {
+    private const int MaximumPhaseOneOutputBytes = 64 * 1024;
+    private const int MaximumPhaseTwoResultsBytes = 64 * 1024;
     private readonly LabHarnessOptions options;
     private readonly ISshProcessInvoker ssh;
     private readonly string remoteRoot = $"armada-c2-{Guid.NewGuid():N}";
@@ -58,7 +60,8 @@ public sealed class SshPhaseBridge
         var output = await RunAsync(
             LabHarnessCommandContract.PhaseOneBootstrap(helperDigest, remoteRoot),
             request,
-            cancellationToken);
+            cancellationToken,
+            MaximumPhaseOneOutputBytes);
         return ParsePublicFrame(output);
     }
 
@@ -121,7 +124,7 @@ public sealed class SshPhaseBridge
         await process.WriteLineAsync("revocation-confirmed", cancellationToken);
         var completion = await process.CompleteAsync(cancellationToken);
         ThrowIfFailed(completion);
-        var results = ParseProbeResults(completion.StandardOutput);
+        var results = ParseProbeResults(completion.StandardOutput, MaximumPhaseTwoResultsBytes);
         WslProbePlan.EnsureSatisfied(results);
         return RedactedEvidence.Create(results.Select((result, index) =>
             new EvidenceItem($"probe-{index + 1}", result.Disposition.ToString())));
@@ -131,12 +134,14 @@ public sealed class SshPhaseBridge
         RunAsync(
             $"root=\"$HOME/.cache/{remoteRoot}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; test ! -e \"$root\"",
             null,
-            cancellationToken);
+            cancellationToken,
+            MaximumPhaseTwoResultsBytes);
 
     private async Task<string> StageHelperAsync(CancellationToken cancellationToken)
     {
         var digest = DigestHelper();
-        var script = new StringBuilder($"umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\";");
+        const string reader = "while IFS=' ' read -r encoded_name encoded_contents extra; do test -n \"$encoded_name\" && test -n \"$encoded_contents\" && test -z \"$extra\" || exit 1; name=\"$(printf %s \"$encoded_name\" | base64 -d)\" || exit 1; case \"$name\" in \"\"|*[!A-Za-z0-9_.-]*) exit 1;; esac; printf %s \"$encoded_contents\" | base64 -d > \"$root/helper/$name\" || exit 1; done;";
+        var payload = new StringBuilder();
         foreach (var file in Directory.EnumerateFiles(options.HelperDirectory, "*", SearchOption.TopDirectoryOnly)
                      .OrderBy(static file => file, StringComparer.Ordinal))
         {
@@ -146,10 +151,17 @@ public sealed class SshPhaseBridge
                 throw new IOException("Published helper contains an unsafe file.");
             }
 
-            script.Append($" printf %s '{Convert.ToBase64String(await File.ReadAllBytesAsync(file, cancellationToken))}' | base64 -d > \"$root/helper/{name}\";");
+            payload.Append(Convert.ToBase64String(Encoding.UTF8.GetBytes(name)));
+            payload.Append(' ');
+            payload.Append(Convert.ToBase64String(await File.ReadAllBytesAsync(file, cancellationToken)));
+            payload.Append('\n');
         }
 
-        await RunAsync(script.ToString(), null, cancellationToken);
+        await RunAsync(
+            $"umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}",
+            payload.ToString(),
+            cancellationToken,
+            MaximumPhaseTwoResultsBytes);
         return digest;
     }
 
@@ -159,7 +171,11 @@ public sealed class SshPhaseBridge
         return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(assembly))).ToLowerInvariant();
     }
 
-    private async Task<string> RunAsync(string script, string? payload, CancellationToken cancellationToken)
+    private async Task<string> RunAsync(
+        string script,
+        string? payload,
+        CancellationToken cancellationToken,
+        int maximumOutputBytes)
     {
         await using var process = await ssh.StartAsync(cancellationToken);
         await process.WriteLineAsync(script, cancellationToken);
@@ -171,6 +187,7 @@ public sealed class SshPhaseBridge
         await process.FlushAsync(cancellationToken);
         var completion = await process.CompleteAsync(cancellationToken);
         ThrowIfFailed(completion);
+        EnsureBoundedOutput(completion.StandardOutput, maximumOutputBytes);
         return completion.StandardOutput.Trim();
     }
 
@@ -224,8 +241,9 @@ public sealed class SshPhaseBridge
         }
     }
 
-    private static IReadOnlyList<ProbeExecutionResult> ParseProbeResults(string output)
+    private static IReadOnlyList<ProbeExecutionResult> ParseProbeResults(string output, int maximumOutputBytes)
     {
+        EnsureBoundedOutput(output, maximumOutputBytes);
         try
         {
             return JsonSerializer.Deserialize<IReadOnlyList<ProbeExecutionResult>>(output, JsonOptions)
@@ -242,6 +260,14 @@ public sealed class SshPhaseBridge
         if (completion.ExitCode != 0)
         {
             throw new IOException($"SSH phase failed with exit code {completion.ExitCode}.");
+        }
+    }
+
+    private static void EnsureBoundedOutput(string output, int maximumBytes)
+    {
+        if (Encoding.UTF8.GetByteCount(output) > maximumBytes)
+        {
+            throw new IOException("SSH returned more output than the phase contract permits.");
         }
     }
 

@@ -35,8 +35,17 @@ public sealed class SshPhaseBridgeTests
             var stagingCommand = Assert.Single(staging.Lines);
             Assert.Contains("mkdir -p \"$root/helper\"", stagingCommand, StringComparison.Ordinal);
             Assert.Contains("$(stat -c '%u:%a' \"$root/helper\")", stagingCommand, StringComparison.Ordinal);
-            Assert.True(stagingCommand.IndexOf("helper/a.helper", StringComparison.Ordinal) <
-                        stagingCommand.IndexOf("helper/z.helper", StringComparison.Ordinal));
+            Assert.DoesNotContain("a.helper", stagingCommand, StringComparison.Ordinal);
+            Assert.DoesNotContain("z.helper", stagingCommand, StringComparison.Ordinal);
+            Assert.DoesNotContain("Armada.Lab.Mtls.WslClient.dll", stagingCommand, StringComparison.Ordinal);
+            Assert.DoesNotContain(Convert.ToBase64String([1, 2]), stagingCommand, StringComparison.Ordinal);
+            Assert.DoesNotContain(Convert.ToBase64String([3]), stagingCommand, StringComparison.Ordinal);
+            Assert.DoesNotContain(Convert.ToBase64String([9, 8, 7]), stagingCommand, StringComparison.Ordinal);
+            var stagingPayload = Assert.Single(staging.Writes);
+            Assert.Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes("a.helper")), stagingPayload, StringComparison.Ordinal);
+            Assert.Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes("z.helper")), stagingPayload, StringComparison.Ordinal);
+            Assert.Contains(Convert.ToBase64String([1, 2]), stagingPayload, StringComparison.Ordinal);
+            Assert.Contains(Convert.ToBase64String([3]), stagingPayload, StringComparison.Ordinal);
             Assert.Single(phaseOne.Lines);
             Assert.Single(phaseOne.Writes);
             var request = JsonSerializer.Deserialize<DeviceProvisioningRequest>(phaseOne.Writes[0], JsonOptions);
@@ -65,6 +74,53 @@ public sealed class SshPhaseBridgeTests
                     0)));
 
             await Assert.ThrowsAsync<IOException>(() =>
+                new SshPhaseBridge(options, invoker).RunPhaseOneAsync(CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_one_rejects_an_oversized_output_before_parsing()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var invoker = new FakeSshProcessInvoker(
+                new FakeSshPhaseProcess(completion: new("", "", 0)),
+                new FakeSshPhaseProcess(completion: new(new string(' ', 64 * 1024 + 1), "", 0)));
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                new SshPhaseBridge(options, invoker).RunPhaseOneAsync(CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_one_rejects_a_frame_with_oversized_public_material()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var oversized = new DevicePublicFrame(
+                options.NodeUid,
+                options.IdentityEpoch,
+                new byte[4097],
+                new byte[32],
+                [1],
+                new byte[32]);
+            var invoker = new FakeSshProcessInvoker(
+                new FakeSshPhaseProcess(completion: new("", "", 0)),
+                new FakeSshPhaseProcess(completion: new(JsonSerializer.Serialize(oversized, JsonOptions), "", 0)));
+
+            await Assert.ThrowsAsync<ArgumentException>(() =>
                 new SshPhaseBridge(options, invoker).RunPhaseOneAsync(CancellationToken.None));
         }
         finally
@@ -189,6 +245,30 @@ public sealed class SshPhaseBridgeTests
 
             using var authority = Authority();
             await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new SshPhaseBridge(options, new FakeSshProcessInvoker(process)).RunPhaseTwoAsync(
+                    Claim(options), new RecordingIdentityRegistry(), PublicFrame(options), Secret(), authority, CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_two_rejects_oversized_results_before_parsing()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var process = new FakeSshPhaseProcess(
+                [JsonSerializer.Serialize(
+                    new ReadyForRevocation(ReadyForRevocation.ReadyState, 4, Proto.TransportRejectionCode.ReplayConflict),
+                    JsonOptions)],
+                new(new string(' ', 64 * 1024 + 1), "", 0));
+
+            using var authority = Authority();
+            await Assert.ThrowsAsync<IOException>(() =>
                 new SshPhaseBridge(options, new FakeSshProcessInvoker(process)).RunPhaseTwoAsync(
                     Claim(options), new RecordingIdentityRegistry(), PublicFrame(options), Secret(), authority, CancellationToken.None));
         }
