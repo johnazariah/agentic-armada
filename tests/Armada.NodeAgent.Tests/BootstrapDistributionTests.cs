@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using Armada.Contracts;
 using Armada.NodeAgent;
 
@@ -30,7 +31,7 @@ public sealed class BootstrapDistributionTests
         Assert.Equal("bootstrap-package-artifacts-invalid", Failure(tampered.Install(tamperedPackage)).Code);
         Assert.Equal("bootstrap-package-artifacts-invalid", Failure(missing.Install(missingPackage)).Code);
         Assert.Equal("bootstrap-package-artifacts-invalid", Failure(extra.Install(extraPackage)).Code);
-        Assert.Equal("bootstrap-package-layout-invalid", Failure(linked.Install(linkedPackage)).Code);
+        Assert.Equal("bootstrap-package-artifacts-invalid", Failure(linked.Install(linkedPackage)).Code);
     }
 
     [Fact]
@@ -133,6 +134,7 @@ public sealed class BootstrapDistributionTests
         Assert.IsType<Result<BootstrapTrustConfiguration, BootstrapFailure>.Success>(
             BootstrapPackageFormat.DeserializeTrust(BootstrapPackageFormat.SerializeTrust(trust)));
         Assert.Equal("invalid-bootstrap-manifest", Failure(BootstrapPackageFormat.DeserializeManifest("{")).Code);
+        Assert.Equal("invalid-bootstrap-trust", Failure(BootstrapPackageFormat.DeserializeTrust("{")).Code);
         Assert.Equal("invalid-bootstrap-trust", Failure(BootstrapPackageFormat.ValidateTrust(null)).Code);
         Assert.Equal("invalid-bootstrap-manifest", Failure(BootstrapPackageFormat.ValidateManifest(null)).Code);
     }
@@ -181,11 +183,103 @@ public sealed class BootstrapDistributionTests
         Assert.Equal("bootstrap-artifact-too-large", Failure(payloadFixture.Install(oversizedPayload)).Code);
     }
 
+    [Fact]
+    public void Installer_rejects_wide_and_deep_package_trees_before_payload_validation()
+    {
+        using var wideFixture = new BootstrapFixture();
+        var wide = wideFixture.CreatePackage("1.0.0");
+        for (var index = 0; index <= BootstrapInstaller.MaximumPackageEntries; index++)
+        {
+            File.WriteAllText(Path.Combine(wide, "payload", $"extra-{index}"), string.Empty);
+        }
+
+        using var deepFixture = new BootstrapFixture();
+        var deep = deepFixture.CreatePackage("1.0.0");
+        var directory = Path.Combine(deep, "payload");
+        for (var index = 0; index < BootstrapInstaller.MaximumPackageDepth; index++)
+        {
+            directory = Directory.CreateDirectory(Path.Combine(directory, $"level-{index}")).FullName;
+        }
+        File.WriteAllText(Path.Combine(directory, "too-deep"), string.Empty);
+
+        Assert.Equal("bootstrap-package-tree-too-large", Failure(wideFixture.Install(wide)).Code);
+        Assert.Equal("bootstrap-package-tree-too-large", Failure(deepFixture.Install(deep)).Code);
+    }
+
+    [Fact]
+    public void Installer_rejects_a_fifo_payload_as_a_special_file_without_opening_it()
+    {
+        using var fixture = new BootstrapFixture();
+        var package = fixture.CreatePackage("1.0.0");
+        var artifact = Path.Combine(package, "payload", "agent");
+        File.Delete(artifact);
+
+        Assert.Equal(0, CreateFifo(artifact, 0x180));
+
+        Assert.Equal("bootstrap-package-special-file", Failure(fixture.Install(package)).Code);
+    }
+
+    [Fact]
+    public void Filesystem_port_bounds_enumeration_and_opens_only_regular_files()
+    {
+        using var fixture = new BootstrapFixture();
+        var fileSystem = new PhysicalBootstrapFileSystem();
+        var regular = Path.Combine(fixture.SourceRoot, "agent");
+        var fifo = Path.Combine(fixture.SourceRoot, "fifo");
+        File.WriteAllText(Path.Combine(fixture.SourceRoot, "second"), string.Empty);
+
+        Assert.True(fileSystem.IsRegularFile(regular));
+        using (var input = fileSystem.OpenRead(regular))
+        {
+            Assert.Equal("agent-v1", new StreamReader(input).ReadToEnd());
+        }
+        Assert.Throws<BootstrapInputTooLargeException>(() =>
+            fileSystem.EnumerateDirectory(fixture.SourceRoot, 1));
+
+        Assert.Equal(0, CreateFifo(fifo, 0x180));
+        Assert.False(fileSystem.IsRegularFile(fifo));
+        Assert.Throws<IOException>(() => fileSystem.OpenRead(fifo));
+
+        Assert.False(fileSystem.IsOwnerOnlyDirectory(Path.Combine(fixture.Root, "absent")));
+        var bounded = Path.Combine(fixture.SourceRoot, "bounded");
+        File.WriteAllText(bounded, "too-large");
+        Assert.Throws<BootstrapInputTooLargeException>(() => fileSystem.ReadAllBytesBounded(bounded, 1));
+
+        var invalidAtomicTarget = Directory.CreateDirectory(Path.Combine(fixture.Root, "atomic-target")).FullName;
+        Assert.Throws<IOException>(() => fileSystem.WriteAllTextAtomically(invalidAtomicTarget, "state"));
+    }
+
+    [Fact]
+    public void Installer_rejects_invalid_signature_symlinked_root_and_malformed_local_state()
+    {
+        using var signatureFixture = new BootstrapFixture();
+        var invalidSignature = signatureFixture.CreatePackage("1.0.0");
+        File.WriteAllText(Path.Combine(invalidSignature, BootstrapPackageFormat.SignatureFileName), "not-base64");
+
+        using var rootFixture = new BootstrapFixture();
+        var rootPackage = rootFixture.CreatePackage("1.0.0");
+        Directory.CreateSymbolicLink(rootFixture.InstallRoot, rootFixture.SourceRoot);
+
+        using var stateFixture = new BootstrapFixture();
+        Directory.CreateDirectory(stateFixture.InstallRoot);
+        Directory.CreateDirectory(stateFixture.StateRoot);
+        File.WriteAllText(Path.Combine(stateFixture.StateRoot, "active.json"), "{");
+
+        Assert.Equal("bootstrap-signature-invalid", Failure(signatureFixture.Install(invalidSignature)).Code);
+        Assert.Equal("bootstrap-root-insecure", Failure(rootFixture.Install(rootPackage)).Code);
+        Assert.Equal(
+            "bootstrap-state-invalid",
+            Failure(stateFixture.Installer.Status(stateFixture.InstallRoot, stateFixture.StateRoot)).Code);
+    }
+
     private static void SetSparseLength(string path, long length)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
         stream.SetLength(length);
     }
+
+    [DllImport("libc", EntryPoint = "mkfifo", SetLastError = true)]
+    private static extern int CreateFifo(string path, uint mode);
 
     private static T Success<T>(Result<T, BootstrapFailure> result) =>
         result is Result<T, BootstrapFailure>.Success success

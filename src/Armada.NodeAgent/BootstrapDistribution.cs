@@ -4,6 +4,8 @@ using System.Security.Cryptography;
 using System.Runtime.Versioning;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Win32.SafeHandles;
+using System.Runtime.InteropServices;
 using Armada.Contracts;
 
 namespace Armada.NodeAgent;
@@ -52,7 +54,9 @@ public interface IBootstrapFileSystem
     bool DirectoryExists(string path);
     bool FileExists(string path);
     bool IsSymbolicLink(string path);
-    IEnumerable<BootstrapFileSystemEntry> EnumerateTree(string path);
+    IReadOnlyList<BootstrapFileSystemEntry> EnumerateDirectory(string path, int maximumEntries);
+    IReadOnlyList<BootstrapFileSystemEntry> EnumerateTree(string path, int maximumEntries, int maximumDepth);
+    bool IsRegularFile(string path);
     byte[] ReadAllBytes(string path);
     byte[] ReadAllBytesBounded(string path, int maximumBytes);
     string ReadAllText(string path);
@@ -75,12 +79,21 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
     public bool IsSymbolicLink(string path) =>
         new FileInfo(path).LinkTarget is not null || new DirectoryInfo(path).LinkTarget is not null;
 
-    public IEnumerable<BootstrapFileSystemEntry> EnumerateTree(string path)
+    public IReadOnlyList<BootstrapFileSystemEntry> EnumerateDirectory(string path, int maximumEntries)
     {
         var entries = new List<BootstrapFileSystemEntry>();
-        Visit(new DirectoryInfo(path), string.Empty, entries);
+        Visit(new DirectoryInfo(path), string.Empty, -1, maximumEntries, 0, entries);
         return entries;
     }
+
+    public IReadOnlyList<BootstrapFileSystemEntry> EnumerateTree(string path, int maximumEntries, int maximumDepth)
+    {
+        var entries = new List<BootstrapFileSystemEntry>();
+        Visit(new DirectoryInfo(path), string.Empty, maximumDepth, maximumEntries, 0, entries);
+        return entries;
+    }
+
+    public bool IsRegularFile(string path) => (ReadMode(path) & FileTypeMask) == RegularFile;
 
     public byte[] ReadAllBytes(string path) => File.ReadAllBytes(path);
     public byte[] ReadAllBytesBounded(string path, int maximumBytes)
@@ -108,7 +121,28 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
     }
     public string ReadAllText(string path) => File.ReadAllText(path, Encoding.UTF8);
     public long GetFileLength(string path) => new FileInfo(path).Length;
-    public Stream OpenRead(string path) => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+    public Stream OpenRead(string path)
+    {
+        if (!IsRegularFile(path))
+        {
+            throw new IOException("Bootstrap inputs must be regular files.");
+        }
+
+        var descriptor = OpenNoFollow(path, OpenReadOnly | NoFollowFlag);
+        if (descriptor < 0)
+        {
+            throw new IOException($"Bootstrap input could not be opened: {path}.");
+        }
+
+        var handle = new SafeFileHandle((IntPtr)descriptor, ownsHandle: true);
+        if ((ReadMode(handle) & FileTypeMask) != RegularFile)
+        {
+            handle.Dispose();
+            throw new IOException("Bootstrap inputs must be regular files.");
+        }
+
+        return new FileStream(handle, FileAccess.Read);
+    }
 
     public Stream OpenWriteNew(string path)
     {
@@ -178,19 +212,26 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
     private static void Visit(
         DirectoryInfo directory,
         string relativeDirectory,
+        int maximumDepth,
+        int maximumEntries,
+        int depth,
         ICollection<BootstrapFileSystemEntry> entries)
     {
         foreach (var entry in directory.EnumerateFileSystemInfos().OrderBy(static entry => entry.Name, StringComparer.Ordinal))
         {
+            if (entries.Count >= maximumEntries || (maximumDepth >= 0 && depth >= maximumDepth))
+            {
+                throw new BootstrapInputTooLargeException("The bootstrap package tree exceeds its entry or depth limit.");
+            }
             var relativePath = string.IsNullOrEmpty(relativeDirectory)
                 ? entry.Name
                 : $"{relativeDirectory}/{entry.Name}";
             var isDirectory = entry is DirectoryInfo;
             var isLink = entry.LinkTarget is not null;
             entries.Add(new(relativePath, isDirectory, isLink));
-            if (isDirectory && !isLink)
+            if (isDirectory && !isLink && maximumDepth > depth)
             {
-                Visit((DirectoryInfo)entry, relativePath, entries);
+                Visit((DirectoryInfo)entry, relativePath, maximumDepth, maximumEntries, depth + 1, entries);
             }
         }
     }
@@ -207,6 +248,130 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
                         UnixFileMode.OtherWrite |
                         UnixFileMode.OtherExecute)) == 0;
     }
+
+    private static uint ReadMode(string path) =>
+        OperatingSystem.IsLinux()
+            ? ReadLinuxMode(path)
+            : OperatingSystem.IsMacOS()
+                ? ReadDarwinMode(path)
+                : throw new PlatformNotSupportedException("Node bootstrap supports Linux and WSL only.");
+
+    private static uint ReadMode(SafeFileHandle handle) =>
+        OperatingSystem.IsLinux()
+            ? ReadLinuxMode(handle)
+            : OperatingSystem.IsMacOS()
+                ? ReadDarwinMode(handle)
+                : throw new PlatformNotSupportedException("Node bootstrap supports Linux and WSL only.");
+
+    private static uint ReadLinuxMode(string path)
+    {
+        if (LStatLinux(path, out var status) != 0)
+        {
+            throw new IOException($"Bootstrap input could not be inspected: {path}.");
+        }
+        return status.Mode;
+    }
+
+    private static uint ReadDarwinMode(string path)
+    {
+        if (LStatDarwin(path, out var status) != 0)
+        {
+            throw new IOException($"Bootstrap input could not be inspected: {path}.");
+        }
+        return status.Mode;
+    }
+
+    private static uint ReadLinuxMode(SafeFileHandle handle)
+    {
+        if (FStatLinux(handle.DangerousGetHandle().ToInt32(), out var status) != 0)
+        {
+            throw new IOException("Bootstrap input could not be inspected.");
+        }
+        return status.Mode;
+    }
+
+    private static uint ReadDarwinMode(SafeFileHandle handle)
+    {
+        if (FStatDarwin(handle.DangerousGetHandle().ToInt32(), out var status) != 0)
+        {
+            throw new IOException("Bootstrap input could not be inspected.");
+        }
+        return status.Mode;
+    }
+
+    private const int OpenReadOnly = 0;
+    private static int NoFollowFlag => OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
+    private const uint FileTypeMask = 0xF000;
+    private const uint RegularFile = 0x8000;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LinuxStat
+    {
+        public ulong Device;
+        public ulong Inode;
+        public ulong Links;
+        public uint Mode;
+        public uint UserId;
+        public uint GroupId;
+        public int Padding;
+        public ulong DeviceType;
+        public long Size;
+        public long BlockSize;
+        public long Blocks;
+        public long AccessSeconds;
+        public long AccessNanoseconds;
+        public long ModificationSeconds;
+        public long ModificationNanoseconds;
+        public long ChangeSeconds;
+        public long ChangeNanoseconds;
+        public long Reserved0;
+        public long Reserved1;
+        public long Reserved2;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DarwinStat
+    {
+        public int Device;
+        public ushort Mode;
+        public ushort Links;
+        public ulong Inode;
+        public uint UserId;
+        public uint GroupId;
+        public int DeviceType;
+        public int Padding;
+        public long AccessSeconds;
+        public long AccessNanoseconds;
+        public long ModificationSeconds;
+        public long ModificationNanoseconds;
+        public long ChangeSeconds;
+        public long ChangeNanoseconds;
+        public long BirthSeconds;
+        public long BirthNanoseconds;
+        public long Size;
+        public long Blocks;
+        public int BlockSize;
+        public uint Flags;
+        public uint Generation;
+        public int Spare;
+        public long Spare0;
+        public long Spare1;
+    }
+
+    [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
+    private static extern int LStatLinux(string path, out LinuxStat status);
+
+    [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
+    private static extern int LStatDarwin(string path, out DarwinStat status);
+
+    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static extern int FStatLinux(int descriptor, out LinuxStat status);
+
+    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
+    private static extern int FStatDarwin(int descriptor, out DarwinStat status);
+
+    [DllImport("libc", EntryPoint = "open", SetLastError = true)]
+    private static extern int OpenNoFollow(string path, int flags);
 }
 
 public static class BootstrapPackageFormat
@@ -399,7 +564,7 @@ public sealed class BootstrapPackager(IBootstrapFileSystem fileSystem, IClock cl
             return Failure<BootstrapPackageManifest>("bootstrap-package-path-invalid", "The source must exist and the package output path must not exist.");
         }
 
-        var sourceEntries = fileSystem.EnumerateTree(sourceDirectory).ToArray();
+        var sourceEntries = fileSystem.EnumerateTree(sourceDirectory, 4096, 64).ToArray();
         if (sourceEntries.Length == 0 || sourceEntries.Any(static entry => entry.IsSymbolicLink))
         {
             return Failure<BootstrapPackageManifest>("bootstrap-package-source-invalid", "The package source must contain files and no symbolic links.");
@@ -504,6 +669,9 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
     public const int MaximumSignatureBytes = 16 * 1024;
     public const long MaximumArtifactBytes = 512L * 1024 * 1024;
     public const long MaximumPackagePayloadBytes = 1024L * 1024 * 1024;
+    public const int MaximumPackageEntries = 512;
+    public const int MaximumPackageDepth = 16;
+    public const int MaximumTopLevelEntries = 4;
 
     public Result<BootstrapInstallOutcome, BootstrapFailure> Install(
         string packageDirectory,
@@ -635,13 +803,8 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
 
         try
         {
-            var entries = fileSystem.EnumerateTree(packageDirectory).ToArray();
-            var topLevel = entries.Where(static entry => !entry.RelativePath.Contains('/')).ToArray();
-            if (entries.Any(static entry => entry.IsSymbolicLink) ||
-                topLevel.Length != 3 ||
-                !topLevel.Any(static entry => !entry.IsDirectory && entry.RelativePath == BootstrapPackageFormat.ManifestFileName) ||
-                !topLevel.Any(static entry => !entry.IsDirectory && entry.RelativePath == BootstrapPackageFormat.SignatureFileName) ||
-                !topLevel.Any(static entry => entry.IsDirectory && entry.RelativePath == BootstrapPackageFormat.PayloadDirectoryName))
+            var topLevel = fileSystem.EnumerateDirectory(packageDirectory, MaximumTopLevelEntries);
+            if (!HasExpectedTopLevelLayout(topLevel))
             {
                 return Failure<VerifiedBootstrapPackage>("bootstrap-package-layout-invalid", "The package layout must contain only manifest.json, manifest.sig, and payload.");
             }
@@ -691,7 +854,15 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
                 return Failure<VerifiedBootstrapPackage>("bootstrap-signature-invalid", "The detached signature does not verify.");
             }
 
-            return HasExactPayloadLayout(entries, manifest)
+            var payloadEntries = ReadPayloadEntries(packageDirectory);
+            if (payloadEntries is Result<IReadOnlyList<BootstrapFileSystemEntry>, BootstrapFailure>.Failure payloadEntriesFailure)
+            {
+                return Failure<VerifiedBootstrapPackage>(payloadEntriesFailure.Error);
+            }
+
+            return HasExactPayloadLayout(
+                    ((Result<IReadOnlyList<BootstrapFileSystemEntry>, BootstrapFailure>.Success)payloadEntries).Value,
+                    manifest)
                 ? Success(new VerifiedBootstrapPackage(
                     manifest,
                     BootstrapPackageFormat.Sha256(BootstrapPackageFormat.CanonicalBytes(manifest).AsSpan())))
@@ -700,6 +871,12 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
         catch (CryptographicException)
         {
             return Failure<VerifiedBootstrapPackage>("bootstrap-signature-invalid", "The configured public key or detached signature is invalid.");
+        }
+        catch (BootstrapInputTooLargeException)
+        {
+            return Failure<VerifiedBootstrapPackage>(
+                "bootstrap-package-tree-too-large",
+                "The package tree exceeds its entry or depth limit.");
         }
         catch (IOException)
         {
@@ -736,7 +913,7 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
 
     private bool ReleaseMatches(VerifiedBootstrapPackage package, string releaseDirectory)
     {
-        var entries = fileSystem.EnumerateTree(releaseDirectory).ToArray();
+        var entries = fileSystem.EnumerateTree(releaseDirectory, MaximumPackageEntries, MaximumPackageDepth).ToArray();
         if (entries.Any(static entry => entry.IsSymbolicLink))
         {
             return false;
@@ -765,8 +942,14 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
         BootstrapPackageManifest manifest,
         string stagingDirectory)
     {
-        var entries = fileSystem.EnumerateTree(packageDirectory).ToArray();
-        if (entries.Any(static entry => entry.IsSymbolicLink) || !HasExactPayloadLayout(entries, manifest))
+        var payloadEntries = ReadPayloadEntries(packageDirectory);
+        if (payloadEntries is Result<IReadOnlyList<BootstrapFileSystemEntry>, BootstrapFailure>.Failure payloadEntriesFailure)
+        {
+            return Failure<bool>(payloadEntriesFailure.Error);
+        }
+        if (!HasExactPayloadLayout(
+                ((Result<IReadOnlyList<BootstrapFileSystemEntry>, BootstrapFailure>.Success)payloadEntries).Value,
+                manifest))
         {
             return Failure<bool>("bootstrap-package-artifacts-invalid", "The package payload has missing, extra, or symbolic-link artifacts.");
         }
@@ -775,6 +958,10 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
         foreach (var artifact in manifest.Artifacts)
         {
             var source = Path.Combine(packageDirectory, artifact.Path.Replace('/', Path.DirectorySeparatorChar));
+            if (!fileSystem.IsRegularFile(source))
+            {
+                return Failure<bool>("bootstrap-package-special-file", "Package payload artifacts must be regular files.");
+            }
             var sourceLength = fileSystem.GetFileLength(source);
             if (artifact.Length > MaximumArtifactBytes ||
                 sourceLength > MaximumArtifactBytes ||
@@ -855,6 +1042,10 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
         BootstrapArtifact artifact,
         bool requireNoCredentialMarker)
     {
+        if (!fileSystem.IsRegularFile(path))
+        {
+            return Failure<bool>("bootstrap-package-special-file", "Installed release artifacts must be regular files.");
+        }
         if (fileSystem.GetFileLength(path) != artifact.Length || artifact.Length > MaximumArtifactBytes)
         {
             return Failure<bool>("bootstrap-package-artifacts-invalid", "An installed release artifact has an unexpected length.");
@@ -934,6 +1125,38 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
             .Select(static entry => entry.RelativePath)
             .ToHashSet(StringComparer.Ordinal);
         return expectedDirectories.SetEquals(actualDirectories);
+    }
+
+    private static bool HasExpectedTopLevelLayout(IReadOnlyList<BootstrapFileSystemEntry> entries) =>
+        entries.Count == 3 &&
+        !entries.Any(static entry => entry.IsSymbolicLink) &&
+        entries.Any(static entry => !entry.IsDirectory && entry.RelativePath == BootstrapPackageFormat.ManifestFileName) &&
+        entries.Any(static entry => !entry.IsDirectory && entry.RelativePath == BootstrapPackageFormat.SignatureFileName) &&
+        entries.Any(static entry => entry.IsDirectory && entry.RelativePath == BootstrapPackageFormat.PayloadDirectoryName);
+
+    private Result<IReadOnlyList<BootstrapFileSystemEntry>, BootstrapFailure> ReadPayloadEntries(string packageDirectory)
+    {
+        try
+        {
+            var entries = fileSystem.EnumerateTree(
+                    Path.Combine(packageDirectory, BootstrapPackageFormat.PayloadDirectoryName),
+                    MaximumPackageEntries,
+                    MaximumPackageDepth)
+                .Select(static entry => entry with { RelativePath = $"payload/{entry.RelativePath}" })
+                .Prepend(new BootstrapFileSystemEntry(BootstrapPackageFormat.PayloadDirectoryName, true, false))
+                .ToArray();
+            return entries.Any(static entry => entry.IsSymbolicLink)
+                ? Failure<IReadOnlyList<BootstrapFileSystemEntry>>(
+                    "bootstrap-package-artifacts-invalid",
+                    "The package payload must not contain symbolic links.")
+                : Success<IReadOnlyList<BootstrapFileSystemEntry>>(entries);
+        }
+        catch (BootstrapInputTooLargeException)
+        {
+            return Failure<IReadOnlyList<BootstrapFileSystemEntry>>(
+                "bootstrap-package-tree-too-large",
+                "The package tree exceeds its entry or depth limit.");
+        }
     }
 
     private Result<BootstrapInstallState, BootstrapFailure> ReadState(string statePath)

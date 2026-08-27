@@ -52,9 +52,13 @@ network endpoint, listener, privilege escalation, or workload argument.
 
 The installer reads at most 64 KiB of manifest JSON and 16 KiB of detached
 signature text. It permits each artifact to be at most 512 MiB and total
-payload at most 1 GiB. Payloads are incrementally hashed and credential-scanned
-while streaming into an owner-only staging root; no package payload is retained
-in memory.
+payload at most 1 GiB, at most 512 payload entries, and at most 16 payload path
+segments. It validates the three top-level package entries before it enumerates
+the bounded payload tree. Payload artifacts must be POSIX regular files:
+symbolic links, FIFOs, devices, and sockets are rejected using no-follow
+metadata checks before length inspection or opening. Payloads are incrementally
+hashed and credential-scanned while streaming into an owner-only staging root;
+no package payload is retained in memory.
 
 ## Local status
 
