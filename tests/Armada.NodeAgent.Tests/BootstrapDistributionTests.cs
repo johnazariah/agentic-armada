@@ -137,6 +137,56 @@ public sealed class BootstrapDistributionTests
         Assert.Equal("invalid-bootstrap-manifest", Failure(BootstrapPackageFormat.ValidateManifest(null)).Code);
     }
 
+    [Fact]
+    public void Packager_emits_byte_for_byte_deterministic_manifest_and_signature_for_identical_inputs()
+    {
+        using var fixture = new BootstrapFixture();
+        var first = Path.Combine(fixture.Root, "deterministic-first");
+        var second = Path.Combine(fixture.Root, "deterministic-second");
+
+        _ = Success(fixture.Packager.Create(fixture.SourceRoot, first, fixture.Signer, "node-agent", "1.0.0"));
+        _ = Success(fixture.Packager.Create(fixture.SourceRoot, second, fixture.Signer, "node-agent", "1.0.0"));
+
+        Assert.Equal(
+            File.ReadAllBytes(Path.Combine(first, BootstrapPackageFormat.ManifestFileName)),
+            File.ReadAllBytes(Path.Combine(second, BootstrapPackageFormat.ManifestFileName)));
+        Assert.Equal(
+            File.ReadAllBytes(Path.Combine(first, BootstrapPackageFormat.SignatureFileName)),
+            File.ReadAllBytes(Path.Combine(second, BootstrapPackageFormat.SignatureFileName)));
+    }
+
+    [Fact]
+    public void Installer_rejects_oversized_manifest_signature_and_payload_before_buffering_them()
+    {
+        using var manifestFixture = new BootstrapFixture();
+        var oversizedManifest = manifestFixture.CreatePackage("1.0.0");
+        SetSparseLength(
+            Path.Combine(oversizedManifest, BootstrapPackageFormat.ManifestFileName),
+            BootstrapInstaller.MaximumManifestBytes + 1L);
+
+        using var signatureFixture = new BootstrapFixture();
+        var oversizedSignature = signatureFixture.CreatePackage("1.0.0");
+        SetSparseLength(
+            Path.Combine(oversizedSignature, BootstrapPackageFormat.SignatureFileName),
+            BootstrapInstaller.MaximumSignatureBytes + 1L);
+
+        using var payloadFixture = new BootstrapFixture();
+        var oversizedPayload = payloadFixture.CreatePackage("1.0.0");
+        SetSparseLength(
+            Path.Combine(oversizedPayload, "payload", "agent"),
+            BootstrapInstaller.MaximumArtifactBytes + 1L);
+
+        Assert.Equal("bootstrap-manifest-too-large", Failure(manifestFixture.Install(oversizedManifest)).Code);
+        Assert.Equal("bootstrap-signature-too-large", Failure(signatureFixture.Install(oversizedSignature)).Code);
+        Assert.Equal("bootstrap-artifact-too-large", Failure(payloadFixture.Install(oversizedPayload)).Code);
+    }
+
+    private static void SetSparseLength(string path, long length)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
+        stream.SetLength(length);
+    }
+
     private static T Success<T>(Result<T, BootstrapFailure> result) =>
         result is Result<T, BootstrapFailure>.Success success
             ? success.Value

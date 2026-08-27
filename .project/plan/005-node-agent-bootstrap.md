@@ -13,9 +13,13 @@ issuer/key trust file, and reconciles secure local install and state roots.
 
 - `package` emits only `manifest.json`, `manifest.sig`, and sorted
   `payload/` artifacts, with a SHA-256 entry for every payload byte.
+- Identical source, metadata, clock input, and signing key produce
+  byte-for-byte identical manifests and detached signatures.
 - `install` verifies the exact trusted issuer/key detached signature and every
   payload entry before changing install state; it rejects tampering, missing or
   extra files, links, and credential markers.
+- Metadata reads and streamed payload staging have explicit size limits and
+  cannot retain arbitrary package payload bytes in memory.
 - Roots are non-symlinked and owner-only; repeated install is a no-op and a
   new signed digest upgrades the active release.
 - `status` reports only local installation state and does not assert agent

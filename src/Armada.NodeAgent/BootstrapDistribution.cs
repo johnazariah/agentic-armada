@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Buffers;
 using System.Security.Cryptography;
 using System.Runtime.Versioning;
 using System.Text;
@@ -44,6 +45,7 @@ public sealed record BootstrapStatus(
 public sealed record BootstrapInstallOutcome(bool Changed, BootstrapInstallState State);
 
 public sealed record BootstrapFileSystemEntry(string RelativePath, bool IsDirectory, bool IsSymbolicLink);
+public sealed class BootstrapInputTooLargeException(string message) : IOException(message);
 
 public interface IBootstrapFileSystem
 {
@@ -52,11 +54,14 @@ public interface IBootstrapFileSystem
     bool IsSymbolicLink(string path);
     IEnumerable<BootstrapFileSystemEntry> EnumerateTree(string path);
     byte[] ReadAllBytes(string path);
+    byte[] ReadAllBytesBounded(string path, int maximumBytes);
     string ReadAllText(string path);
+    long GetFileLength(string path);
+    Stream OpenRead(string path);
+    Stream OpenWriteNew(string path);
     void CreateOwnerOnlyDirectory(string path);
     bool IsOwnerOnlyDirectory(string path);
     void CopyFile(string source, string destination);
-    void WriteAllBytes(string path, byte[] content);
     void WriteAllTextAtomically(string path, string content);
     void MoveDirectory(string source, string destination);
     void DeleteDirectory(string path);
@@ -78,7 +83,38 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
     }
 
     public byte[] ReadAllBytes(string path) => File.ReadAllBytes(path);
+    public byte[] ReadAllBytesBounded(string path, int maximumBytes)
+    {
+        using var input = OpenRead(path);
+        using var output = new MemoryStream();
+        var buffer = ArrayPool<byte>.Shared.Rent(Math.Min(maximumBytes, 81920));
+        try
+        {
+            int read;
+            while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                if (output.Length + read > maximumBytes)
+                {
+                    throw new BootstrapInputTooLargeException("The bootstrap input exceeds its configured limit.");
+                }
+                output.Write(buffer, 0, read);
+            }
+            return output.ToArray();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
     public string ReadAllText(string path) => File.ReadAllText(path, Encoding.UTF8);
+    public long GetFileLength(string path) => new FileInfo(path).Length;
+    public Stream OpenRead(string path) => new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+    public Stream OpenWriteNew(string path)
+    {
+        CreateOwnerOnlyDirectory(Path.GetDirectoryName(path)!);
+        return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+    }
 
     public void CreateOwnerOnlyDirectory(string path)
     {
@@ -117,12 +153,6 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
     {
         CreateOwnerOnlyDirectory(Path.GetDirectoryName(destination)!);
         File.Copy(source, destination, overwrite: false);
-    }
-
-    public void WriteAllBytes(string path, byte[] content)
-    {
-        CreateOwnerOnlyDirectory(Path.GetDirectoryName(path)!);
-        File.WriteAllBytes(path, content);
     }
 
     public void WriteAllTextAtomically(string path, string content)
@@ -413,7 +443,7 @@ public sealed class BootstrapPackager(IBootstrapFileSystem fileSystem, IClock cl
             var signature = key.SignData(
                 BootstrapPackageFormat.CanonicalBytes(value).AsSpan(),
                 HashAlgorithmName.SHA256,
-                RSASignaturePadding.Pss);
+                RSASignaturePadding.Pkcs1);
 
             fileSystem.CreateOwnerOnlyDirectory(outputDirectory);
             fileSystem.CreateOwnerOnlyDirectory(Path.Combine(outputDirectory, BootstrapPackageFormat.PayloadDirectoryName));
@@ -470,6 +500,11 @@ public sealed class BootstrapPackager(IBootstrapFileSystem fileSystem, IClock cl
 
 public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock clock)
 {
+    public const int MaximumManifestBytes = 64 * 1024;
+    public const int MaximumSignatureBytes = 16 * 1024;
+    public const long MaximumArtifactBytes = 512L * 1024 * 1024;
+    public const long MaximumPackagePayloadBytes = 1024L * 1024 * 1024;
+
     public Result<BootstrapInstallOutcome, BootstrapFailure> Install(
         string packageDirectory,
         BootstrapTrustConfiguration trust,
@@ -523,10 +558,10 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
                 fileSystem.CreateOwnerOnlyDirectory(stagingDirectory);
                 try
                 {
-                    foreach (var artifact in package.Manifest.Artifacts)
+                    var staged = StageVerifiedPayload(packageDirectory, package.Manifest, stagingDirectory);
+                    if (staged is Result<bool, BootstrapFailure>.Failure stagingFailure)
                     {
-                        var target = Path.Combine(stagingDirectory, artifact.Path["payload/".Length..].Replace('/', Path.DirectorySeparatorChar));
-                        fileSystem.WriteAllBytes(target, package.Payloads[artifact.Path]);
+                        return Failure<BootstrapInstallOutcome>(stagingFailure.Error);
                     }
                     fileSystem.MoveDirectory(stagingDirectory, releaseDirectory);
                 }
@@ -611,8 +646,16 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
                 return Failure<VerifiedBootstrapPackage>("bootstrap-package-layout-invalid", "The package layout must contain only manifest.json, manifest.sig, and payload.");
             }
 
+            var manifestText = ReadBoundedText(
+                Path.Combine(packageDirectory, BootstrapPackageFormat.ManifestFileName),
+                MaximumManifestBytes,
+                "bootstrap-manifest-too-large");
+            if (manifestText is Result<string, BootstrapFailure>.Failure manifestTextFailure)
+            {
+                return Failure<VerifiedBootstrapPackage>(manifestTextFailure.Error);
+            }
             var manifestResult = BootstrapPackageFormat.DeserializeManifest(
-                fileSystem.ReadAllText(Path.Combine(packageDirectory, BootstrapPackageFormat.ManifestFileName)));
+                ((Result<string, BootstrapFailure>.Success)manifestText).Value);
             if (manifestResult is Result<BootstrapPackageManifest, BootstrapFailure>.Failure manifestFailure)
             {
                 return Failure<VerifiedBootstrapPackage>(manifestFailure.Error);
@@ -623,7 +666,15 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
                 return Failure<VerifiedBootstrapPackage>("bootstrap-signer-untrusted", "The package signer does not match the configured issuer and key.");
             }
 
-            var encodedSignature = fileSystem.ReadAllText(Path.Combine(packageDirectory, BootstrapPackageFormat.SignatureFileName)).Trim();
+            var signatureText = ReadBoundedText(
+                Path.Combine(packageDirectory, BootstrapPackageFormat.SignatureFileName),
+                MaximumSignatureBytes,
+                "bootstrap-signature-too-large");
+            if (signatureText is Result<string, BootstrapFailure>.Failure signatureTextFailure)
+            {
+                return Failure<VerifiedBootstrapPackage>(signatureTextFailure.Error);
+            }
+            var encodedSignature = ((Result<string, BootstrapFailure>.Success)signatureText).Value.Trim();
             if (!Convert.TryFromBase64String(encodedSignature, new byte[(encodedSignature.Length * 3 + 3) / 4], out _))
             {
                 return Failure<VerifiedBootstrapPackage>("bootstrap-signature-invalid", "The detached signature is not Base64.");
@@ -635,47 +686,16 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
                     BootstrapPackageFormat.CanonicalBytes(manifest).AsSpan(),
                     signature,
                     HashAlgorithmName.SHA256,
-                    RSASignaturePadding.Pss))
+                    RSASignaturePadding.Pkcs1))
             {
                 return Failure<VerifiedBootstrapPackage>("bootstrap-signature-invalid", "The detached signature does not verify.");
             }
 
-            var expectedPaths = manifest.Artifacts.Select(static artifact => artifact.Path).ToHashSet(StringComparer.Ordinal);
-            var actualFiles = entries.Where(static entry => !entry.IsDirectory).Select(static entry => entry.RelativePath).ToHashSet(StringComparer.Ordinal);
-            actualFiles.Remove(BootstrapPackageFormat.ManifestFileName);
-            actualFiles.Remove(BootstrapPackageFormat.SignatureFileName);
-            if (!expectedPaths.SetEquals(actualFiles))
-            {
-                return Failure<VerifiedBootstrapPackage>("bootstrap-package-artifacts-invalid", "The package payload has missing or extra artifacts.");
-            }
-            var expectedDirectories = manifest.Artifacts
-                .SelectMany(static artifact => ParentDirectories(artifact.Path))
-                .Append(BootstrapPackageFormat.PayloadDirectoryName)
-                .ToHashSet(StringComparer.Ordinal);
-            var actualDirectories = entries.Where(static entry => entry.IsDirectory).Select(static entry => entry.RelativePath).ToHashSet(StringComparer.Ordinal);
-            if (!expectedDirectories.SetEquals(actualDirectories))
-            {
-                return Failure<VerifiedBootstrapPackage>("bootstrap-package-artifacts-invalid", "The package payload has missing or extra directories.");
-            }
-            var payloads = new Dictionary<string, byte[]>(StringComparer.Ordinal);
-            foreach (var artifact in manifest.Artifacts)
-            {
-                var bytes = fileSystem.ReadAllBytes(Path.Combine(packageDirectory, artifact.Path.Replace('/', Path.DirectorySeparatorChar)));
-                if (bytes.LongLength != artifact.Length || BootstrapPackageFormat.Sha256(bytes) != artifact.Sha256)
-                {
-                    return Failure<VerifiedBootstrapPackage>("bootstrap-package-artifacts-invalid", "A package artifact does not match its signed digest.");
-                }
-                if (ContainsCredentialMarker(bytes))
-                {
-                    return Failure<VerifiedBootstrapPackage>("bootstrap-credential-marker", "Package payload must not contain GitHub credential markers.");
-                }
-                payloads.Add(artifact.Path, bytes);
-            }
-
-            return Success(new VerifiedBootstrapPackage(
-                manifest,
-                BootstrapPackageFormat.Sha256(BootstrapPackageFormat.CanonicalBytes(manifest).AsSpan()),
-                payloads.ToImmutableDictionary(StringComparer.Ordinal)));
+            return HasExactPayloadLayout(entries, manifest)
+                ? Success(new VerifiedBootstrapPackage(
+                    manifest,
+                    BootstrapPackageFormat.Sha256(BootstrapPackageFormat.CanonicalBytes(manifest).AsSpan())))
+                : Failure<VerifiedBootstrapPackage>("bootstrap-package-artifacts-invalid", "The package payload has missing or extra artifacts or directories.");
         }
         catch (CryptographicException)
         {
@@ -734,11 +754,186 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
         }
 
         return package.Manifest.Artifacts.All(artifact =>
+            HashFile(
+                Path.Combine(releaseDirectory, artifact.Path["payload/".Length..].Replace('/', Path.DirectorySeparatorChar)),
+                artifact,
+                requireNoCredentialMarker: false) is Result<bool, BootstrapFailure>.Success);
+    }
+
+    private Result<bool, BootstrapFailure> StageVerifiedPayload(
+        string packageDirectory,
+        BootstrapPackageManifest manifest,
+        string stagingDirectory)
+    {
+        var entries = fileSystem.EnumerateTree(packageDirectory).ToArray();
+        if (entries.Any(static entry => entry.IsSymbolicLink) || !HasExactPayloadLayout(entries, manifest))
         {
-            var relativePath = artifact.Path["payload/".Length..];
-            var bytes = fileSystem.ReadAllBytes(Path.Combine(releaseDirectory, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            return bytes.LongLength == artifact.Length && BootstrapPackageFormat.Sha256(bytes) == artifact.Sha256;
-        });
+            return Failure<bool>("bootstrap-package-artifacts-invalid", "The package payload has missing, extra, or symbolic-link artifacts.");
+        }
+
+        long totalBytes = 0;
+        foreach (var artifact in manifest.Artifacts)
+        {
+            var source = Path.Combine(packageDirectory, artifact.Path.Replace('/', Path.DirectorySeparatorChar));
+            var sourceLength = fileSystem.GetFileLength(source);
+            if (artifact.Length > MaximumArtifactBytes ||
+                sourceLength > MaximumArtifactBytes ||
+                totalBytes > MaximumPackagePayloadBytes - artifact.Length)
+            {
+                return Failure<bool>("bootstrap-artifact-too-large", "The package artifact or aggregate payload exceeds the bootstrap limit.");
+            }
+
+            if (fileSystem.IsSymbolicLink(source) || sourceLength != artifact.Length)
+            {
+                return Failure<bool>("bootstrap-package-artifacts-invalid", "A package artifact changed after manifest verification.");
+            }
+
+            var target = Path.Combine(stagingDirectory, artifact.Path["payload/".Length..].Replace('/', Path.DirectorySeparatorChar));
+            var copied = CopyAndHashFile(source, target, artifact);
+            if (copied is Result<bool, BootstrapFailure>.Failure copyFailure)
+            {
+                return Failure<bool>(copyFailure.Error);
+            }
+            totalBytes += artifact.Length;
+        }
+
+        return Success(true);
+    }
+
+    private Result<bool, BootstrapFailure> CopyAndHashFile(
+        string source,
+        string destination,
+        BootstrapArtifact artifact)
+    {
+        try
+        {
+            using var input = fileSystem.OpenRead(source);
+            using var output = fileSystem.OpenWriteNew(destination);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var detector = new CredentialMarkerDetector();
+            var buffer = ArrayPool<byte>.Shared.Rent(81920);
+            try
+            {
+                long length = 0;
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    length += read;
+                    if (length > artifact.Length || length > MaximumArtifactBytes)
+                    {
+                        return Failure<bool>("bootstrap-artifact-too-large", "A package artifact exceeds the bootstrap limit.");
+                    }
+                    hash.AppendData(buffer, 0, read);
+                    detector.Append(buffer.AsSpan(0, read));
+                    output.Write(buffer, 0, read);
+                }
+
+                return length == artifact.Length &&
+                       $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}" == artifact.Sha256
+                    ? detector.Found
+                        ? Failure<bool>("bootstrap-credential-marker", "Package payload must not contain GitHub credential markers.")
+                        : Success(true)
+                    : Failure<bool>("bootstrap-package-artifacts-invalid", "A package artifact does not match its signed digest.");
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        catch (IOException)
+        {
+            return Failure<bool>("bootstrap-package-read-failed", "A package artifact could not be streamed.");
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Failure<bool>("bootstrap-package-read-failed", "A package artifact is not readable.");
+        }
+    }
+
+    private Result<bool, BootstrapFailure> HashFile(
+        string path,
+        BootstrapArtifact artifact,
+        bool requireNoCredentialMarker)
+    {
+        if (fileSystem.GetFileLength(path) != artifact.Length || artifact.Length > MaximumArtifactBytes)
+        {
+            return Failure<bool>("bootstrap-package-artifacts-invalid", "An installed release artifact has an unexpected length.");
+        }
+
+        try
+        {
+            using var input = fileSystem.OpenRead(path);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var detector = new CredentialMarkerDetector();
+            var buffer = ArrayPool<byte>.Shared.Rent(81920);
+            try
+            {
+                long length = 0;
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    length += read;
+                    if (length > artifact.Length)
+                    {
+                        return Failure<bool>("bootstrap-package-artifacts-invalid", "An installed release artifact has an unexpected length.");
+                    }
+                    hash.AppendData(buffer, 0, read);
+                    detector.Append(buffer.AsSpan(0, read));
+                }
+                return length == artifact.Length &&
+                       $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}" == artifact.Sha256 &&
+                       (!requireNoCredentialMarker || !detector.Found)
+                    ? Success(true)
+                    : Failure<bool>("bootstrap-package-artifacts-invalid", "An installed release artifact does not match its signed digest.");
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+            }
+        }
+        catch (IOException)
+        {
+            return Failure<bool>("bootstrap-package-read-failed", "An installed release artifact could not be read.");
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Failure<bool>("bootstrap-package-read-failed", "An installed release artifact is not readable.");
+        }
+    }
+
+    private Result<string, BootstrapFailure> ReadBoundedText(string path, int maximumBytes, string tooLargeCode)
+    {
+        try
+        {
+            return Success(Encoding.UTF8.GetString(fileSystem.ReadAllBytesBounded(path, maximumBytes)));
+        }
+        catch (BootstrapInputTooLargeException)
+        {
+            return Failure<string>(tooLargeCode, "The bootstrap metadata exceeds its configured size limit.");
+        }
+    }
+
+    private static bool HasExactPayloadLayout(
+        IEnumerable<BootstrapFileSystemEntry> entries,
+        BootstrapPackageManifest manifest)
+    {
+        var expectedPaths = manifest.Artifacts.Select(static artifact => artifact.Path).ToHashSet(StringComparer.Ordinal);
+        var actualFiles = entries.Where(static entry => !entry.IsDirectory).Select(static entry => entry.RelativePath).ToHashSet(StringComparer.Ordinal);
+        actualFiles.Remove(BootstrapPackageFormat.ManifestFileName);
+        actualFiles.Remove(BootstrapPackageFormat.SignatureFileName);
+        if (!expectedPaths.SetEquals(actualFiles))
+        {
+            return false;
+        }
+
+        var expectedDirectories = manifest.Artifacts
+            .SelectMany(static artifact => ParentDirectories(artifact.Path))
+            .Append(BootstrapPackageFormat.PayloadDirectoryName)
+            .ToHashSet(StringComparer.Ordinal);
+        var actualDirectories = entries.Where(static entry => entry.IsDirectory)
+            .Select(static entry => entry.RelativePath)
+            .ToHashSet(StringComparer.Ordinal);
+        return expectedDirectories.SetEquals(actualDirectories);
     }
 
     private Result<BootstrapInstallState, BootstrapFailure> ReadState(string statePath)
@@ -794,6 +989,44 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
         }
     }
 
+    private sealed class CredentialMarkerDetector
+    {
+        private static readonly byte[][] Markers =
+        [
+            "github_token"u8.ToArray(),
+            "github_pat_"u8.ToArray(),
+            "ghp_"u8.ToArray()
+        ];
+
+        private readonly byte[] window = new byte[Markers.Max(static marker => marker.Length)];
+        private int count;
+
+        public bool Found { get; private set; }
+
+        public void Append(ReadOnlySpan<byte> bytes)
+        {
+            foreach (var value in bytes)
+            {
+                if (count < window.Length)
+                {
+                    window[count++] = ToLowerAscii(value);
+                }
+                else
+                {
+                    window.AsSpan(1).CopyTo(window);
+                    window[^1] = ToLowerAscii(value);
+                }
+
+                Found |= Markers.Any(marker =>
+                    count >= marker.Length &&
+                    window.AsSpan(count - marker.Length, marker.Length).SequenceEqual(marker));
+            }
+        }
+
+        private static byte ToLowerAscii(byte value) =>
+            value is >= (byte)'A' and <= (byte)'Z' ? (byte)(value + ('a' - 'A')) : value;
+    }
+
     private static Result<T, BootstrapFailure> Success<T>(T value) =>
         new Result<T, BootstrapFailure>.Success(value);
 
@@ -805,6 +1038,5 @@ public sealed class BootstrapInstaller(IBootstrapFileSystem fileSystem, IClock c
 
     private sealed record VerifiedBootstrapPackage(
         BootstrapPackageManifest Manifest,
-        string ManifestSha256,
-        ImmutableDictionary<string, byte[]> Payloads);
+        string ManifestSha256);
 }

@@ -21,11 +21,12 @@ version, issuer, signing key ID, creation time, and a lexically sorted list of
 payload artifacts. Each artifact has a relative `payload/` path, byte length,
 and lower-case SHA-256 digest. There are no unlisted files, directories, or
 symbolic links. The manifest is content addressed by its canonical bytes and
-the detached `manifest.sig` is an RSA SHA-256 signature over those bytes.
+the detached `manifest.sig` is a deterministic RSA PKCS#1 v1.5 SHA-256
+signature over those bytes.
 
 Package creation rejects a source tree containing symbolic links or known
 GitHub credential markers. Publishing is deterministic for identical payload,
-metadata, and clock input.
+metadata, clock input, and signing key.
 
 ## Trust and installation
 
@@ -48,6 +49,12 @@ install root, and atomically records the active manifest digest and version in
 the state root. Reinstalling the same verified digest is a no-op; a different
 verified digest replaces the active release. It accepts no GitHub credential,
 network endpoint, listener, privilege escalation, or workload argument.
+
+The installer reads at most 64 KiB of manifest JSON and 16 KiB of detached
+signature text. It permits each artifact to be at most 512 MiB and total
+payload at most 1 GiB. Payloads are incrementally hashed and credential-scanned
+while streaming into an owner-only staging root; no package payload is retained
+in memory.
 
 ## Local status
 

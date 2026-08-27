@@ -12,9 +12,10 @@ become the installed node's distribution identity.
 ## Decision
 
 Use a local directory package with a canonical, content-addressed manifest and
-RSA SHA-256 detached signature. Installation trusts an operator-provided public
-key configuration containing an exact issuer and key ID. It verifies the
-signature and complete payload before touching the active release. Filesystem
+deterministic RSA PKCS#1 v1.5 SHA-256 detached signature. Installation trusts
+an operator-provided public key configuration containing an exact issuer and
+key ID. It bounds metadata, incrementally verifies the complete payload while
+streaming to owner-only staging, then touches the active release. Filesystem
 work is isolated behind a narrow port; package validation and install planning
 remain immutable and pure where possible.
 
