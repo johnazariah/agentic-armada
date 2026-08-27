@@ -31,6 +31,15 @@ public sealed class LabHarnessOptionsTests
     }
 
     [Fact]
+    public void Rejects_postgres_credentials_in_command_line_options()
+    {
+        var values = Values();
+        values["postgres-admin-connection"] = "Host=postgres;Username=admin;******";
+
+        Assert.Throws<ArgumentException>(() => LabHarnessOptions.Parse(values));
+    }
+
+    [Fact]
     public void Bootstrap_has_no_remote_argument_and_uses_the_fixed_dotnet_path()
     {
         var command = LabHarnessCommandContract.PhaseOneBootstrap(
@@ -39,12 +48,22 @@ public sealed class LabHarnessOptionsTests
 
         Assert.Contains(LabHarnessCommandContract.WslDotnet, command, StringComparison.Ordinal);
         Assert.DoesNotContain("johnaz-phd-wsl", command, StringComparison.Ordinal);
+        Assert.StartsWith("set -eu;", command, StringComparison.Ordinal);
         Assert.EndsWith(" phase-one", command, StringComparison.Ordinal);
 
         var phaseTwo = LabHarnessCommandContract.PhaseTwoBootstrap(
             new string('a', 64),
             "armada-c2_0123456789abcdef0123456789abcdef".Replace('_', '-'));
         Assert.EndsWith(" phase-two", phaseTwo, StringComparison.Ordinal);
+        Assert.StartsWith("set -eu;", phaseTwo, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Endpoint_builder_brackets_an_exact_ipv6_literal()
+    {
+        var endpoint = SshPhaseBridge.CreateEndpoint(IPAddress.Parse("2001:db8::1"), 8443);
+
+        Assert.Equal("https://[2001:db8::1]:8443/", endpoint.AbsoluteUri);
     }
 
     [Theory]
@@ -203,6 +222,7 @@ public sealed class LabHarnessOptionsTests
 
         await new LiveHarnessExecution().RunAsync(
             LabHarnessOptions.Parse(Values()),
+            "Host=offline;Database=armada",
             _ =>
             {
                 steps.Add("phase-one");
@@ -239,6 +259,7 @@ public sealed class LabHarnessOptionsTests
         var failure = await Assert.ThrowsAsync<AggregateException>(() =>
             new LiveHarnessExecution().RunAsync(
                 LabHarnessOptions.Parse(Values()),
+                "Host=offline;Database=armada",
                 _ => Task.FromResult(Frame()),
                 (_, _, _, _, _, _) => throw new InvalidOperationException("phase two failed"),
                 _ =>
@@ -267,6 +288,7 @@ public sealed class LabHarnessOptionsTests
         await Assert.ThrowsAsync<ArgumentException>(() =>
             new LiveHarnessExecution().RunAsync(
                 LabHarnessOptions.Parse(Values()),
+                "Host=offline;Database=armada",
                 _ =>
                 {
                     steps.Add("phase-one");
@@ -286,7 +308,6 @@ public sealed class LabHarnessOptionsTests
 
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)
     {
-        ["postgres-admin-connection"] = "Host=localhost;Database=postgres",
         ["listen-ip"] = "192.0.2.20",
         ["enrollment-port"] = "8443",
         ["stream-port"] = "9443",

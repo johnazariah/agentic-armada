@@ -302,7 +302,6 @@ public sealed class SshPhaseBridgeTests
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     private static LabHarnessOptions Options(string helperDirectory) => new(
-        "Host=localhost;Database=postgres",
         IPAddress.Parse("192.0.2.20"),
         8443,
         9443,

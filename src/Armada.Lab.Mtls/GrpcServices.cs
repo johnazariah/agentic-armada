@@ -28,7 +28,7 @@ public sealed class LabNodeEnrollmentGrpcService(
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(context);
 
-        var now = clock.GetUtcNow();
+        var now = TruncateToUtcSecond(clock.GetUtcNow());
         var validation = NodeEnrollmentDecisions.ValidateEnrollment(ToDto(request), now);
         if (validation is Result<ValidatedEnrollmentRequest, NodeTransportValidationError>.Failure failure)
         {
@@ -136,6 +136,14 @@ public sealed class LabNodeEnrollmentGrpcService(
             request.HasAttestation ? request.Attestation.ToByteArray().ToImmutableArray() : null,
             request.RequestId,
             TimestampOrDefault(request.SentAt));
+
+    private static DateTimeOffset TruncateToUtcSecond(DateTimeOffset value)
+    {
+        var utc = value.ToUniversalTime();
+        return new DateTimeOffset(
+            utc.Ticks - (utc.Ticks % TimeSpan.TicksPerSecond),
+            TimeSpan.Zero);
+    }
 
     private static CertificateBindingDto ToCertificateBinding(
         ValidatedEnrollmentRequest enrollment,

@@ -138,14 +138,16 @@ public sealed class LiveHarnessExecution
     [SupportedOSPlatform("macos")]
     public async Task RunAsync(
         LabHarnessOptions options,
+        string postgresAdminConnection,
         Func<CancellationToken, Task<PublicDeviceFrame>> phaseOne,
         Func<EnrollmentClaimReference, INodeIdentityRegistry, PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
         Func<CancellationToken, Task> cleanupRemote,
         CancellationToken cancellationToken)
-        => await RunAsync(options, phaseOne, phaseTwo, cleanupRemote, new MacLiveHarnessRuntime(), cancellationToken);
+        => await RunAsync(options, postgresAdminConnection, phaseOne, phaseTwo, cleanupRemote, new MacLiveHarnessRuntime(), cancellationToken);
 
     public async Task RunAsync(
         LabHarnessOptions options,
+        string postgresAdminConnection,
         Func<CancellationToken, Task<PublicDeviceFrame>> phaseOne,
         Func<EnrollmentClaimReference, INodeIdentityRegistry, PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
         Func<CancellationToken, Task> cleanupRemote,
@@ -153,6 +155,7 @@ public sealed class LiveHarnessExecution
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentException.ThrowIfNullOrWhiteSpace(postgresAdminConnection);
         ArgumentNullException.ThrowIfNull(phaseOne);
         ArgumentNullException.ThrowIfNull(phaseTwo);
         ArgumentNullException.ThrowIfNull(cleanupRemote);
@@ -176,7 +179,7 @@ public sealed class LiveHarnessExecution
 
             root = runtime.CreateTemporaryRoot();
             authority = runtime.CreateAuthority(options.ListenAddress, TimeSpan.FromHours(1), root.Path);
-            database = runtime.CreateDatabase(options.PostgresAdminConnection, options.DatabaseName);
+            database = runtime.CreateDatabase(postgresAdminConnection, options.DatabaseName);
             await database.CreateAndMigrateAsync(cancellationToken);
             var claim = new EnrollmentClaimReference(
                 Guid.NewGuid(),

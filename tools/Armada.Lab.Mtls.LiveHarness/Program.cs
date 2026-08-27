@@ -30,6 +30,12 @@ if (modes[0] == "--preflight")
 }
 
 ExecutionGate.RequireLiveApproval(args, Environment.GetEnvironmentVariable);
+var postgresAdminConnection = Environment.GetEnvironmentVariable("ARMADA_C2_POSTGRES_ADMIN_CONNECTION");
+if (string.IsNullOrWhiteSpace(postgresAdminConnection))
+{
+    throw new InvalidOperationException("ARMADA_C2_POSTGRES_ADMIN_CONNECTION is required after the execution gate.");
+}
+
 if (!OperatingSystem.IsMacOS())
 {
     throw new PlatformNotSupportedException("The C2 live harness supports macOS only.");
@@ -38,6 +44,7 @@ if (!OperatingSystem.IsMacOS())
 var bridge = new SshPhaseBridge(options);
 await new LiveHarnessExecution().RunAsync(
     options,
+    postgresAdminConnection,
     bridge.RunPhaseOneAsync,
     bridge.RunPhaseTwoAsync,
     bridge.CleanupAsync,

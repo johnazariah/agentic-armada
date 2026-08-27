@@ -2,8 +2,8 @@
 
 **Status:** implementation review only. No live run is approved by this runbook.
 
-The harness accepts `--preflight` and explicit `--postgres-admin-connection`,
-`--listen-ip`, `--enrollment-port`, `--stream-port`, `--database`, and
+The harness accepts `--preflight` and explicit `--listen-ip`,
+`--enrollment-port`, `--stream-port`, `--database`, and
 `--evidence-directory`, `--helper-directory`, `--node-uid`, and
 `--identity-epoch` values. `helper-directory` is an absolute, non-link,
 published WSL client directory; the node UID is canonical and the epoch is
@@ -11,6 +11,12 @@ positive. It accepts only a generated
 `armada_c2_<32 lowercase hex>` database name, one exact non-loopback IP, and
 two distinct ports. Preflight deliberately creates no CA, listener, database,
 claim, certificate, or SSH/WSL state.
+
+The PostgreSQL administrator connection is never accepted in command-line
+arguments. Preflight neither requires nor reads it. Only after both live gate
+factors have passed, execution reads the non-empty
+`ARMADA_C2_POSTGRES_ADMIN_CONNECTION` environment variable without logging or
+retaining it in evidence.
 
 Live execution additionally requires the `--execute` argument and exact
 `ARMADA_C2_LIVE_APPROVAL=approved`; neither a command argument nor environment

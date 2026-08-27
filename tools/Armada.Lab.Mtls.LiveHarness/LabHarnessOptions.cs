@@ -4,7 +4,6 @@ using System.Text.RegularExpressions;
 namespace Armada.Lab.Mtls.LiveHarness;
 
 public sealed record LabHarnessOptions(
-    string PostgresAdminConnection,
     IPAddress ListenAddress,
     int EnrollmentPort,
     int StreamPort,
@@ -20,7 +19,11 @@ public sealed record LabHarnessOptions(
     public static LabHarnessOptions Parse(IReadOnlyDictionary<string, string?> values)
     {
         ArgumentNullException.ThrowIfNull(values);
-        var connection = Required(values, "postgres-admin-connection");
+        if (values.ContainsKey("postgres-admin-connection"))
+        {
+            throw new ArgumentException("postgres-admin-connection is forbidden; use ARMADA_C2_POSTGRES_ADMIN_CONNECTION only after the execution gate.");
+        }
+
         var address = IPAddress.Parse(Required(values, "listen-ip"));
         var enrollmentPort = ParsePort(Required(values, "enrollment-port"));
         var streamPort = ParsePort(Required(values, "stream-port"));
@@ -60,7 +63,7 @@ public sealed record LabHarnessOptions(
             throw new ArgumentException("database must be a generated armada_c2_<32 lowercase hex> name.");
         }
 
-        return new(connection, address, enrollmentPort, streamPort, database, evidence, helper, nodeUid, identityEpoch);
+        return new(address, enrollmentPort, streamPort, database, evidence, helper, nodeUid, identityEpoch);
     }
 
     public static bool IsExactUnicast(IPAddress address)
@@ -100,10 +103,10 @@ public static class LabHarnessCommandContract
         new("^armada-c2-[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public static string PhaseOneBootstrap(string helperDigest, string remoteRoot) =>
-        $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
 
     public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot) =>
-        $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
 
     private static string ValidateHelperDigest(string helperDigest) =>
         HelperDigestPattern.IsMatch(helperDigest)

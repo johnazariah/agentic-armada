@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -91,8 +92,8 @@ public sealed class SshPhaseBridge
             var configuration = new PhaseTwoConfiguration(
                 $"/home/johnaz/.cache/{remoteRoot}",
                 new DevicePublicFrame(frame.NodeUid, frame.IdentityEpoch, frame.SubjectPublicKeyInfo, frame.PublicKeySha256, frame.CertificateSigningRequest, frame.FrameSha256),
-                new Uri($"https://{options.ListenAddress}:{options.EnrollmentPort}"),
-                new Uri($"https://{options.ListenAddress}:{options.StreamPort}"),
+                CreateEndpoint(options.ListenAddress, options.EnrollmentPort),
+                CreateEndpoint(options.ListenAddress, options.StreamPort),
                 claim.ClaimId.ToString("D"),
                 secretCopy,
                 caCertificate.Export(X509ContentType.Cert));
@@ -132,7 +133,7 @@ public sealed class SshPhaseBridge
 
     public Task CleanupAsync(CancellationToken cancellationToken) =>
         RunAsync(
-            $"root=\"$HOME/.cache/{remoteRoot}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; test ! -e \"$root\"",
+            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; test ! -e \"$root\"",
             null,
             cancellationToken,
             MaximumPhaseTwoResultsBytes);
@@ -158,7 +159,7 @@ public sealed class SshPhaseBridge
         }
 
         await RunAsync(
-            $"umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}",
+            $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}",
             payload.ToString(),
             cancellationToken,
             MaximumPhaseTwoResultsBytes);
@@ -169,6 +170,17 @@ public sealed class SshPhaseBridge
     {
         var assembly = Path.Combine(options.HelperDirectory, "Armada.Lab.Mtls.WslClient.dll");
         return Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(assembly))).ToLowerInvariant();
+    }
+
+    public static Uri CreateEndpoint(IPAddress address, int port)
+    {
+        ArgumentNullException.ThrowIfNull(address);
+        if (!LabHarnessOptions.IsExactUnicast(address) || port is <= 0 or > 65535)
+        {
+            throw new ArgumentException("C2 endpoints require an exact unicast IP and valid port.");
+        }
+
+        return new UriBuilder(Uri.UriSchemeHttps, address.ToString(), port).Uri;
     }
 
     private async Task<string> RunAsync(
