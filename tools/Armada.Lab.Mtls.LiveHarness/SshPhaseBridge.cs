@@ -133,7 +133,7 @@ public sealed class SshPhaseBridge
 
     public Task CleanupAsync(CancellationToken cancellationToken) =>
         RunAsync(
-            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; test ! -e \"$root\"",
+            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; test ! -e \"$root\"",
             null,
             cancellationToken,
             MaximumPhaseTwoResultsBytes);
@@ -159,7 +159,7 @@ public sealed class SshPhaseBridge
         }
 
         await RunAsync(
-            $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}",
+            $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}",
             payload.ToString(),
             cancellationToken,
             MaximumPhaseTwoResultsBytes);

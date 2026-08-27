@@ -290,6 +290,8 @@ public sealed class SshPhaseBridgeTests
             await Assert.ThrowsAsync<IOException>(() => bridge.CleanupAsync(CancellationToken.None));
 
             var command = Assert.Single(process.Lines);
+            Assert.Contains("set -eu;", command, StringComparison.Ordinal);
+            Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
             Assert.Contains("rm -rf -- \"$root\"", command, StringComparison.Ordinal);
             Assert.EndsWith("test ! -e \"$root\"", command, StringComparison.Ordinal);
         }

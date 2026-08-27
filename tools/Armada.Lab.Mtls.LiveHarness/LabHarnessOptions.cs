@@ -103,10 +103,10 @@ public static class LabHarnessCommandContract
         new("^armada-c2-[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public static string PhaseOneBootstrap(string helperDigest, string remoteRoot) =>
-        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
 
     public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot) =>
-        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/device\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
 
     private static string ValidateHelperDigest(string helperDigest) =>
         HelperDigestPattern.IsMatch(helperDigest)

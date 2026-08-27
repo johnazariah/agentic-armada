@@ -56,6 +56,11 @@ public sealed class LabHarnessOptionsTests
             "armada-c2_0123456789abcdef0123456789abcdef".Replace('_', '-'));
         Assert.EndsWith(" phase-two", phaseTwo, StringComparison.Ordinal);
         Assert.StartsWith("set -eu;", phaseTwo, StringComparison.Ordinal);
+        Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
+        Assert.Contains("test ! -L \"$root/helper\"", command, StringComparison.Ordinal);
+        Assert.Contains("test ! -L \"$root\"", phaseTwo, StringComparison.Ordinal);
+        Assert.Contains("test ! -L \"$root/helper\"", phaseTwo, StringComparison.Ordinal);
+        Assert.Contains("test ! -L \"$root/device\"", phaseTwo, StringComparison.Ordinal);
     }
 
     [Fact]
