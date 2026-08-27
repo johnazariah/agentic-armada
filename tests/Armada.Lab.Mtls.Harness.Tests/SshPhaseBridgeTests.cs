@@ -1,0 +1,383 @@
+using System.Net;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+using System.Text;
+using System.Text.Json;
+using Armada.Application;
+using Armada.Contracts;
+using Armada.Lab.Mtls.LiveHarness;
+using Armada.Lab.Mtls.WslClient;
+using Proto = Armada.Contracts.V1Alpha1;
+
+namespace Armada.Lab.Mtls.Harness.Tests;
+
+public sealed class SshPhaseBridgeTests
+{
+    [Fact]
+    public async Task Phase_one_stages_valid_helpers_and_parses_the_requested_canonical_public_frame()
+    {
+        var helperDirectory = CreateHelperDirectory(("z.helper", [3]), ("a.helper", [1, 2]));
+        try
+        {
+            var options = Options(helperDirectory);
+            var expected = DeviceFrame(options.NodeUid, options.IdentityEpoch);
+            var staging = new FakeSshPhaseProcess(completion: new("", "", 0));
+            var phaseOne = new FakeSshPhaseProcess(completion: new(JsonSerializer.Serialize(expected, JsonOptions), "", 0));
+            var invoker = new FakeSshProcessInvoker(staging, phaseOne);
+            var bridge = new SshPhaseBridge(options, invoker);
+
+            var frame = await bridge.RunPhaseOneAsync(CancellationToken.None);
+
+            Assert.Equal(expected.NodeUid, frame.NodeUid);
+            Assert.Equal(expected.IdentityEpoch, frame.IdentityEpoch);
+            Assert.Equal(expected.SubjectPublicKeyInfo, frame.SubjectPublicKeyInfo);
+            Assert.Equal(2, invoker.Started.Count);
+            var stagingCommand = Assert.Single(staging.Lines);
+            Assert.Contains("mkdir -p \"$root/helper\"", stagingCommand, StringComparison.Ordinal);
+            Assert.Contains("$(stat -c '%u:%a' \"$root/helper\")", stagingCommand, StringComparison.Ordinal);
+            Assert.True(stagingCommand.IndexOf("helper/a.helper", StringComparison.Ordinal) <
+                        stagingCommand.IndexOf("helper/z.helper", StringComparison.Ordinal));
+            Assert.Single(phaseOne.Lines);
+            Assert.Single(phaseOne.Writes);
+            var request = JsonSerializer.Deserialize<DeviceProvisioningRequest>(phaseOne.Writes[0], JsonOptions);
+            Assert.NotNull(request);
+            Assert.Equal(options.NodeUid, request.NodeUid);
+            Assert.Equal(options.IdentityEpoch, request.IdentityEpoch);
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_one_rejects_an_unexpected_but_otherwise_valid_public_frame()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var invoker = new FakeSshProcessInvoker(
+                new FakeSshPhaseProcess(completion: new("", "", 0)),
+                new FakeSshPhaseProcess(completion: new(
+                    JsonSerializer.Serialize(DeviceFrame(Guid.NewGuid(), options.IdentityEpoch), JsonOptions),
+                    "",
+                    0)));
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                new SshPhaseBridge(options, invoker).RunPhaseOneAsync(CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Helper_staging_rejects_unsafe_names_before_starting_ssh()
+    {
+        var helperDirectory = CreateHelperDirectory(("unsafe;helper", [1]));
+        try
+        {
+            var invoker = new FakeSshProcessInvoker();
+
+            await Assert.ThrowsAsync<IOException>(() =>
+                new SshPhaseBridge(Options(helperDirectory), invoker).RunPhaseOneAsync(CancellationToken.None));
+
+            Assert.Empty(invoker.Started);
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_two_rejects_an_invalid_revocation_readiness_response()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var process = new FakeSshPhaseProcess(
+                [JsonSerializer.Serialize(
+                    new ReadyForRevocation(ReadyForRevocation.ReadyState, 6, Proto.TransportRejectionCode.ReplayConflict),
+                    JsonOptions)],
+                new("", "", 0));
+            var identities = new RecordingIdentityRegistry();
+
+            using var authority = Authority();
+            await Assert.ThrowsAsync<IOException>(() =>
+                new SshPhaseBridge(options, new FakeSshProcessInvoker(process)).RunPhaseTwoAsync(
+                    Claim(options), identities, PublicFrame(options), Secret(), authority, CancellationToken.None));
+
+            Assert.Equal(0, identities.Revocations);
+            Assert.DoesNotContain("revocation-confirmed", process.Lines);
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_two_sends_the_secret_only_in_stdin_and_confirms_after_controller_revocation()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var secret = Secret();
+            var results = WslProbePlan.Create()
+                .Select(static expected => new ProbeExecutionResult(expected.Kind, expected.Disposition, expected.RejectionCode))
+                .ToArray();
+            var process = new FakeSshPhaseProcess(
+                [JsonSerializer.Serialize(
+                    new ReadyForRevocation(ReadyForRevocation.ReadyState, 4, Proto.TransportRejectionCode.ReplayConflict),
+                    JsonOptions)],
+                new(JsonSerializer.Serialize(results, JsonOptions), "remote diagnostics", 0));
+            var identities = new RecordingIdentityRegistry(() =>
+            {
+                Assert.Equal(2, process.Lines.Count);
+                Assert.DoesNotContain("revocation-confirmed", process.Lines);
+            });
+            process.OnComplete = () =>
+            {
+                Assert.Equal("revocation-confirmed", process.Lines[^1]);
+                Assert.Equal(1, identities.Revocations);
+            };
+
+            using var authority = Authority();
+            var evidence = await new SshPhaseBridge(options, new FakeSshProcessInvoker(process)).RunPhaseTwoAsync(
+                Claim(options), identities, PublicFrame(options), secret, authority, CancellationToken.None);
+
+            var secretBase64 = Convert.ToBase64String(secret);
+            var invocation = SshInvocation.CreateStdinOnlyInvocation();
+            Assert.Equal(["-T", LabHarnessCommandContract.SshHost], invocation.ArgumentList);
+            Assert.DoesNotContain(secretBase64, invocation.ArgumentList);
+            Assert.DoesNotContain(secretBase64, process.Lines[0], StringComparison.Ordinal);
+            Assert.Contains(secretBase64, process.Lines[1], StringComparison.Ordinal);
+            Assert.DoesNotContain(secretBase64, process.Completion.StandardOutput, StringComparison.Ordinal);
+            Assert.DoesNotContain(secretBase64, process.Completion.StandardError, StringComparison.Ordinal);
+            Assert.All(evidence, item =>
+            {
+                Assert.DoesNotContain(secretBase64, item.Name, StringComparison.Ordinal);
+                Assert.DoesNotContain(secretBase64, item.Value, StringComparison.Ordinal);
+            });
+            Assert.Equal(results.Length, evidence.Count);
+            Assert.Equal("probe-10", evidence[^1].Name);
+            Assert.Equal("TransportRejected", evidence[^1].Value);
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Phase_two_rejects_incomplete_probe_results_without_returning_evidence()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var process = new FakeSshPhaseProcess(
+                [JsonSerializer.Serialize(
+                    new ReadyForRevocation(ReadyForRevocation.ReadyState, 4, Proto.TransportRejectionCode.ReplayConflict),
+                    JsonOptions)],
+                new("[]", "", 0));
+
+            using var authority = Authority();
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                new SshPhaseBridge(options, new FakeSshProcessInvoker(process)).RunPhaseTwoAsync(
+                    Claim(options), new RecordingIdentityRegistry(), PublicFrame(options), Secret(), authority, CancellationToken.None));
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Cleanup_requires_remote_root_absence_and_propagates_ssh_failure()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var process = new FakeSshPhaseProcess(completion: new("", "ignored", 23));
+            var bridge = new SshPhaseBridge(Options(helperDirectory), new FakeSshProcessInvoker(process));
+
+            await Assert.ThrowsAsync<IOException>(() => bridge.CleanupAsync(CancellationToken.None));
+
+            var command = Assert.Single(process.Lines);
+            Assert.Contains("rm -rf -- \"$root\"", command, StringComparison.Ordinal);
+            Assert.EndsWith("test ! -e \"$root\"", command, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(helperDirectory, recursive: true);
+        }
+    }
+
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
+    private static LabHarnessOptions Options(string helperDirectory) => new(
+        "Host=localhost;Database=postgres",
+        IPAddress.Parse("192.0.2.20"),
+        8443,
+        9443,
+        "armada_c2_0123456789abcdef0123456789abcdef",
+        Path.Combine(AppContext.BaseDirectory, "evidence"),
+        helperDirectory,
+        Guid.Parse("01234567-89ab-cdef-0123-456789abcdef"),
+        1);
+
+    private static string CreateHelperDirectory(params (string Name, byte[] Contents)[] additionalFiles)
+    {
+        var directory = Path.Combine(AppContext.BaseDirectory, $"ssh-phase-bridge-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        File.WriteAllBytes(Path.Combine(directory, "Armada.Lab.Mtls.WslClient.dll"), [9, 8, 7]);
+        foreach (var (name, contents) in additionalFiles)
+        {
+            File.WriteAllBytes(Path.Combine(directory, name), contents);
+        }
+
+        return directory;
+    }
+
+    private static DevicePublicFrame DeviceFrame(Guid nodeUid, long identityEpoch)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        return DevicePublicFrame.Create(
+            nodeUid,
+            identityEpoch,
+            key.ExportSubjectPublicKeyInfo(),
+            new CertificateRequest("CN=ssh-bridge", key, HashAlgorithmName.SHA256).CreateSigningRequest());
+    }
+
+    private static PublicDeviceFrame PublicFrame(LabHarnessOptions options)
+    {
+        var frame = DeviceFrame(options.NodeUid, options.IdentityEpoch);
+        return new(
+            frame.NodeUid,
+            frame.IdentityEpoch,
+            frame.SubjectPublicKeyInfo,
+            frame.PublicKeySha256,
+            frame.CertificateSigningRequest,
+            frame.FrameSha256);
+    }
+
+    private static EnrollmentClaimReference Claim(LabHarnessOptions options)
+    {
+        var frame = PublicFrame(options);
+        var parsed = Sha256Digest.Parse($"sha256:{Convert.ToHexString(frame.PublicKeySha256).ToLowerInvariant()}");
+        return new(
+            Guid.NewGuid(),
+            new NodeUid(options.NodeUid),
+            options.IdentityEpoch,
+            ((Result<Sha256Digest, ContractValidationError>.Success)parsed).Value);
+    }
+
+    private static byte[] Secret() => Encoding.UTF8.GetBytes("secret-is-stdin-only-and-is-long-enough");
+
+    private static X509Certificate2 Authority()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=ssh-bridge-authority", key, HashAlgorithmName.SHA256);
+        return request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+    }
+
+    private sealed class FakeSshProcessInvoker(params FakeSshPhaseProcess[] processes) : ISshProcessInvoker
+    {
+        private readonly Queue<FakeSshPhaseProcess> processes = new(processes);
+        public List<FakeSshPhaseProcess> Started { get; } = [];
+
+        public Task<ISshPhaseProcess> StartAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var process = processes.Dequeue();
+            Started.Add(process);
+            return Task.FromResult<ISshPhaseProcess>(process);
+        }
+    }
+
+    private sealed class FakeSshPhaseProcess(
+        IEnumerable<string>? outputLines = null,
+        SshProcessResult? completion = null) : ISshPhaseProcess
+    {
+        private readonly Queue<string> outputLines = new(outputLines ?? []);
+        public List<string> Lines { get; } = [];
+        public List<string> Writes { get; } = [];
+        public SshProcessResult Completion { get; } = completion ?? new("", "", 0);
+        public Action? OnComplete { get; set; }
+
+        public Task WriteLineAsync(string value, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Lines.Add(value);
+            return Task.CompletedTask;
+        }
+
+        public Task WriteAsync(string value, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Writes.Add(value);
+            return Task.CompletedTask;
+        }
+
+        public Task FlushAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        }
+
+        public Task<string?> ReadLineAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(outputLines.Count == 0 ? null : outputLines.Dequeue());
+        }
+
+        public Task<SshProcessResult> CompleteAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            OnComplete?.Invoke();
+            return Task.FromResult(Completion);
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class RecordingIdentityRegistry(Action? onRevoke = null) : INodeIdentityRegistry
+    {
+        private readonly Action? onRevoke = onRevoke;
+        public int Revocations { get; private set; }
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> ResolveAsync(
+            NodeUid nodeUid,
+            long identityEpoch,
+            string certificateSerial,
+            string certificateThumbprintSha256,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RegisterAsync(
+            NodeIdentityBinding binding,
+            CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RevokeAsync(
+            NodeUid nodeUid,
+            long identityEpoch,
+            string reason,
+            Guid correlationId,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            onRevoke?.Invoke();
+            Revocations++;
+            return Task.FromResult<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>>(
+                new Result<NodeIdentityBinding, NodeIdentityRegistryFailure>.Success(
+                    new(nodeUid, identityEpoch, null!, "serial", "thumbprint", DateTimeOffset.UtcNow.AddMinutes(1), true)));
+        }
+    }
+}
