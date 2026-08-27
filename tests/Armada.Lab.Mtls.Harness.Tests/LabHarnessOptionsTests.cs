@@ -192,7 +192,10 @@ public sealed class LabHarnessOptionsTests
         ["enrollment-port"] = "8443",
         ["stream-port"] = "9443",
         ["database"] = "armada_c2_0123456789abcdef0123456789abcdef",
-        ["evidence-directory"] = "/tmp/armada-evidence"
+        ["evidence-directory"] = "/tmp/armada-evidence",
+        ["helper-directory"] = AppContext.BaseDirectory,
+        ["node-uid"] = "01234567-89ab-cdef-0123-456789abcdef",
+        ["identity-epoch"] = "1"
     };
 
     private static PublicDeviceFrame Frame()

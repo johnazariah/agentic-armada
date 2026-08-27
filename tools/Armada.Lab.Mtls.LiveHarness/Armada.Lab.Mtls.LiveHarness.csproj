@@ -12,5 +12,6 @@
     <ProjectReference Include="..\..\src\Armada.Contracts\Armada.Contracts.csproj" />
     <ProjectReference Include="..\..\src\Armada.Infrastructure.Postgres\Armada.Infrastructure.Postgres.csproj" />
     <ProjectReference Include="..\..\src\Armada.Lab.Mtls\Armada.Lab.Mtls.csproj" />
+    <ProjectReference Include="..\Armada.Lab.Mtls.WslClient\Armada.Lab.Mtls.WslClient.csproj" />
   </ItemGroup>
 </Project>

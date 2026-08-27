@@ -4,7 +4,10 @@
 
 The harness accepts `--preflight` and explicit `--postgres-admin-connection`,
 `--listen-ip`, `--enrollment-port`, `--stream-port`, `--database`, and
-`--evidence-directory` values. It accepts only a generated
+`--evidence-directory`, `--helper-directory`, `--node-uid`, and
+`--identity-epoch` values. `helper-directory` is an absolute, non-link,
+published WSL client directory; the node UID is canonical and the epoch is
+positive. It accepts only a generated
 `armada_c2_<32 lowercase hex>` database name, one exact non-loopback IP, and
 two distinct ports. Preflight deliberately creates no CA, listener, database,
 claim, certificate, or SSH/WSL state.

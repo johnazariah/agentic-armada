@@ -109,7 +109,7 @@ public sealed class LiveHarnessExecution
     public async Task RunAsync(
         LabHarnessOptions options,
         Func<CancellationToken, Task<PublicDeviceFrame>> phaseOne,
-        Func<PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
+        Func<EnrollmentClaimReference, INodeIdentityRegistry, PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
         Func<CancellationToken, Task> cleanupRemote,
         CancellationToken cancellationToken)
     {
@@ -143,11 +143,12 @@ public sealed class LiveHarnessExecution
                 frame.IdentityEpoch,
                 ((Result<Sha256Digest, ContractValidationError>.Success)digest).Value);
             await database.SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddMinutes(10), cancellationToken);
-            application = BuildServer(options, database.DataSource, authority);
+            var repository = new PostgresNodeEnrollmentStateRepository(database.DataSource);
+            application = BuildServer(options, repository, authority);
             await application.StartAsync(cancellationToken);
             await WriteEvidenceAsync(
                 options.EvidenceDirectory,
-                await phaseTwo(frame, secret, authority.CaCertificate, cancellationToken),
+                await phaseTwo(claim, repository, frame, secret, authority.CaCertificate, cancellationToken),
                 cancellationToken);
         }
         finally
@@ -189,11 +190,10 @@ public sealed class LiveHarnessExecution
 
     private static WebApplication BuildServer(
         LabHarnessOptions options,
-        Npgsql.NpgsqlDataSource dataSource,
+        PostgresNodeEnrollmentStateRepository repository,
         EphemeralLabAuthority authority)
     {
         var builder = WebApplication.CreateEmptyBuilder(new WebApplicationOptions());
-        var repository = new PostgresNodeEnrollmentStateRepository(dataSource);
         var settings = new LabMtlsRuntimeSettings
         {
             Enabled = true,

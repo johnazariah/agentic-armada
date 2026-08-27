@@ -9,7 +9,10 @@ public sealed record LabHarnessOptions(
     int EnrollmentPort,
     int StreamPort,
     string DatabaseName,
-    string EvidenceDirectory)
+    string EvidenceDirectory,
+    string HelperDirectory,
+    Guid NodeUid,
+    long IdentityEpoch)
 {
     private static readonly Regex DatabasePattern =
         new("^armada_c2_[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
@@ -23,11 +26,23 @@ public sealed record LabHarnessOptions(
         var streamPort = ParsePort(Required(values, "stream-port"));
         var database = Required(values, "database");
         var evidenceInput = Required(values, "evidence-directory");
+        var helperInput = Required(values, "helper-directory");
+        var nodeUid = Guid.TryParseExact(Required(values, "node-uid"), "D", out var parsedNodeUid) && parsedNodeUid != Guid.Empty
+            ? parsedNodeUid
+            : throw new ArgumentException("node-uid must be a non-empty canonical UUID.");
+        var identityEpoch = long.TryParse(Required(values, "identity-epoch"), out var parsedEpoch) && parsedEpoch > 0
+            ? parsedEpoch
+            : throw new ArgumentException("identity-epoch must be positive.");
         var evidence = Path.GetFullPath(evidenceInput);
+        var helper = Path.GetFullPath(helperInput);
 
         if (!Path.IsPathFullyQualified(evidenceInput))
         {
             throw new ArgumentException("evidence-directory must be absolute.");
+        }
+        if (!Path.IsPathFullyQualified(helperInput) || !Directory.Exists(helper) || new DirectoryInfo(helper).LinkTarget is not null)
+        {
+            throw new ArgumentException("helper-directory must be an existing absolute non-link published helper directory.");
         }
 
         if (!IsExactUnicast(address))
@@ -45,7 +60,7 @@ public sealed record LabHarnessOptions(
             throw new ArgumentException("database must be a generated armada_c2_<32 lowercase hex> name.");
         }
 
-        return new(connection, address, enrollmentPort, streamPort, database, evidence);
+        return new(connection, address, enrollmentPort, streamPort, database, evidence, helper, nodeUid, identityEpoch);
     }
 
     public static bool IsExactUnicast(IPAddress address)
