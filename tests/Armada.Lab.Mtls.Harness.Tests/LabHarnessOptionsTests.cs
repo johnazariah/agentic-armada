@@ -58,10 +58,10 @@ public sealed class LabHarnessOptionsTests
         Assert.StartsWith("set -eu;", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/helper\"", command, StringComparison.Ordinal);
-        Assert.Contains("sha256sum --strict --check helper.manifest", command, StringComparison.Ordinal);
+        Assert.Contains("sha256sum --quiet --strict --check helper.manifest", command, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root\"", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/helper\"", phaseTwo, StringComparison.Ordinal);
-        Assert.Contains("sha256sum --strict --check helper.manifest", phaseTwo, StringComparison.Ordinal);
+        Assert.Contains("sha256sum --quiet --strict --check helper.manifest", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/device\"", phaseTwo, StringComparison.Ordinal);
     }
 

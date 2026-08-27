@@ -136,6 +136,11 @@ public sealed class SshPhaseBridge
 {
     private const int MaximumPhaseOneOutputBytes = 64 * 1024;
     private const int MaximumPhaseTwoResultsBytes = 64 * 1024;
+    private const int MaximumSshStartupOutputBytes = 16 * 1024;
+    private const string ProtocolBegin = "ARMADA_C2_PROTOCOL_BEGIN";
+    private const string StageReady = "ARMADA_C2_STAGE_READY";
+    private const string StageComplete = "ARMADA_C2_STAGE_COMPLETE";
+    private const string CleanupComplete = "ARMADA_C2_CLEANUP_COMPLETE";
     private readonly LabHarnessOptions options;
     private readonly ISshProcessInvoker ssh;
     private readonly PublishedHelperManifest manifest;
@@ -209,7 +214,11 @@ public sealed class SshPhaseBridge
         }
 
         await using var process = await ssh.StartAsync(cancellationToken);
-        await process.WriteLineAsync(LabHarnessCommandContract.PhaseTwoBootstrap(helperDigest, remoteRoot), cancellationToken);
+        await process.WriteLineAsync(
+            CreateProtocolCommand(LabHarnessCommandContract.PhaseTwoBootstrap(helperDigest, remoteRoot)),
+            cancellationToken);
+        await process.FlushAsync(cancellationToken);
+        await ReadProtocolBeginAsync(process, cancellationToken);
         await process.WriteLineAsync(input, cancellationToken);
         await process.FlushAsync(cancellationToken);
         var ready = ParseReadyForRevocation(await process.ReadLineAsync(cancellationToken));
@@ -235,11 +244,17 @@ public sealed class SshPhaseBridge
     }
 
     public Task CleanupAsync(CancellationToken cancellationToken) =>
-        RunAsync(
-            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; test ! -e \"$root\"",
+        CleanupCoreAsync(cancellationToken);
+
+    private async Task CleanupCoreAsync(CancellationToken cancellationToken)
+    {
+        var output = await RunAsync(
+            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; if test -e \"$root\" || test -L \"$root\"; then test ! -L \"$root\"; test -d \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; fi; test ! -e \"$root\"; test ! -L \"$root\"; printf '%s\\n' {CleanupComplete}",
             null,
             cancellationToken,
-            MaximumPhaseTwoResultsBytes);
+            MaximumSshStartupOutputBytes);
+        RequireExactOutput(output, CleanupComplete, "WSL cleanup");
+    }
 
     private async Task<string> StageHelperAsync(CancellationToken cancellationToken)
     {
@@ -261,11 +276,18 @@ public sealed class SshPhaseBridge
         payload.Append(Convert.ToBase64String(Encoding.ASCII.GetBytes(manifest.Sha256SumContents)));
         payload.Append('\n');
 
-        await RunAsync(
-            $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}; test ! -L \"$root/helper.manifest\"; chmod 600 \"$root/helper.manifest\"; cd \"$root\"; sha256sum --strict --check helper.manifest",
-            payload.ToString(),
-            cancellationToken,
-            MaximumPhaseTwoResultsBytes);
+        await using var process = await ssh.StartAsync(cancellationToken);
+        await process.WriteLineAsync(
+            CreateProtocolCommand(
+                $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; printf '%s\\n' {StageReady}; {reader}; test ! -L \"$root/helper.manifest\"; chmod 600 \"$root/helper.manifest\"; cd \"$root\"; sha256sum --quiet --strict --check helper.manifest; printf '%s\\n' {StageComplete}"),
+            cancellationToken);
+        await process.FlushAsync(cancellationToken);
+        await ReadStageReadyAsync(process, cancellationToken);
+        await process.WriteAsync(payload.ToString(), cancellationToken);
+        await process.FlushAsync(cancellationToken);
+        var completion = await process.CompleteAsync(cancellationToken);
+        ThrowIfFailed(completion);
+        RequireExactOutput(completion.StandardOutput, StageComplete, "WSL helper staging");
         return digest;
     }
 
@@ -292,7 +314,7 @@ public sealed class SshPhaseBridge
         int maximumOutputBytes)
     {
         await using var process = await ssh.StartAsync(cancellationToken);
-        await process.WriteLineAsync(script, cancellationToken);
+        await process.WriteLineAsync(CreateProtocolCommand(script), cancellationToken);
         if (payload is not null)
         {
             await process.WriteAsync(payload, cancellationToken);
@@ -301,8 +323,76 @@ public sealed class SshPhaseBridge
         await process.FlushAsync(cancellationToken);
         var completion = await process.CompleteAsync(cancellationToken);
         ThrowIfFailed(completion);
-        EnsureBoundedOutput(completion.StandardOutput, maximumOutputBytes);
-        return completion.StandardOutput.Trim();
+        return ExtractProtocolOutput(completion.StandardOutput, maximumOutputBytes).Trim();
+    }
+
+    private static string CreateProtocolCommand(string script) =>
+        $"exec /bin/bash --noprofile --norc -c {ShellQuote($"printf '%s\\n' {ProtocolBegin}; {script}")}";
+
+    private static string ShellQuote(string value) =>
+        $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
+
+    private static async Task ReadStageReadyAsync(ISshPhaseProcess process, CancellationToken cancellationToken)
+    {
+        await ReadProtocolBeginAsync(process, cancellationToken);
+        var line = await process.ReadLineAsync(cancellationToken);
+        if (!string.Equals(line, StageReady, StringComparison.Ordinal))
+        {
+            throw new IOException("WSL helper staging did not return the expected readiness receipt.");
+        }
+    }
+
+    private static async Task ReadProtocolBeginAsync(ISshPhaseProcess process, CancellationToken cancellationToken)
+    {
+        var startup = new StringBuilder();
+        while (true)
+        {
+            var line = await process.ReadLineAsync(cancellationToken);
+            if (string.Equals(line, ProtocolBegin, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            if (line is null)
+            {
+                throw new IOException("SSH closed before the C2 protocol began.");
+            }
+
+            startup.AppendLine(line);
+            EnsureStartupPreamble(startup.ToString());
+        }
+    }
+
+    private static void EnsureStartupPreamble(string output)
+    {
+        EnsureBoundedOutput(output, MaximumSshStartupOutputBytes);
+        if (output.Any(static character => char.IsControl(character) && character is not '\r' and not '\n' and not '\t'))
+        {
+            throw new IOException("SSH startup preamble contains non-text protocol output.");
+        }
+    }
+
+    private static string ExtractProtocolOutput(string output, int maximumProtocolBytes)
+    {
+        var marker = ProtocolBegin + '\n';
+        var markerIndex = output.IndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex < 0 || output.IndexOf(marker, markerIndex + marker.Length, StringComparison.Ordinal) >= 0)
+        {
+            throw new IOException("SSH did not return exactly one C2 protocol boundary.");
+        }
+
+        EnsureStartupPreamble(output[..markerIndex]);
+        var protocol = output[(markerIndex + marker.Length)..];
+        EnsureBoundedOutput(protocol, maximumProtocolBytes);
+        return protocol;
+    }
+
+    private static void RequireExactOutput(string output, string expected, string operation)
+    {
+        if (!string.Equals(output.TrimEnd('\n'), expected, StringComparison.Ordinal))
+        {
+            throw new IOException($"{operation} returned unexpected protocol output.");
+        }
     }
 
     private PublicDeviceFrame ParsePublicFrame(string output)
