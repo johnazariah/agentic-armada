@@ -28,3 +28,14 @@ The remote root name is a generated `armada-c2-<32 lowercase hex>` token, and
 the bootstrap validates its owner/mode and those of `helper` and `device`
 children before use. Helper digests are exactly 64 lower-case hexadecimal
 characters before interpolation into the fixed-token shell script.
+
+## Gated external effects
+
+Only after both execution factors are supplied may the implementation instantiate
+its external resources. In order, it will: create an owner-only local temporary
+root; obtain and cryptographically validate the phase-one public device frame;
+create a P-256 ephemeral CA and IP-SAN server certificate; create, migrate and
+seed the exact generated database; bind the two configured HTTP/2 TLS
+listeners; invoke phase two; write owner-only redacted evidence; dispose the
+listeners; drop the exact database with forced disconnection; and remove the
+temporary root. It has no access to the loopback control-plane health host.
