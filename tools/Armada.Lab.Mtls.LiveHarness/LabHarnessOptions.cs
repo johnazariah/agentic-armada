@@ -103,7 +103,7 @@ public static class LabHarnessCommandContract
         $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
 
     public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot) =>
-        $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two --claim-secret-stdin";
+        $"umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
 
     private static string ValidateHelperDigest(string helperDigest) =>
         HelperDigestPattern.IsMatch(helperDigest)

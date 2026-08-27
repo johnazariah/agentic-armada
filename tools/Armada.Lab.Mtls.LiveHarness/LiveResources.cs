@@ -7,23 +7,43 @@ using Armada.Contracts;
 using Armada.Infrastructure.Postgres;
 using Npgsql;
 using System.Text.RegularExpressions;
+using System.Runtime.Versioning;
 
 namespace Armada.Lab.Mtls.LiveHarness;
 
 // These resources are instantiated exclusively by the --execute path after ExecutionGate.
+[SupportedOSPlatform("macos")]
 public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
 {
     private readonly ECDsa caKey;
     private readonly X509Certificate2 caCertificate;
+    private readonly string caKeyPath;
+    private readonly string serverCertificatePath;
 
-    public EphemeralLabAuthority(IPAddress listenerAddress, TimeSpan lifetime)
+    public EphemeralLabAuthority(IPAddress listenerAddress, TimeSpan lifetime, string verifiedTemporaryRoot)
     {
-        if (!LabHarnessOptions.IsExactUnicast(listenerAddress) ||
-            lifetime <= TimeSpan.Zero || lifetime > TimeSpan.FromDays(31))
+        if (!OperatingSystem.IsMacOS())
         {
-            throw new ArgumentException("Lab authority requires an exact unicast address and bounded certificate lifetime.");
+            throw new PlatformNotSupportedException("The C2 live harness supports macOS only.");
         }
 
+        if (!LabHarnessOptions.IsExactUnicast(listenerAddress) ||
+            lifetime <= TimeSpan.Zero || lifetime > TimeSpan.FromDays(31) ||
+            string.IsNullOrWhiteSpace(verifiedTemporaryRoot) ||
+            !Path.IsPathFullyQualified(verifiedTemporaryRoot))
+        {
+            throw new ArgumentException("Lab authority requires an exact unicast address, bounded certificate lifetime, and verified root.");
+        }
+
+        var root = new DirectoryInfo(verifiedTemporaryRoot);
+        if (!root.Exists || root.LinkTarget is not null ||
+            File.GetUnixFileMode(root.FullName) != (UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute))
+        {
+            throw new IOException("The lab certificate root must be an owner-only non-link directory.");
+        }
+
+        caKeyPath = Path.Combine(root.FullName, "c2-ca-key.pkcs8");
+        serverCertificatePath = Path.Combine(root.FullName, "c2-server.pfx");
         caKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var now = DateTimeOffset.UtcNow;
         var request = new CertificateRequest(
@@ -35,6 +55,20 @@ public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
         request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
         caCertificate = request.CreateSelfSigned(now.AddMinutes(-1), now.Add(lifetime));
         ServerCertificate = CreateServerCertificate(listenerAddress, now, lifetime);
+        try
+        {
+            WriteOwnerOnly(caKeyPath, caKey.ExportPkcs8PrivateKey());
+            WriteOwnerOnly(serverCertificatePath, ServerCertificate.Export(X509ContentType.Pkcs12));
+        }
+        catch
+        {
+            ServerCertificate.Dispose();
+            caCertificate.Dispose();
+            caKey.Dispose();
+            RemoveMaterial(caKeyPath);
+            RemoveMaterial(serverCertificatePath);
+            throw;
+        }
     }
 
     public X509Certificate2 ServerCertificate { get; }
@@ -92,6 +126,23 @@ public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
         ServerCertificate.Dispose();
         caCertificate.Dispose();
         caKey.Dispose();
+        var failures = new List<Exception>();
+        foreach (var path in new[] { caKeyPath, serverCertificatePath })
+        {
+            try
+            {
+                RemoveMaterial(path);
+            }
+            catch (Exception exception)
+            {
+                failures.Add(exception);
+            }
+        }
+
+        if (failures.Count != 0)
+        {
+            throw new AggregateException("Unable to remove ephemeral certificate material.", failures);
+        }
     }
 
     private X509Certificate2 CreateServerCertificate(IPAddress listenerAddress, DateTimeOffset now, TimeSpan lifetime)
@@ -107,6 +158,46 @@ public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
         request.CertificateExtensions.Add(san.Build());
         using var issued = request.Create(caCertificate, now.AddMinutes(-1), now.Add(lifetime), RandomNumberGenerator.GetBytes(16));
         return issued.CopyWithPrivateKey(serverKey);
+    }
+
+    private static void WriteOwnerOnly(string path, byte[] contents)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                bufferSize: 4096,
+                FileOptions.WriteThrough);
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            stream.Write(contents);
+            stream.Flush(flushToDisk: true);
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(contents);
+        }
+
+        if (new FileInfo(path).LinkTarget is not null ||
+            File.GetUnixFileMode(path) != (UnixFileMode.UserRead | UnixFileMode.UserWrite))
+        {
+            throw new IOException("Ephemeral certificate material was not written as an owner-only regular file.");
+        }
+    }
+
+    private static void RemoveMaterial(string path)
+    {
+        if (File.Exists(path))
+        {
+            if (new FileInfo(path).LinkTarget is not null)
+            {
+                throw new IOException("Refusing to delete substituted certificate material.");
+            }
+
+            File.Delete(path);
+        }
     }
 }
 

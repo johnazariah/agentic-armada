@@ -2,19 +2,19 @@ using Armada.Lab.Mtls.LiveHarness;
 
 if (args.Contains("--help", StringComparer.Ordinal))
 {
-    Console.WriteLine("C2 is review-gated. Supply --preflight with explicit options to validate inputs; --execute is intentionally unavailable.");
+    Console.WriteLine("C2 is review-gated. Supply --preflight with explicit options to validate inputs; --execute requires explicit live approval.");
     return;
 }
 
-if (!args.Contains("--preflight", StringComparer.Ordinal) &&
-    !args.Contains("--execute", StringComparer.Ordinal))
+var modes = args.Where(static argument => argument is "--preflight" or "--execute").ToArray();
+if (modes.Length != 1)
 {
-    Console.Error.WriteLine("Refusing to run live lifecycle. Use --preflight after review approval.");
+    Console.Error.WriteLine("Supply exactly one mode: --preflight or --execute.");
     Environment.ExitCode = 2;
     return;
 }
 
-var modeIndex = Array.FindIndex(args, static argument => argument is "--preflight" or "--execute");
+var modeIndex = Array.IndexOf(args, modes[0]);
 var values = args
     .Skip(modeIndex + 1)
     .Chunk(2)
@@ -23,7 +23,7 @@ var values = args
         static pair => (string?)pair[1],
         StringComparer.Ordinal);
 var options = LabHarnessOptions.Parse(values);
-if (args.Contains("--preflight", StringComparer.Ordinal))
+if (modes[0] == "--preflight")
 {
     Console.WriteLine("Preflight input validation passed. No CA, listener, database, claim, SSH, or WSL action was performed.");
     return;

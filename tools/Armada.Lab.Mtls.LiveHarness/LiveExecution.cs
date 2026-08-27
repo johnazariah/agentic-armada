@@ -3,6 +3,7 @@ using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Runtime.Versioning;
+using System.Runtime.ExceptionServices;
 using Armada.Application;
 using Armada.Contracts;
 using Armada.Infrastructure.Postgres;
@@ -60,37 +61,18 @@ public sealed class VerifiedTemporaryRoot : IAsyncDisposable
         EnsureMacOs();
         if (Directory.Exists(path))
         {
-            DeleteVerifiedTree(new DirectoryInfo(path));
+            var directory = new DirectoryInfo(path);
+            if (directory.LinkTarget is not null)
+            {
+                throw new IOException("Refusing to delete a substituted symbolic link.");
+            }
+
+            // This root intentionally contains no persisted material. Refuse rather than
+            // recursively walking a tree that could have been replaced after verification.
+            directory.Delete(recursive: false);
         }
 
         return ValueTask.CompletedTask;
-    }
-
-    private static void DeleteVerifiedTree(DirectoryInfo directory)
-    {
-        if (directory.LinkTarget is not null)
-        {
-            throw new IOException("Refusing to delete a substituted symbolic link.");
-        }
-
-        foreach (var entry in directory.EnumerateFileSystemInfos())
-        {
-            if (entry.LinkTarget is not null)
-            {
-                throw new IOException("Refusing to delete a temporary root containing a symbolic link.");
-            }
-
-            if (entry is DirectoryInfo child)
-            {
-                DeleteVerifiedTree(child);
-            }
-            else
-            {
-                entry.Delete();
-            }
-        }
-
-        directory.Delete();
     }
 
     private static void EnsureMacOs()
@@ -131,10 +113,11 @@ public sealed class LiveHarnessExecution
         DisposablePostgresDatabase? database = null;
         var secret = RandomNumberGenerator.GetBytes(NodeTransportProtocol.MinimumClaimSecretBytes);
         WebApplication? application = null;
+        Exception? operationFailure = null;
         try
         {
             root = VerifiedTemporaryRoot.Create();
-            authority = new EphemeralLabAuthority(options.ListenAddress, TimeSpan.FromHours(1));
+            authority = new EphemeralLabAuthority(options.ListenAddress, TimeSpan.FromHours(1), root.Path);
             database = new DisposablePostgresDatabase(options.PostgresAdminConnection, options.DatabaseName);
             await database.CreateAndMigrateAsync(cancellationToken);
             var claim = new EnrollmentClaimReference(
@@ -150,6 +133,10 @@ public sealed class LiveHarnessExecution
                 options.EvidenceDirectory,
                 await phaseTwo(claim, repository, frame, secret, authority.CaCertificate, cancellationToken),
                 cancellationToken);
+        }
+        catch (Exception exception)
+        {
+            operationFailure = exception;
         }
         finally
         {
@@ -184,7 +171,22 @@ public sealed class LiveHarnessExecution
                     }
                 })
             ]);
-            await cleanup.CleanupAsync(CancellationToken.None);
+            try
+            {
+                await cleanup.CleanupAsync(CancellationToken.None);
+            }
+            catch (Exception cleanupFailure) when (operationFailure is not null)
+            {
+                throw new AggregateException(
+                    "C2 execution and cleanup failed; live proof is invalid.",
+                    operationFailure,
+                    cleanupFailure);
+            }
+        }
+
+        if (operationFailure is not null)
+        {
+            ExceptionDispatchInfo.Capture(operationFailure).Throw();
         }
     }
 
@@ -229,6 +231,7 @@ public sealed class LiveHarnessExecution
 
         var evidence = RedactedEvidence.Create(items);
         var output = new DirectoryInfo(directory);
+        RejectRepositoryDestination(output.FullName);
         if (output.Exists)
         {
             if (output.LinkTarget is not null ||
@@ -252,7 +255,51 @@ public sealed class LiveHarnessExecution
         {
             throw new IOException("Evidence output already exists or is a symbolic link.");
         }
-        await File.WriteAllLinesAsync(path, evidence.Select(item => $"{item.Name}={item.Value}"), cancellationToken);
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        await using (var stream = new FileStream(
+                         path,
+                         FileMode.CreateNew,
+                         FileAccess.Write,
+                         FileShare.None,
+                         bufferSize: 4096,
+                         FileOptions.WriteThrough))
+        await using (var writer = new StreamWriter(stream))
+        {
+            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            await writer.WriteLineAsync(string.Join(
+                Environment.NewLine,
+                evidence.Select(item => $"{item.Name}={item.Value}").Append(string.Empty)));
+            await writer.FlushAsync(cancellationToken);
+        }
+
+        if (new FileInfo(path).LinkTarget is not null ||
+            File.GetUnixFileMode(path) != (UnixFileMode.UserRead | UnixFileMode.UserWrite))
+        {
+            throw new IOException("Evidence output could not be verified as an owner-only regular file.");
+        }
+    }
+
+    private static void RejectRepositoryDestination(string directory)
+    {
+        var candidate = ResolveExistingAncestor(Path.GetFullPath(directory));
+        for (; candidate is not null; candidate = candidate.Parent)
+        {
+            var gitMetadata = Path.Combine(candidate.FullName, ".git");
+            if (Directory.Exists(gitMetadata) || File.Exists(gitMetadata))
+            {
+                throw new IOException("Evidence output must be outside the repository.");
+            }
+        }
+    }
+
+    private static DirectoryInfo? ResolveExistingAncestor(string path)
+    {
+        var candidate = new DirectoryInfo(path);
+        while (!candidate.Exists)
+        {
+            candidate = candidate.Parent
+                ?? throw new IOException("Evidence output has no existing filesystem ancestor.");
+        }
+
+        return candidate.ResolveLinkTarget(returnFinalTarget: true) as DirectoryInfo ?? candidate;
     }
 }

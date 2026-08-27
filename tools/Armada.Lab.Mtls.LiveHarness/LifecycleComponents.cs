@@ -30,15 +30,14 @@ public sealed record LabListenerPlan(string ExactListenIp, int EnrollmentPort, i
 {
     public void Validate()
     {
-        _ = LabHarnessOptions.Parse(new Dictionary<string, string?>
+        if (!IPAddress.TryParse(ExactListenIp, out var address) ||
+            !LabHarnessOptions.IsExactUnicast(address) ||
+            EnrollmentPort is <= 0 or > 65535 ||
+            StreamPort is <= 0 or > 65535 ||
+            EnrollmentPort == StreamPort)
         {
-            ["postgres-admin-connection"] = "not-used-for-listener-validation",
-            ["listen-ip"] = ExactListenIp,
-            ["enrollment-port"] = EnrollmentPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ["stream-port"] = StreamPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
-            ["database"] = "armada_c2_00000000000000000000000000000000",
-            ["evidence-directory"] = Path.GetTempPath()
-        });
+            throw new ArgumentException("Listeners must use one exact unicast IP and distinct valid ports.");
+        }
     }
 }
 

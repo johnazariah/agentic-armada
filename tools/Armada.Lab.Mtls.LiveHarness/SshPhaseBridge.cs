@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography.X509Certificates;
+using System.Text.RegularExpressions;
 using Armada.Application;
 using Armada.Contracts;
 using Proto = Armada.Contracts.V1Alpha1;
@@ -104,11 +105,11 @@ public sealed class SshPhaseBridge(LabHarnessOptions options)
     private async Task<string> StageHelperAsync(CancellationToken cancellationToken)
     {
         var digest = DigestHelper();
-        var script = new StringBuilder($"umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\";");
+        var script = new StringBuilder($"umask 077; root=\"$HOME/.cache/{remoteRoot}\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\";");
         foreach (var file in Directory.EnumerateFiles(options.HelperDirectory, "*", SearchOption.TopDirectoryOnly))
         {
             var name = Path.GetFileName(file);
-            if (name.IndexOfAny(['/', '\\', '\0']) >= 0)
+            if (!PublishedFileNamePattern.IsMatch(name))
             {
                 throw new IOException("Published helper has an unsafe file name.");
             }
@@ -149,4 +150,6 @@ public sealed class SshPhaseBridge(LabHarnessOptions options)
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private static readonly Regex PublishedFileNamePattern =
+        new("^[A-Za-z0-9_.-]+$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 }

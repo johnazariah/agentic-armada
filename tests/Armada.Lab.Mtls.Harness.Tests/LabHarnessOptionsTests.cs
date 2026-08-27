@@ -36,6 +36,12 @@ public sealed class LabHarnessOptionsTests
 
         Assert.Contains(LabHarnessCommandContract.WslDotnet, command, StringComparison.Ordinal);
         Assert.DoesNotContain("johnaz-phd-wsl", command, StringComparison.Ordinal);
+        Assert.EndsWith(" phase-one", command, StringComparison.Ordinal);
+
+        var phaseTwo = LabHarnessCommandContract.PhaseTwoBootstrap(
+            new string('a', 64),
+            "armada-c2_0123456789abcdef0123456789abcdef".Replace('_', '-'));
+        Assert.EndsWith(" phase-two", phaseTwo, StringComparison.Ordinal);
     }
 
     [Theory]

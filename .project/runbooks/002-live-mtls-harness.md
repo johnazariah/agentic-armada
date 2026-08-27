@@ -14,8 +14,8 @@ claim, certificate, or SSH/WSL state.
 
 Live execution additionally requires the `--execute` argument and exact
 `ARMADA_C2_LIVE_APPROVAL=approved`; neither a command argument nor environment
-value alone can cross that gate. The current checkpoint still stops after this
-gate, until the final lifecycle implementation and separate live approval.
+value alone can cross that gate. The implementation is present behind this
+gate, but no live execution is approved by this runbook.
 
 After a separate execution approval, the required ordering is: publish and
 hash the helper; use stdin-only `ssh -T johnaz-phd-wsl` to create the verified
@@ -35,10 +35,12 @@ characters before interpolation into the fixed-token shell script.
 ## Gated external effects
 
 Only after both execution factors are supplied may the implementation instantiate
-its external resources. In order, it will: create an owner-only local temporary
-root; obtain and cryptographically validate the phase-one public device frame;
-create a P-256 ephemeral CA and IP-SAN server certificate; create, migrate and
-seed the exact generated database; bind the two configured HTTP/2 TLS
-listeners; invoke phase two; write owner-only redacted evidence; dispose the
-listeners; drop the exact database with forced disconnection; and remove the
-temporary root. It has no access to the loopback control-plane health host.
+its external resources. In order, it will: stage the helper and obtain and
+cryptographically validate the phase-one public device frame; create an
+owner-only local temporary root containing the P-256 ephemeral CA and IP-SAN
+server material; create, migrate and seed the exact generated database; bind
+the two configured HTTP/2 TLS listeners; invoke phase two; write exclusive
+owner-only redacted evidence outside the repository; dispose the listeners;
+remove the WSL root; drop the exact database with forced disconnection; and
+remove the now-empty local root. It has no access to the loopback control-plane
+health host.
