@@ -1,4 +1,7 @@
 using Armada.Lab.Mtls.LiveHarness;
+using Armada.Application;
+using Armada.Contracts;
+using System.Net;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
@@ -191,6 +194,96 @@ public sealed class LabHarnessOptionsTests
             new DisposablePostgresDatabase("Host=localhost;Database=postgres", name));
     }
 
+    [Fact]
+    public async Task Execution_orders_every_stage_and_cleanup_through_injectable_ports()
+    {
+        var steps = new List<string>();
+        var runtime = new FakeRuntime(steps);
+        var frame = Frame();
+
+        await new LiveHarnessExecution().RunAsync(
+            LabHarnessOptions.Parse(Values()),
+            _ =>
+            {
+                steps.Add("phase-one");
+                return Task.FromResult(frame);
+            },
+            (_, _, _, _, _, _) =>
+            {
+                steps.Add("phase-two");
+                return Task.FromResult<IReadOnlyList<EvidenceItem>>([new("Enrollment", "EnrollmentAccepted")]);
+            },
+            _ =>
+            {
+                steps.Add("wsl-cleanup");
+                return Task.CompletedTask;
+            },
+            runtime,
+            CancellationToken.None);
+
+        Assert.Equal(
+        [
+            "phase-one", "temporary-root", "authority", "database", "migrate", "seed",
+            "registry", "listeners", "phase-two", "evidence", "listeners-cleanup",
+            "wsl-cleanup", "database-drop", "authority-cleanup", "temporary-root-cleanup"
+        ],
+        steps);
+    }
+
+    [Fact]
+    public async Task Execution_aggregates_body_and_cleanup_failures_after_every_cleanup_step()
+    {
+        var steps = new List<string>();
+        var runtime = new FakeRuntime(steps, failDatabaseDrop: true, failListenerDispose: true);
+
+        var failure = await Assert.ThrowsAsync<AggregateException>(() =>
+            new LiveHarnessExecution().RunAsync(
+                LabHarnessOptions.Parse(Values()),
+                _ => Task.FromResult(Frame()),
+                (_, _, _, _, _, _) => throw new InvalidOperationException("phase two failed"),
+                _ =>
+                {
+                    steps.Add("wsl-cleanup");
+                    return Task.CompletedTask;
+                },
+                runtime,
+                CancellationToken.None));
+
+        Assert.Contains(failure.InnerExceptions, exception => exception.Message == "phase two failed");
+        Assert.Equal(
+        [
+            "temporary-root", "authority", "database", "migrate", "seed", "registry",
+            "listeners", "listeners-cleanup", "wsl-cleanup", "database-drop",
+            "authority-cleanup", "temporary-root-cleanup"
+        ],
+        steps);
+    }
+
+    [Fact]
+    public async Task Execution_cleans_remote_state_when_phase_one_validation_fails()
+    {
+        var steps = new List<string>();
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            new LiveHarnessExecution().RunAsync(
+                LabHarnessOptions.Parse(Values()),
+                _ =>
+                {
+                    steps.Add("phase-one");
+                    return Task.FromResult(PublicDeviceFrame.Create(Guid.NewGuid(), 1, [1], [2]));
+                },
+                (_, _, _, _, _, _) => throw new NotSupportedException(),
+                _ =>
+                {
+                    steps.Add("wsl-cleanup");
+                    return Task.CompletedTask;
+                },
+                new FakeRuntime(steps),
+                CancellationToken.None));
+
+        Assert.Equal(["phase-one", "wsl-cleanup"], steps);
+    }
+
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)
     {
         ["postgres-admin-connection"] = "Host=localhost;Database=postgres",
@@ -210,5 +303,116 @@ public sealed class LabHarnessOptionsTests
         var spki = key.ExportSubjectPublicKeyInfo();
         var csr = new CertificateRequest("CN=armada-node", key, HashAlgorithmName.SHA256).CreateSigningRequest();
         return PublicDeviceFrame.Create(Guid.NewGuid(), 1, spki, csr);
+    }
+
+    private sealed class FakeRuntime(List<string> steps, bool failDatabaseDrop = false, bool failListenerDispose = false) : ILiveHarnessRuntime
+    {
+        public ILiveHarnessTemporaryRoot CreateTemporaryRoot()
+        {
+            steps.Add("temporary-root");
+            return new FakeRoot(steps);
+        }
+
+        public ILiveHarnessAuthority CreateAuthority(IPAddress _, TimeSpan __, string ___)
+        {
+            steps.Add("authority");
+            return new FakeAuthority(steps);
+        }
+
+        public ILiveHarnessDatabase CreateDatabase(string _, string __)
+        {
+            steps.Add("database");
+            return new FakeDatabase(steps, failDatabaseDrop);
+        }
+
+        public Task<IAsyncDisposable> StartListenersAsync(
+            LabHarnessOptions _,
+            INodeIdentityRegistry __,
+            ILiveHarnessAuthority ___,
+            CancellationToken ____)
+        {
+            steps.Add("listeners");
+            return Task.FromResult<IAsyncDisposable>(new FakeListener(steps, failListenerDispose));
+        }
+
+        public Task WriteEvidenceAsync(string _, IReadOnlyList<EvidenceItem> __, CancellationToken ___)
+        {
+            steps.Add("evidence");
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeRoot(List<string> steps) : ILiveHarnessTemporaryRoot
+    {
+        public string Path => "/fake";
+
+        public ValueTask DisposeAsync()
+        {
+            steps.Add("temporary-root-cleanup");
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FakeAuthority(List<string> steps) : ILiveHarnessAuthority
+    {
+        public X509Certificate2 CaCertificate => null!;
+        public X509Certificate2 ServerCertificate => null!;
+
+        public void Dispose()
+        {
+            steps.Add("authority-cleanup");
+        }
+    }
+
+    private sealed class FakeDatabase(List<string> steps, bool failDrop) : ILiveHarnessDatabase
+    {
+        public Task CreateAndMigrateAsync(CancellationToken _)
+        {
+            steps.Add("migrate");
+            return Task.CompletedTask;
+        }
+
+        public Task SeedClaimAsync(EnrollmentClaimReference _, ReadOnlyMemory<byte> __, DateTimeOffset ___, CancellationToken ____)
+        {
+            steps.Add("seed");
+            return Task.CompletedTask;
+        }
+
+        public Task DropAsync(CancellationToken _)
+        {
+            steps.Add("database-drop");
+            return failDrop ? Task.FromException(new IOException("drop failed")) : Task.CompletedTask;
+        }
+
+        public INodeIdentityRegistry CreateIdentityRegistry()
+        {
+            steps.Add("registry");
+            return new FakeIdentityRegistry();
+        }
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class FakeListener(List<string> steps, bool failDispose) : IAsyncDisposable
+    {
+        public ValueTask DisposeAsync()
+        {
+            steps.Add("listeners-cleanup");
+            return failDispose
+                ? ValueTask.FromException(new IOException("listener dispose failed"))
+                : ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class FakeIdentityRegistry : INodeIdentityRegistry
+    {
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> ResolveAsync(NodeUid _, long __, string ___, string ____, CancellationToken _____) =>
+            throw new NotSupportedException();
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RegisterAsync(NodeIdentityBinding _, CancellationToken __) =>
+            throw new NotSupportedException();
+
+        public Task<Result<NodeIdentityBinding, NodeIdentityRegistryFailure>> RevokeAsync(NodeUid _, long __, string ___, Guid ____, CancellationToken _____) =>
+            throw new NotSupportedException();
     }
 }

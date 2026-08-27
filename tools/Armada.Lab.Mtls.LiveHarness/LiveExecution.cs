@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Net;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
@@ -13,8 +14,55 @@ using Microsoft.Extensions.Configuration;
 
 namespace Armada.Lab.Mtls.LiveHarness;
 
+public interface ILiveHarnessTemporaryRoot : IAsyncDisposable
+{
+    string Path { get; }
+}
+
+public interface ILiveHarnessAuthority : IDisposable
+{
+    X509Certificate2 CaCertificate { get; }
+
+    X509Certificate2 ServerCertificate { get; }
+}
+
+public interface ILiveHarnessDatabase : IAsyncDisposable
+{
+    Task CreateAndMigrateAsync(CancellationToken cancellationToken);
+
+    Task SeedClaimAsync(
+        EnrollmentClaimReference claim,
+        ReadOnlyMemory<byte> secret,
+        DateTimeOffset expiresAt,
+        CancellationToken cancellationToken);
+
+    Task DropAsync(CancellationToken cancellationToken);
+
+    INodeIdentityRegistry CreateIdentityRegistry();
+}
+
+public interface ILiveHarnessRuntime
+{
+    ILiveHarnessTemporaryRoot CreateTemporaryRoot();
+
+    ILiveHarnessAuthority CreateAuthority(IPAddress listenAddress, TimeSpan lifetime, string temporaryRoot);
+
+    ILiveHarnessDatabase CreateDatabase(string adminConnectionString, string databaseName);
+
+    Task<IAsyncDisposable> StartListenersAsync(
+        LabHarnessOptions options,
+        INodeIdentityRegistry identities,
+        ILiveHarnessAuthority authority,
+        CancellationToken cancellationToken);
+
+    Task WriteEvidenceAsync(
+        string directory,
+        IReadOnlyList<EvidenceItem> items,
+        CancellationToken cancellationToken);
+}
+
 [SupportedOSPlatform("macos")]
-public sealed class VerifiedTemporaryRoot : IAsyncDisposable
+public sealed class VerifiedTemporaryRoot : ILiveHarnessTemporaryRoot
 {
     private readonly string path;
 
@@ -84,54 +132,64 @@ public sealed class VerifiedTemporaryRoot : IAsyncDisposable
     }
 }
 
-[SupportedOSPlatform("macos")]
 public sealed class LiveHarnessExecution
 {
     // This method is reachable only from Program's two-factor execution branch.
+    [SupportedOSPlatform("macos")]
     public async Task RunAsync(
         LabHarnessOptions options,
         Func<CancellationToken, Task<PublicDeviceFrame>> phaseOne,
         Func<EnrollmentClaimReference, INodeIdentityRegistry, PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
         Func<CancellationToken, Task> cleanupRemote,
         CancellationToken cancellationToken)
+        => await RunAsync(options, phaseOne, phaseTwo, cleanupRemote, new MacLiveHarnessRuntime(), cancellationToken);
+
+    public async Task RunAsync(
+        LabHarnessOptions options,
+        Func<CancellationToken, Task<PublicDeviceFrame>> phaseOne,
+        Func<EnrollmentClaimReference, INodeIdentityRegistry, PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
+        Func<CancellationToken, Task> cleanupRemote,
+        ILiveHarnessRuntime runtime,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(phaseOne);
         ArgumentNullException.ThrowIfNull(phaseTwo);
         ArgumentNullException.ThrowIfNull(cleanupRemote);
+        ArgumentNullException.ThrowIfNull(runtime);
 
-        var frame = await phaseOne(cancellationToken);
-        frame.Validate();
-        var digest = Sha256Digest.Parse($"sha256:{Convert.ToHexString(frame.PublicKeySha256).ToLowerInvariant()}");
-        if (digest is Result<Sha256Digest, ContractValidationError>.Failure)
-        {
-            throw new InvalidOperationException("Validated device digest was not canonical.");
-        }
-
-        VerifiedTemporaryRoot? root = null;
-        EphemeralLabAuthority? authority = null;
-        DisposablePostgresDatabase? database = null;
-        var secret = RandomNumberGenerator.GetBytes(NodeTransportProtocol.MinimumClaimSecretBytes);
-        WebApplication? application = null;
+        ILiveHarnessTemporaryRoot? root = null;
+        ILiveHarnessAuthority? authority = null;
+        ILiveHarnessDatabase? database = null;
+        byte[]? secret = null;
+        IAsyncDisposable? listener = null;
         Exception? operationFailure = null;
         try
         {
-            root = VerifiedTemporaryRoot.Create();
-            authority = new EphemeralLabAuthority(options.ListenAddress, TimeSpan.FromHours(1), root.Path);
-            database = new DisposablePostgresDatabase(options.PostgresAdminConnection, options.DatabaseName);
+            var frame = await phaseOne(cancellationToken);
+            frame.Validate();
+            var digest = Sha256Digest.Parse($"sha256:{Convert.ToHexString(frame.PublicKeySha256).ToLowerInvariant()}");
+            if (digest is Result<Sha256Digest, ContractValidationError>.Failure)
+            {
+                throw new InvalidOperationException("Validated device digest was not canonical.");
+            }
+
+            root = runtime.CreateTemporaryRoot();
+            authority = runtime.CreateAuthority(options.ListenAddress, TimeSpan.FromHours(1), root.Path);
+            database = runtime.CreateDatabase(options.PostgresAdminConnection, options.DatabaseName);
             await database.CreateAndMigrateAsync(cancellationToken);
             var claim = new EnrollmentClaimReference(
                 Guid.NewGuid(),
                 new NodeUid(frame.NodeUid),
                 frame.IdentityEpoch,
                 ((Result<Sha256Digest, ContractValidationError>.Success)digest).Value);
+            secret = RandomNumberGenerator.GetBytes(NodeTransportProtocol.MinimumClaimSecretBytes);
             await database.SeedClaimAsync(claim, secret, DateTimeOffset.UtcNow.AddMinutes(10), cancellationToken);
-            var repository = new PostgresNodeEnrollmentStateRepository(database.DataSource);
-            application = BuildServer(options, repository, authority);
-            await application.StartAsync(cancellationToken);
-            await WriteEvidenceAsync(
+            var identities = database.CreateIdentityRegistry();
+            listener = await runtime.StartListenersAsync(options, identities, authority, cancellationToken);
+            await runtime.WriteEvidenceAsync(
                 options.EvidenceDirectory,
-                await phaseTwo(claim, repository, frame, secret, authority.CaCertificate, cancellationToken),
+                await phaseTwo(claim, identities, frame, secret, authority.CaCertificate, cancellationToken),
                 cancellationToken);
         }
         catch (Exception exception)
@@ -140,14 +198,18 @@ public sealed class LiveHarnessExecution
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(secret);
+            if (secret is not null)
+            {
+                CryptographicOperations.ZeroMemory(secret);
+            }
+
             var cleanup = new CleanupCoordinator(
             [
-                ("application", async token =>
+                ("listeners", async token =>
                 {
-                    if (application is not null)
+                    if (listener is not null)
                     {
-                        await application.DisposeAsync();
+                        await listener.DisposeAsync();
                     }
                 }),
                 ("wsl-temporary-root", cleanupRemote),
@@ -190,6 +252,7 @@ public sealed class LiveHarnessExecution
         }
     }
 
+    [SupportedOSPlatform("macos")]
     private static WebApplication BuildServer(
         LabHarnessOptions options,
         PostgresNodeEnrollmentStateRepository repository,
@@ -301,5 +364,49 @@ public sealed class LiveHarnessExecution
         }
 
         return candidate.ResolveLinkTarget(returnFinalTarget: true) as DirectoryInfo ?? candidate;
+    }
+
+    [SupportedOSPlatform("macos")]
+    private sealed class MacLiveHarnessRuntime : ILiveHarnessRuntime
+    {
+        public ILiveHarnessTemporaryRoot CreateTemporaryRoot() => VerifiedTemporaryRoot.Create();
+
+        public ILiveHarnessAuthority CreateAuthority(IPAddress listenAddress, TimeSpan lifetime, string temporaryRoot) =>
+            new EphemeralLabAuthority(listenAddress, lifetime, temporaryRoot);
+
+        public ILiveHarnessDatabase CreateDatabase(string adminConnectionString, string databaseName) =>
+            new DisposablePostgresDatabase(adminConnectionString, databaseName);
+
+        [SupportedOSPlatform("macos")]
+        public async Task<IAsyncDisposable> StartListenersAsync(
+            LabHarnessOptions options,
+            INodeIdentityRegistry identities,
+            ILiveHarnessAuthority authority,
+            CancellationToken cancellationToken)
+        {
+            if (identities is not PostgresNodeEnrollmentStateRepository repository ||
+                authority is not EphemeralLabAuthority ephemeralAuthority)
+            {
+                throw new InvalidOperationException("The macOS runtime requires PostgreSQL identities and an ephemeral lab authority.");
+            }
+
+            var application = BuildServer(options, repository, ephemeralAuthority);
+            try
+            {
+                await application.StartAsync(cancellationToken);
+                return application;
+            }
+            catch
+            {
+                await application.DisposeAsync();
+                throw;
+            }
+        }
+
+        public Task WriteEvidenceAsync(
+            string directory,
+            IReadOnlyList<EvidenceItem> items,
+            CancellationToken cancellationToken) =>
+            LiveHarnessExecution.WriteEvidenceAsync(directory, items, cancellationToken);
     }
 }

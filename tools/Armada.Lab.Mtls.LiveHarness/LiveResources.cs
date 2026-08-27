@@ -13,7 +13,7 @@ namespace Armada.Lab.Mtls.LiveHarness;
 
 // These resources are instantiated exclusively by the --execute path after ExecutionGate.
 [SupportedOSPlatform("macos")]
-public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
+public sealed class EphemeralLabAuthority : ILiveHarnessAuthority, ILabCertificateIssuer
 {
     private readonly ECDsa caKey;
     private readonly X509Certificate2 caCertificate;
@@ -201,7 +201,7 @@ public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
     }
 }
 
-public sealed class DisposablePostgresDatabase : IAsyncDisposable
+public sealed class DisposablePostgresDatabase : ILiveHarnessDatabase
 {
     private static readonly Regex DatabasePattern =
         new("^armada_c2_[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
@@ -222,6 +222,9 @@ public sealed class DisposablePostgresDatabase : IAsyncDisposable
 
     public NpgsqlDataSource DataSource =>
         dataSource ?? throw new InvalidOperationException("The disposable database has not been created.");
+
+    public INodeIdentityRegistry CreateIdentityRegistry() =>
+        new PostgresNodeEnrollmentStateRepository(DataSource);
 
     public async Task CreateAndMigrateAsync(CancellationToken cancellationToken)
     {
