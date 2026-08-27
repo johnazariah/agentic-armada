@@ -151,6 +151,65 @@ public sealed class WslClientProtocolTests
         Assert.Equal(ProbeDisposition.TlsRejected, ProbeResponseInterpreter.Failure(new HttpRequestException()));
     }
 
+    [Fact]
+    public void Envelope_factory_makes_exact_replay_byte_identical_and_changed_replay_payload_only()
+    {
+        var frame = Frame();
+        var originalCsr = frame.CertificateSigningRequest.ToArray();
+        var sequence = ProbeEnvelopeFactory.Create(frame, new DateTimeOffset(2026, 8, 27, 2, 0, 0, TimeSpan.Zero));
+        var exact = Proto.NodeToControl.Parser.ParseFrom(sequence.ExactReplay);
+        var changed = Proto.NodeToControl.Parser.ParseFrom(sequence.ChangedReplay);
+
+        Assert.Equal(sequence.Hello, sequence.ExactReplay);
+        Assert.Equal(exact.ProtocolVersion, changed.ProtocolVersion);
+        Assert.Equal(exact.NodeUid, changed.NodeUid);
+        Assert.Equal(exact.IdentityEpoch, changed.IdentityEpoch);
+        Assert.Equal(exact.StreamEpoch, changed.StreamEpoch);
+        Assert.Equal(exact.Sequence, changed.Sequence);
+        Assert.Equal(exact.MessageId, changed.MessageId);
+        Assert.Equal(exact.CorrelationId, changed.CorrelationId);
+        Assert.Equal(exact.IdempotencyKey, changed.IdempotencyKey);
+        Assert.Equal(exact.SentAt, changed.SentAt);
+        Assert.Equal(exact.PayloadCase, changed.PayloadCase);
+        Assert.Equal(exact.Hello.SchemaVersion, changed.Hello.SchemaVersion);
+        Assert.Equal(exact.Hello.PayloadType, changed.Hello.PayloadType);
+        Assert.NotEqual(exact.Hello.AgentVersion, changed.Hello.AgentVersion);
+
+        var mismatched = ProbeEnvelopeFactory.CreateMismatchedFrame(frame);
+        Assert.Equal(frame.SubjectPublicKeyInfo, mismatched.SubjectPublicKeyInfo);
+        Assert.NotEqual(frame.CertificateSigningRequest, mismatched.CertificateSigningRequest);
+        Assert.Throws<ArgumentException>(mismatched.Validate);
+        Assert.Equal(originalCsr, frame.CertificateSigningRequest);
+    }
+
+    [Fact]
+    public async Task Probe_runner_executes_the_full_sequence_through_an_injectable_offline_transport()
+    {
+        var frame = Frame();
+        var originalCsr = frame.CertificateSigningRequest.ToArray();
+        var trust = TrustBundle();
+        var transport = new OfflineProbeTransport(trust);
+
+        var results = await new WslProbeRunner(transport).RunAsync(
+            frame,
+            trust,
+            new DateTimeOffset(2026, 8, 27, 2, 0, 0, TimeSpan.Zero),
+            CancellationToken.None);
+
+        Assert.Equal(WslProbePlan.Create().Select(static expectation => expectation.Kind), results.Select(static result => result.Kind));
+        Assert.Equal(ProbeDisposition.EnrollmentAccepted, results[0].Disposition);
+        Assert.All(results.Skip(1).Take(5), static result => Assert.Equal(ProbeDisposition.TransportAcknowledged, result.Disposition));
+        Assert.Equal((ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.ReplayConflict), (results[6].Disposition, results[6].RejectionCode));
+        Assert.Equal(ProbeDisposition.TlsRejected, results[7].Disposition);
+        Assert.Equal(ProbeDisposition.ClientRejected, results[8].Disposition);
+        Assert.Equal((ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity), (results[9].Disposition, results[9].RejectionCode));
+        Assert.Equal(originalCsr, frame.CertificateSigningRequest);
+        Assert.Equal(7, transport.Envelopes.Count);
+        Assert.Equal(transport.Envelopes[0], transport.Envelopes[4]);
+        Assert.NotEqual(transport.Envelopes[0], transport.Envelopes[5]);
+        WslProbePlan.EnsureSatisfied(results);
+    }
+
     private static PhaseTwoConfiguration Configuration(string root, DevicePublicFrame frame, byte[]? trustedCa = null) =>
         new(
             root,
@@ -161,10 +220,98 @@ public sealed class WslClientProtocolTests
             RandomNumberGenerator.GetBytes(32),
             trustedCa ?? [1]);
 
+    private static DevicePublicFrame Frame()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        return DevicePublicFrame.Create(
+            Guid.NewGuid(),
+            1,
+            key.ExportSubjectPublicKeyInfo(),
+            new CertificateRequest("CN=offline-probe", key, HashAlgorithmName.SHA256).CreateSigningRequest());
+    }
+
+    private static ProbeTrustBundle TrustBundle()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=offline-probe-ca", key, HashAlgorithmName.SHA256);
+        using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+        return new(certificate.Export(X509ContentType.Cert));
+    }
+
     private static string CreateRoot()
     {
         var root = Path.Combine(AppContext.BaseDirectory, $"wsl-client-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
         return root;
+    }
+
+    private sealed class OfflineProbeTransport(ProbeTrustBundle enrolledTrust) : IProbeTransportClient
+    {
+        private readonly ProbeTrustBundle enrolledTrust = enrolledTrust;
+        public List<byte[]> Envelopes { get; } = [];
+        private int openCount;
+
+        public Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken) =>
+            Task.FromResult(new Proto.EnrollmentResponse
+            {
+                LeafCertificateDer = Google.Protobuf.ByteString.CopyFrom([1]),
+                IssuingCaDer = Google.Protobuf.ByteString.CopyFrom([2])
+            });
+
+        public Task<IProbeDuplexConnection> OpenTransportAsync(
+            Proto.EnrollmentResponse enrolment,
+            ProbeTrustBundle trustBundle,
+            CancellationToken cancellationToken)
+        {
+            openCount++;
+            if (!trustBundle.TrustedCaDer.SequenceEqual(enrolledTrust.TrustedCaDer))
+            {
+                return Task.FromResult<IProbeDuplexConnection>(new OfflineConnection(Envelopes, null, new HttpRequestException()));
+            }
+
+            return Task.FromResult<IProbeDuplexConnection>(openCount switch
+            {
+                1 => new OfflineConnection(
+                    Envelopes,
+                [
+                    Acknowledgement(), Acknowledgement(), Acknowledgement(),
+                    Acknowledgement(), Acknowledgement(), Rejection(Proto.TransportRejectionCode.ReplayConflict)
+                ]),
+                3 => new OfflineConnection(Envelopes, [Rejection(Proto.TransportRejectionCode.RevokedIdentity)]),
+                _ => throw new InvalidOperationException("Unexpected probe connection.")
+            });
+        }
+
+        private static Proto.ControlToNode Acknowledgement() =>
+            new() { TransportAck = new Proto.TransportAck() };
+
+        private static Proto.ControlToNode Rejection(Proto.TransportRejectionCode code) =>
+            new() { TransportRejection = new Proto.TransportRejection { Code = code } };
+    }
+
+    private sealed class OfflineConnection(
+        List<byte[]> envelopes,
+        IEnumerable<Proto.ControlToNode>? responses,
+        Exception? writeException = null) : IProbeDuplexConnection
+    {
+        private readonly Queue<Proto.ControlToNode> responses = responses is null ? [] : new(responses);
+
+        public Task WriteAsync(ReadOnlyMemory<byte> encodedEnvelope, CancellationToken cancellationToken)
+        {
+            if (writeException is not null)
+            {
+                return Task.FromException(writeException);
+            }
+
+            envelopes.Add(encodedEnvelope.ToArray());
+            return Task.CompletedTask;
+        }
+
+        public Task<Proto.ControlToNode> ReadAsync(CancellationToken cancellationToken) =>
+            responses.Count > 0
+                ? Task.FromResult(responses.Dequeue())
+                : Task.FromException<Proto.ControlToNode>(new InvalidOperationException("No response configured."));
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 }

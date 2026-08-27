@@ -28,7 +28,13 @@ switch (args[0])
         var configuration = JsonSerializer.Deserialize<PhaseTwoConfiguration>(input, DevicePublicFrameJson.Options)
             ?? throw new ArgumentException("A phase-two configuration is required.");
         using var client = PhaseTwoClient.Create(configuration);
-        Console.Out.WriteLine(JsonSerializer.Serialize(WslProbePlan.Create(), DevicePublicFrameJson.Options));
+        var results = await new WslProbeRunner(client).RunAsync(
+            configuration.Device,
+            new ProbeTrustBundle(configuration.TrustedCaDer),
+            DateTimeOffset.UtcNow,
+            CancellationToken.None);
+        WslProbePlan.EnsureSatisfied(results);
+        Console.Out.WriteLine(JsonSerializer.Serialize(results, DevicePublicFrameJson.Options));
         break;
     }
     default:

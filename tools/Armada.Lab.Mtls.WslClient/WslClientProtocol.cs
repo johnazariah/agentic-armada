@@ -402,7 +402,49 @@ public static class WslGrpcPaths
     public const string TransportMethod = "Connect";
 }
 
-public sealed class PhaseTwoClient : IDisposable
+public interface IProbeTransportClient
+{
+    Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken);
+
+    Task<IProbeDuplexConnection> OpenTransportAsync(
+        Proto.EnrollmentResponse enrolment,
+        ProbeTrustBundle trustBundle,
+        CancellationToken cancellationToken);
+}
+
+public interface IProbeDuplexConnection : IAsyncDisposable
+{
+    Task WriteAsync(ReadOnlyMemory<byte> encodedEnvelope, CancellationToken cancellationToken);
+
+    Task<Proto.ControlToNode> ReadAsync(CancellationToken cancellationToken);
+}
+
+public sealed record ProbeTrustBundle(byte[] TrustedCaDer)
+{
+    public static ProbeTrustBundle CreateUnrelated()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=armada-probe-untrusted", key, HashAlgorithmName.SHA256);
+        using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
+        return new(certificate.Export(X509ContentType.Cert));
+    }
+
+    public void Validate()
+    {
+        if (TrustedCaDer is null || TrustedCaDer.Length == 0)
+        {
+            throw new ArgumentException("A trust bundle must contain a CA certificate.");
+        }
+
+        using var certificate = X509CertificateLoader.LoadCertificate(TrustedCaDer);
+        if (!certificate.SubjectName.RawData.SequenceEqual(certificate.IssuerName.RawData))
+        {
+            throw new ArgumentException("The probe trust bundle must contain a root certificate.");
+        }
+    }
+}
+
+public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
 {
     private readonly PhaseTwoConfiguration configuration;
     private readonly ECDsa privateKey;
@@ -460,17 +502,19 @@ public sealed class PhaseTwoClient : IDisposable
         return await call.ResponseAsync.ConfigureAwait(false);
     }
 
-    public TransportProbeConnection OpenTransport(Proto.EnrollmentResponse enrolment)
+    public TransportProbeConnection OpenTransport(Proto.EnrollmentResponse enrolment, ProbeTrustBundle trustBundle)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(enrolment);
+        ArgumentNullException.ThrowIfNull(trustBundle);
+        trustBundle.Validate();
         if (enrolment.LeafCertificateDer.IsEmpty)
         {
             throw new ArgumentException("The enrolment response has no client certificate.", nameof(enrolment));
         }
 
         var certificate = X509CertificateLoader.LoadCertificate(enrolment.LeafCertificateDer.Span).CopyWithPrivateKey(privateKey);
-        var channel = CreateChannel(configuration.TransportEndpoint, configuration.TrustedCaDer, certificate);
+        var channel = CreateChannel(configuration.TransportEndpoint, trustBundle.TrustedCaDer, certificate);
         try
         {
             var call = channel.CreateCallInvoker().AsyncDuplexStreamingCall(
@@ -532,6 +576,15 @@ public sealed class PhaseTwoClient : IDisposable
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(disposed, this);
 
+    Task<IProbeDuplexConnection> IProbeTransportClient.OpenTransportAsync(
+        Proto.EnrollmentResponse enrolment,
+        ProbeTrustBundle trustBundle,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult<IProbeDuplexConnection>(OpenTransport(enrolment, trustBundle));
+    }
+
     private static class RawGrpcMethods
     {
         internal static readonly Method<RawFrame, Proto.EnrollmentResponse> Enrollment = new(
@@ -562,7 +615,7 @@ public sealed class PhaseTwoClient : IDisposable
     }
 }
 
-public sealed class TransportProbeConnection : IAsyncDisposable
+public sealed class TransportProbeConnection : IProbeDuplexConnection
 {
     private readonly GrpcChannel channel;
     private readonly X509Certificate2 certificate;
@@ -578,13 +631,21 @@ public sealed class TransportProbeConnection : IAsyncDisposable
         this.call = call;
     }
 
-    public Task WriteAsync(Proto.NodeToControl message) =>
-        call.RequestStream.WriteAsync(new RawFrame(message.ToByteArray()));
+    public Task WriteAsync(ReadOnlyMemory<byte> encodedEnvelope, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return call.RequestStream.WriteAsync(new RawFrame(encodedEnvelope.ToArray()));
+    }
 
-    public Task<bool> MoveNextAsync(CancellationToken cancellationToken) =>
-        call.ResponseStream.MoveNext(cancellationToken);
+    public async Task<Proto.ControlToNode> ReadAsync(CancellationToken cancellationToken)
+    {
+        if (!await call.ResponseStream.MoveNext(cancellationToken).ConfigureAwait(false))
+        {
+            throw new RpcException(new Status(StatusCode.Unavailable, "The transport stream closed without a response."));
+        }
 
-    public Proto.ControlToNode Current => call.ResponseStream.Current;
+        return call.ResponseStream.Current;
+    }
 
     public async ValueTask DisposeAsync()
     {
@@ -635,6 +696,243 @@ public static class WslProbePlan
         new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ClientRejected),
         new(ProbeKind.PostRevocation, ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity)
     ];
+
+    public static void EnsureSatisfied(IReadOnlyList<ProbeExecutionResult> results)
+    {
+        ArgumentNullException.ThrowIfNull(results);
+        var expected = Create();
+        if (results.Count != expected.Length)
+        {
+            throw new InvalidOperationException("The probe sequence did not produce every required result.");
+        }
+
+        for (var index = 0; index < expected.Length; index++)
+        {
+            if (results[index].Kind != expected[index].Kind ||
+                results[index].Disposition != expected[index].Disposition ||
+                results[index].RejectionCode != expected[index].RejectionCode)
+            {
+                throw new InvalidOperationException($"Probe '{expected[index].Kind}' did not produce its required result.");
+            }
+        }
+    }
+}
+
+public sealed record ProbeEnvelopeSequence(
+    byte[] Hello,
+    byte[] Snapshot,
+    byte[] Inventory,
+    byte[] Health,
+    byte[] ExactReplay,
+    byte[] ChangedReplay,
+    byte[] PostRevocation);
+
+public static class ProbeEnvelopeFactory
+{
+    public static ProbeEnvelopeSequence Create(DevicePublicFrame device, DateTimeOffset sentAt)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        device.Validate();
+        var timestamp = Timestamp.FromDateTime(sentAt.UtcDateTime);
+        var hello = Envelope(device, timestamp, "hello", 1, message =>
+            message.Hello = new Proto.Hello
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                AgentVersion = "wsl-probe/1",
+                PayloadType = NodeTransportProtocol.HelloPayloadType
+            });
+        var snapshot = Envelope(device, timestamp, "snapshot", 2, message =>
+            message.FullReconciliationSnapshot = new Proto.FullReconciliationSnapshot
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                Snapshot = ByteString.CopyFrom([1]),
+                PayloadType = NodeTransportProtocol.FullReconciliationSnapshotPayloadType
+            });
+        var inventory = Envelope(device, timestamp, "inventory", 3, message =>
+        {
+            var observed = new Proto.InventoryObservation
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                PayloadType = NodeTransportProtocol.InventoryObservationPayloadType
+            };
+            observed.Inventory = new Proto.EnrollmentInventory();
+            observed.Inventory.Facts.Add("platform", "wsl");
+            observed.Inventory.Capabilities.Add("probe");
+            message.InventoryObservation = observed;
+        });
+        var health = Envelope(device, timestamp, "health", 4, message =>
+            message.HealthObservation = new Proto.HealthObservation
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                StorageAvailable = true,
+                PayloadType = NodeTransportProtocol.HealthObservationPayloadType
+            });
+        var exactReplay = hello;
+        var changedReplay = Envelope(device, timestamp, "hello", 1, message =>
+            message.Hello = new Proto.Hello
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                AgentVersion = "wsl-probe/changed",
+                PayloadType = NodeTransportProtocol.HelloPayloadType
+            });
+        var postRevocation = Envelope(device, timestamp, "post-revocation", 5, message =>
+            message.HealthObservation = new Proto.HealthObservation
+            {
+                SchemaVersion = NodeTransportProtocol.Version,
+                StorageAvailable = false,
+                PayloadType = NodeTransportProtocol.HealthObservationPayloadType
+            });
+
+        return new(hello, snapshot, inventory, health, exactReplay, changedReplay, postRevocation);
+    }
+
+    public static DevicePublicFrame CreateMismatchedFrame(DevicePublicFrame enrolled)
+    {
+        ArgumentNullException.ThrowIfNull(enrolled);
+        enrolled.Validate();
+        using var unrelatedKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var unrelatedCsr = new CertificateRequest(
+            "CN=armada-probe-unrelated",
+            unrelatedKey,
+            HashAlgorithmName.SHA256).CreateSigningRequest();
+        return DevicePublicFrame.Create(
+            enrolled.NodeUid,
+            enrolled.IdentityEpoch,
+            enrolled.SubjectPublicKeyInfo,
+            unrelatedCsr);
+    }
+
+    private static byte[] Envelope(
+        DevicePublicFrame device,
+        Timestamp timestamp,
+        string id,
+        long sequence,
+        Action<Proto.NodeToControl> setPayload)
+    {
+        var message = new Proto.NodeToControl
+        {
+            ProtocolVersion = NodeTransportProtocol.Version,
+            NodeUid = device.NodeUid.ToString("D"),
+            IdentityEpoch = device.IdentityEpoch,
+            StreamEpoch = 1,
+            Sequence = sequence,
+            MessageId = DeterministicGuid(device.NodeUid, id).ToString("D"),
+            CorrelationId = DeterministicGuid(device.NodeUid, "correlation").ToString("D"),
+            IdempotencyKey = $"wsl-probe-{id}",
+            SentAt = timestamp.Clone()
+        };
+        setPayload(message);
+        return message.ToByteArray();
+    }
+
+    private static Guid DeterministicGuid(Guid nodeUid, string purpose)
+    {
+        var input = System.Text.Encoding.UTF8.GetBytes($"{nodeUid:D}|{purpose}");
+        var hash = SHA256.HashData(input);
+        return new Guid(hash.AsSpan(0, 16));
+    }
+}
+
+public sealed record ProbeExecutionResult(
+    ProbeKind Kind,
+    ProbeDisposition Disposition,
+    Proto.TransportRejectionCode? RejectionCode = null);
+
+public sealed class WslProbeRunner(IProbeTransportClient client)
+{
+    private readonly IProbeTransportClient client = client ?? throw new ArgumentNullException(nameof(client));
+
+    public async Task<ImmutableArray<ProbeExecutionResult>> RunAsync(
+        DevicePublicFrame device,
+        ProbeTrustBundle enrolledTrustBundle,
+        DateTimeOffset sentAt,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(device);
+        ArgumentNullException.ThrowIfNull(enrolledTrustBundle);
+        device.Validate();
+        enrolledTrustBundle.Validate();
+
+        var results = ImmutableArray.CreateBuilder<ProbeExecutionResult>();
+        Proto.EnrollmentResponse enrolment;
+        try
+        {
+            enrolment = await client.EnrolAsync(cancellationToken).ConfigureAwait(false);
+            results.Add(new(ProbeKind.Enrollment, ProbeResponseInterpreter.Enrollment(enrolment)));
+        }
+        catch (Exception exception)
+        {
+            results.Add(new(ProbeKind.Enrollment, ProbeResponseInterpreter.Failure(exception)));
+            return results.ToImmutable();
+        }
+
+        var envelopes = ProbeEnvelopeFactory.Create(device, sentAt);
+        await using (var connection = await client.OpenTransportAsync(enrolment, enrolledTrustBundle, cancellationToken).ConfigureAwait(false))
+        {
+            await SendAndRecordAsync(ProbeKind.Hello, envelopes.Hello, connection, results, cancellationToken).ConfigureAwait(false);
+            await SendAndRecordAsync(ProbeKind.Snapshot, envelopes.Snapshot, connection, results, cancellationToken).ConfigureAwait(false);
+            await SendAndRecordAsync(ProbeKind.Inventory, envelopes.Inventory, connection, results, cancellationToken).ConfigureAwait(false);
+            await SendAndRecordAsync(ProbeKind.Health, envelopes.Health, connection, results, cancellationToken).ConfigureAwait(false);
+            await SendAndRecordAsync(ProbeKind.ExactReplay, envelopes.ExactReplay, connection, results, cancellationToken).ConfigureAwait(false);
+            await SendAndRecordAsync(ProbeKind.ChangedReplay, envelopes.ChangedReplay, connection, results, cancellationToken).ConfigureAwait(false);
+        }
+
+        var wrongTrustBundle = ProbeTrustBundle.CreateUnrelated();
+        try
+        {
+            await using var wrongCaConnection = await client
+                .OpenTransportAsync(enrolment, wrongTrustBundle, cancellationToken)
+                .ConfigureAwait(false);
+            await SendAndRecordAsync(ProbeKind.WrongCertificateAuthority, envelopes.Hello, wrongCaConnection, results, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            results.Add(new(ProbeKind.WrongCertificateAuthority, ProbeResponseInterpreter.Failure(exception)));
+        }
+
+        try
+        {
+            ProbeEnvelopeFactory.CreateMismatchedFrame(device).Validate();
+            results.Add(new(ProbeKind.MismatchedCsrKey, ProbeDisposition.EnrollmentAccepted));
+        }
+        catch (ArgumentException)
+        {
+            results.Add(new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ClientRejected));
+        }
+
+        await using (var revokedConnection = await client.OpenTransportAsync(enrolment, enrolledTrustBundle, cancellationToken).ConfigureAwait(false))
+        {
+            await SendAndRecordAsync(
+                ProbeKind.PostRevocation,
+                envelopes.PostRevocation,
+                revokedConnection,
+                results,
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        return results.ToImmutable();
+    }
+
+    private static async Task SendAndRecordAsync(
+        ProbeKind kind,
+        byte[] envelope,
+        IProbeDuplexConnection connection,
+        ImmutableArray<ProbeExecutionResult>.Builder results,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await connection.WriteAsync(envelope, cancellationToken).ConfigureAwait(false);
+            var response = await connection.ReadAsync(cancellationToken).ConfigureAwait(false);
+            var observed = ProbeResponseInterpreter.Transport(response);
+            results.Add(new(kind, observed.Disposition, observed.RejectionCode));
+        }
+        catch (Exception exception)
+        {
+            results.Add(new(kind, ProbeResponseInterpreter.Failure(exception)));
+        }
+    }
 }
 
 public static class ProbeResponseInterpreter
