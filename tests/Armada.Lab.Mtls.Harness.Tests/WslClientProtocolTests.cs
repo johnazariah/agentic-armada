@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Net;
 using Armada.Lab.Mtls.WslClient;
 using Proto = Armada.Contracts.V1Alpha1;
 
@@ -86,6 +87,43 @@ public sealed class WslClientProtocolTests
         {
             Directory.Delete(root, recursive: true);
         }
+    }
+
+    [Theory]
+    [InlineData("https://controller.example:8443", "https://controller.example:9443")]
+    [InlineData("https://192.0.2.20:8443", "https://192.0.2.21:9443")]
+    [InlineData("https://224.0.0.1:8443", "https://224.0.0.1:9443")]
+    [InlineData("https://127.0.0.1:8443", "https://127.0.0.1:9443")]
+    public void Phase_two_requires_same_exact_non_loopback_unicast_ip_hosts(string enrollmentEndpoint, string transportEndpoint)
+    {
+        var configuration = new PhaseTwoConfiguration(
+            "/",
+            Frame(),
+            new Uri(enrollmentEndpoint),
+            new Uri(transportEndpoint),
+            Guid.NewGuid().ToString("D"),
+            RandomNumberGenerator.GetBytes(32),
+            [1]);
+
+        Assert.Throws<ArgumentException>(configuration.Validate);
+    }
+
+    [Fact]
+    public void Server_validation_requires_custom_root_trust_server_auth_eku_and_exact_ip_san()
+    {
+        using var authorityKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var authority = CreateAuthority(authorityKey);
+        using var otherAuthorityKey = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        using var otherAuthority = CreateAuthority(otherAuthorityKey);
+        using var validServer = CreateServer(authority, "192.0.2.20", includeServerAuthentication: true);
+        using var wrongSan = CreateServer(authority, "192.0.2.21", includeServerAuthentication: true);
+        using var missingEku = CreateServer(authority, "192.0.2.20", includeServerAuthentication: false);
+
+        Assert.True(WslTlsValidation.IsTrustedServerCertificate(validServer, authority, IPAddress.Parse("192.0.2.20")));
+        Assert.False(WslTlsValidation.IsTrustedServerCertificate(validServer, otherAuthority, IPAddress.Parse("192.0.2.20")));
+        Assert.False(WslTlsValidation.IsTrustedServerCertificate(validServer, authority, IPAddress.Parse("192.0.2.21")));
+        Assert.False(WslTlsValidation.IsTrustedServerCertificate(wrongSan, authority, IPAddress.Parse("192.0.2.20")));
+        Assert.False(WslTlsValidation.IsTrustedServerCertificate(missingEku, authority, IPAddress.Parse("192.0.2.20")));
     }
 
     [Fact]
@@ -256,8 +294,8 @@ public sealed class WslClientProtocolTests
         new(
             root,
             frame,
-            new Uri("https://127.0.0.1:8443"),
-            new Uri("https://127.0.0.1:9443"),
+            new Uri("https://192.0.2.20:8443"),
+            new Uri("https://192.0.2.20:9443"),
             Guid.NewGuid().ToString("D"),
             RandomNumberGenerator.GetBytes(32),
             trustedCa ?? [1]);
@@ -278,6 +316,37 @@ public sealed class WslClientProtocolTests
         var request = new CertificateRequest("CN=offline-probe-ca", key, HashAlgorithmName.SHA256);
         using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-1), DateTimeOffset.UtcNow.AddMinutes(1));
         return new(certificate.Export(X509ContentType.Cert));
+    }
+
+    private static X509Certificate2 CreateAuthority(ECDsa key)
+    {
+        var request = new CertificateRequest("CN=offline-root", key, HashAlgorithmName.SHA256);
+        request.CertificateExtensions.Add(new X509BasicConstraintsExtension(true, false, 0, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.KeyCertSign | X509KeyUsageFlags.CrlSign, true));
+        request.CertificateExtensions.Add(new X509SubjectKeyIdentifierExtension(request.PublicKey, false));
+        return request.CreateSelfSigned(
+            new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero));
+    }
+
+    private static X509Certificate2 CreateServer(X509Certificate2 authority, string ipAddress, bool includeServerAuthentication)
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var request = new CertificateRequest("CN=offline-server", key, HashAlgorithmName.SHA256);
+        var san = new SubjectAlternativeNameBuilder();
+        san.AddIpAddress(IPAddress.Parse(ipAddress));
+        request.CertificateExtensions.Add(san.Build());
+        if (includeServerAuthentication)
+        {
+            var usages = new OidCollection { new("1.3.6.1.5.5.7.3.1") };
+            request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(usages, true));
+        }
+
+        return request.Create(
+            authority,
+            new DateTimeOffset(2020, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            new DateTimeOffset(2035, 1, 1, 0, 0, 0, TimeSpan.Zero),
+            [1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     private static string CreateRoot()

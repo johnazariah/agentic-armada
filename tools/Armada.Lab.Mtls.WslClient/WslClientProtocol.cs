@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using System.Formats.Asn1;
+using System.Net;
 using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography;
@@ -385,9 +386,16 @@ public sealed record PhaseTwoConfiguration(
             throw new ArgumentException("Phase two requires complete stdin-provided TLS and enrolment configuration.");
         }
 
+        var enrollmentAddress = WslTlsValidation.RequireExactUnicastLiteral(EnrollmentEndpoint);
+        var transportAddress = WslTlsValidation.RequireExactUnicastLiteral(TransportEndpoint);
+        if (!enrollmentAddress.Equals(transportAddress))
+        {
+            throw new ArgumentException("Enrollment and transport endpoints must use the same exact unicast IP address.");
+        }
+
         if (Device is null)
         {
-        throw new ArgumentException("Phase two requires a public device frame.");
+            throw new ArgumentException("Phase two requires a public device frame.");
         }
 
         Device.Validate();
@@ -562,6 +570,7 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
 
     private static GrpcChannel CreateChannel(Uri endpoint, byte[] trustedCaDer, X509Certificate2? clientCertificate)
     {
+        var endpointAddress = WslTlsValidation.RequireExactUnicastLiteral(endpoint);
         var authority = X509CertificateLoader.LoadCertificate(trustedCaDer);
         var handler = new HttpClientHandler
         {
@@ -572,11 +581,8 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
                     return false;
                 }
 
-                using var chain = new X509Chain();
-                chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
-                chain.ChainPolicy.CustomTrustStore.Add(authority);
-                chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
-                return chain.Build(X509CertificateLoader.LoadCertificate(certificate.GetRawCertData()));
+                using var serverCertificate = X509CertificateLoader.LoadCertificate(certificate.GetRawCertData());
+                return WslTlsValidation.IsTrustedServerCertificate(serverCertificate, authority, endpointAddress);
             }
         };
         if (clientCertificate is not null)
@@ -634,6 +640,104 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
                 context.Complete();
             },
             static context => new MessageParser<T>(() => new T()).ParseFrom(context.PayloadAsNewBuffer()));
+    }
+}
+
+public static class WslTlsValidation
+{
+    private const string ServerAuthenticationOid = "1.3.6.1.5.5.7.3.1";
+    private const string SubjectAlternativeNameOid = "2.5.29.17";
+
+    public static IPAddress RequireExactUnicastLiteral(Uri endpoint)
+    {
+        ArgumentNullException.ThrowIfNull(endpoint);
+        if (!IPAddress.TryParse(endpoint.DnsSafeHost, out var address) ||
+            !IsUnicast(address))
+        {
+            throw new ArgumentException("TLS endpoints must use an exact unicast IP literal.", nameof(endpoint));
+        }
+
+        return address;
+    }
+
+    public static bool IsTrustedServerCertificate(
+        X509Certificate2 serverCertificate,
+        X509Certificate2 trustedRoot,
+        IPAddress endpointAddress)
+    {
+        ArgumentNullException.ThrowIfNull(serverCertificate);
+        ArgumentNullException.ThrowIfNull(trustedRoot);
+        ArgumentNullException.ThrowIfNull(endpointAddress);
+
+        using var chain = new X509Chain();
+        chain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
+        chain.ChainPolicy.CustomTrustStore.Add(trustedRoot);
+        chain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
+        return chain.Build(serverCertificate) &&
+            HasServerAuthenticationEku(serverCertificate) &&
+            HasIpSubjectAlternativeName(serverCertificate, endpointAddress);
+    }
+
+    private static bool IsUnicast(IPAddress address)
+    {
+        if (IPAddress.Any.Equals(address) || IPAddress.IPv6Any.Equals(address) ||
+            IPAddress.IPv6None.Equals(address) || IPAddress.IsLoopback(address))
+        {
+            return false;
+        }
+
+        if (address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+        {
+            var bytes = address.GetAddressBytes();
+            return bytes[0] < 224 &&
+                !(bytes[0] == 255 && bytes[1] == 255 && bytes[2] == 255 && bytes[3] == 255);
+        }
+
+        return !address.IsIPv6Multicast;
+    }
+
+    private static bool HasServerAuthenticationEku(X509Certificate2 certificate) =>
+        certificate.Extensions
+            .OfType<X509EnhancedKeyUsageExtension>()
+            .SelectMany(static extension => extension.EnhancedKeyUsages.Cast<Oid>())
+            .Any(static oid => oid.Value == ServerAuthenticationOid);
+
+    private static bool HasIpSubjectAlternativeName(X509Certificate2 certificate, IPAddress expectedAddress)
+    {
+        var extension = certificate.Extensions[SubjectAlternativeNameOid];
+        if (extension is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            var reader = new AsnReader(extension.RawData, AsnEncodingRules.DER);
+            var names = reader.ReadSequence();
+            while (names.HasData)
+            {
+                var tag = names.PeekTag();
+                if (tag.HasSameClassAndValue(new Asn1Tag(TagClass.ContextSpecific, 7)))
+                {
+                    var address = new IPAddress(names.ReadOctetString(tag));
+                    if (address.Equals(expectedAddress))
+                    {
+                        return true;
+                    }
+                }
+                else
+                {
+                    names.ReadEncodedValue();
+                }
+            }
+
+            reader.ThrowIfNotEmpty();
+            return false;
+        }
+        catch (AsnContentException)
+        {
+            return false;
+        }
     }
 }
 
