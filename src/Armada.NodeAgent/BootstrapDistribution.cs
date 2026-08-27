@@ -217,9 +217,19 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
         int depth,
         ICollection<BootstrapFileSystemEntry> entries)
     {
-        foreach (var entry in directory.EnumerateFileSystemInfos().OrderBy(static entry => entry.Name, StringComparer.Ordinal))
+        var directEntries = new List<FileSystemInfo>();
+        foreach (var entry in directory.EnumerateFileSystemInfos())
         {
-            if (entries.Count >= maximumEntries || (maximumDepth >= 0 && depth >= maximumDepth))
+            if (directEntries.Count >= maximumEntries || entries.Count >= maximumEntries)
+            {
+                throw new BootstrapInputTooLargeException("The bootstrap package tree exceeds its entry or depth limit.");
+            }
+            directEntries.Add(entry);
+        }
+
+        foreach (var entry in directEntries.OrderBy(static entry => entry.Name, StringComparer.Ordinal))
+        {
+            if (maximumDepth >= 0 && depth >= maximumDepth)
             {
                 throw new BootstrapInputTooLargeException("The bootstrap package tree exceeds its entry or depth limit.");
             }
@@ -265,7 +275,7 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
 
     private static uint ReadLinuxMode(string path)
     {
-        if (LStatLinux(path, out var status) != 0)
+        if (Statx(AtFileSystemRoot, path, AtSymlinkNoFollow, StatxType, out var status) != 0)
         {
             throw new IOException($"Bootstrap input could not be inspected: {path}.");
         }
@@ -283,7 +293,7 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
 
     private static uint ReadLinuxMode(SafeFileHandle handle)
     {
-        if (FStatLinux(handle.DangerousGetHandle().ToInt32(), out var status) != 0)
+        if (Statx(handle.DangerousGetHandle().ToInt32(), string.Empty, AtEmptyPath, StatxType, out var status) != 0)
         {
             throw new IOException("Bootstrap input could not be inspected.");
         }
@@ -301,32 +311,59 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
 
     private const int OpenReadOnly = 0;
     private static int NoFollowFlag => OperatingSystem.IsMacOS() ? 0x100 : 0x20000;
+    private const int AtFileSystemRoot = -100;
+    private const int AtSymlinkNoFollow = 0x100;
+    private const int AtEmptyPath = 0x1000;
+    private const uint StatxType = 0x1;
     private const uint FileTypeMask = 0xF000;
     private const uint RegularFile = 0x8000;
 
     [StructLayout(LayoutKind.Sequential)]
-    private struct LinuxStat
+    private struct LinuxStatx
     {
-        public ulong Device;
-        public ulong Inode;
-        public ulong Links;
-        public uint Mode;
+        public uint Mask;
+        public uint BlockSize;
+        public ulong Attributes;
+        public uint Links;
         public uint UserId;
         public uint GroupId;
-        public int Padding;
-        public ulong DeviceType;
+        public ushort Mode;
+        public ushort Spare0;
+        public ulong Inode;
         public long Size;
-        public long BlockSize;
         public long Blocks;
-        public long AccessSeconds;
-        public long AccessNanoseconds;
-        public long ModificationSeconds;
-        public long ModificationNanoseconds;
-        public long ChangeSeconds;
-        public long ChangeNanoseconds;
-        public long Reserved0;
-        public long Reserved1;
-        public long Reserved2;
+        public ulong AttributesMask;
+        public LinuxTimestamp AccessTime;
+        public LinuxTimestamp BirthTime;
+        public LinuxTimestamp ChangeTime;
+        public LinuxTimestamp ModificationTime;
+        public uint DeviceMajor;
+        public uint DeviceMinor;
+        public uint RootDeviceMajor;
+        public uint RootDeviceMinor;
+        public ulong MountId;
+        public uint DirectIoMemoryAlignment;
+        public uint DirectIoOffsetAlignment;
+        public ulong Spare1;
+        public ulong Spare2;
+        public ulong Spare3;
+        public ulong Spare4;
+        public ulong Spare5;
+        public ulong Spare6;
+        public ulong Spare7;
+        public ulong Spare8;
+        public ulong Spare9;
+        public ulong Spare10;
+        public ulong Spare11;
+        public ulong Spare12;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LinuxTimestamp
+    {
+        public long Seconds;
+        public uint Nanoseconds;
+        public int Reserved;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -358,14 +395,11 @@ public sealed class PhysicalBootstrapFileSystem : IBootstrapFileSystem
         public long Spare1;
     }
 
-    [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
-    private static extern int LStatLinux(string path, out LinuxStat status);
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    private static extern int Statx(int directoryDescriptor, string path, int flags, uint mask, out LinuxStatx status);
 
     [DllImport("libc", EntryPoint = "lstat", SetLastError = true)]
     private static extern int LStatDarwin(string path, out DarwinStat status);
-
-    [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
-    private static extern int FStatLinux(int descriptor, out LinuxStat status);
 
     [DllImport("libc", EntryPoint = "fstat", SetLastError = true)]
     private static extern int FStatDarwin(int descriptor, out DarwinStat status);
