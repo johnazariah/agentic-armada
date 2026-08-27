@@ -29,6 +29,6 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Armada.NodeAgent\Armada.NodeAgent.csproj" />
     <ProjectReference Include="..\..\src\Armada.Contracts\Armada.Contracts.csproj" />
+    <ProjectReference Include="..\..\tools\Armada.NodeAgent.Bootstrap\Armada.NodeAgent.Bootstrap.csproj" />
   </ItemGroup>
-
 </Project>
