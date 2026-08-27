@@ -404,7 +404,7 @@ public static class WslGrpcPaths
 
 public interface IProbeTransportClient
 {
-    Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken);
+    Task<Proto.EnrollmentResponse> EnrolAsync(DevicePublicFrame device, CancellationToken cancellationToken);
 
     Task<IProbeDuplexConnection> OpenTransportAsync(
         Proto.EnrollmentResponse enrolment,
@@ -417,6 +417,18 @@ public interface IProbeDuplexConnection : IAsyncDisposable
     Task WriteAsync(ReadOnlyMemory<byte> encodedEnvelope, CancellationToken cancellationToken);
 
     Task<Proto.ControlToNode> ReadAsync(CancellationToken cancellationToken);
+}
+
+public sealed record ReadyForRevocation(string State, int CompletedReportCount, Proto.TransportRejectionCode ReplayRejectionCode)
+{
+    public const string ReadyState = "ready-for-revocation";
+}
+
+public interface IRevocationPhase
+{
+    Task PublishReadyAsync(ReadyForRevocation ready, CancellationToken cancellationToken);
+
+    Task WaitForConfirmationAsync(ReadyForRevocation ready, CancellationToken cancellationToken);
 }
 
 public sealed record ProbeTrustBundle(byte[] TrustedCaDer)
@@ -477,19 +489,24 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
         }
     }
 
-    public async Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken)
+    public Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken) =>
+        EnrolAsync(configuration.Device, cancellationToken);
+
+    public async Task<Proto.EnrollmentResponse> EnrolAsync(DevicePublicFrame device, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(device);
+        device.Validate();
         var request = new Proto.EnrollmentRequest
         {
             ProtocolVersion = NodeTransportProtocol.Version,
             ClaimId = configuration.ClaimId,
             ClaimSecret = ByteString.CopyFrom(configuration.ClaimSecret),
-            NodeUid = configuration.Device.NodeUid.ToString("D"),
-            IdentityEpoch = configuration.Device.IdentityEpoch,
-            DevicePublicKey = ByteString.CopyFrom(configuration.Device.SubjectPublicKeyInfo),
-            PublicKeySha256 = ByteString.CopyFrom(configuration.Device.PublicKeySha256),
-            CertificateSigningRequest = ByteString.CopyFrom(configuration.Device.CertificateSigningRequest),
+            NodeUid = device.NodeUid.ToString("D"),
+            IdentityEpoch = device.IdentityEpoch,
+            DevicePublicKey = ByteString.CopyFrom(device.SubjectPublicKeyInfo),
+            PublicKeySha256 = ByteString.CopyFrom(device.PublicKeySha256),
+            CertificateSigningRequest = ByteString.CopyFrom(device.CertificateSigningRequest),
             Inventory = new Proto.EnrollmentInventory(),
             RequestId = Guid.NewGuid().ToString("D"),
             SentAt = Timestamp.FromDateTime(DateTime.UtcNow)
@@ -575,6 +592,11 @@ public sealed class PhaseTwoClient : IDisposable, IProbeTransportClient
     }
 
     private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(disposed, this);
+
+    Task<Proto.EnrollmentResponse> IProbeTransportClient.EnrolAsync(
+        DevicePublicFrame device,
+        CancellationToken cancellationToken) =>
+        EnrolAsync(device, cancellationToken);
 
     Task<IProbeDuplexConnection> IProbeTransportClient.OpenTransportAsync(
         Proto.EnrollmentResponse enrolment,
@@ -675,7 +697,7 @@ public enum ProbeDisposition
     EnrollmentAccepted,
     TransportAcknowledged,
     TlsRejected,
-    ClientRejected,
+    ControllerDenied,
     TransportRejected
 }
 
@@ -693,7 +715,7 @@ public static class WslProbePlan
         new(ProbeKind.ExactReplay, ProbeDisposition.TransportAcknowledged),
         new(ProbeKind.ChangedReplay, ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.ReplayConflict),
         new(ProbeKind.WrongCertificateAuthority, ProbeDisposition.TlsRejected),
-        new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ClientRejected),
+        new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ControllerDenied),
         new(ProbeKind.PostRevocation, ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity)
     ];
 
@@ -798,7 +820,7 @@ public static class ProbeEnvelopeFactory
         return DevicePublicFrame.Create(
             enrolled.NodeUid,
             enrolled.IdentityEpoch,
-            enrolled.SubjectPublicKeyInfo,
+            unrelatedKey.ExportSubjectPublicKeyInfo(),
             unrelatedCsr);
     }
 
@@ -845,11 +867,13 @@ public sealed class WslProbeRunner(IProbeTransportClient client)
     public async Task<ImmutableArray<ProbeExecutionResult>> RunAsync(
         DevicePublicFrame device,
         ProbeTrustBundle enrolledTrustBundle,
+        IRevocationPhase revocationPhase,
         DateTimeOffset sentAt,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(device);
         ArgumentNullException.ThrowIfNull(enrolledTrustBundle);
+        ArgumentNullException.ThrowIfNull(revocationPhase);
         device.Validate();
         enrolledTrustBundle.Validate();
 
@@ -857,7 +881,7 @@ public sealed class WslProbeRunner(IProbeTransportClient client)
         Proto.EnrollmentResponse enrolment;
         try
         {
-            enrolment = await client.EnrolAsync(cancellationToken).ConfigureAwait(false);
+            enrolment = await client.EnrolAsync(device, cancellationToken).ConfigureAwait(false);
             results.Add(new(ProbeKind.Enrollment, ProbeResponseInterpreter.Enrollment(enrolment)));
         }
         catch (Exception exception)
@@ -877,6 +901,9 @@ public sealed class WslProbeRunner(IProbeTransportClient client)
             await SendAndRecordAsync(ProbeKind.ChangedReplay, envelopes.ChangedReplay, connection, results, cancellationToken).ConfigureAwait(false);
         }
 
+        var ready = CreateReadyForRevocation(results);
+        await revocationPhase.PublishReadyAsync(ready, cancellationToken).ConfigureAwait(false);
+
         var wrongTrustBundle = ProbeTrustBundle.CreateUnrelated();
         try
         {
@@ -891,15 +918,23 @@ public sealed class WslProbeRunner(IProbeTransportClient client)
             results.Add(new(ProbeKind.WrongCertificateAuthority, ProbeResponseInterpreter.Failure(exception)));
         }
 
+        var mismatched = ProbeEnvelopeFactory.CreateMismatchedFrame(device);
+        mismatched.Validate();
         try
         {
-            ProbeEnvelopeFactory.CreateMismatchedFrame(device).Validate();
+            _ = await client.EnrolAsync(mismatched, cancellationToken).ConfigureAwait(false);
             results.Add(new(ProbeKind.MismatchedCsrKey, ProbeDisposition.EnrollmentAccepted));
         }
-        catch (ArgumentException)
+        catch (RpcException exception) when (exception.StatusCode == StatusCode.FailedPrecondition)
         {
-            results.Add(new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ClientRejected));
+            results.Add(new(ProbeKind.MismatchedCsrKey, ProbeDisposition.ControllerDenied));
         }
+        catch (Exception exception)
+        {
+            results.Add(new(ProbeKind.MismatchedCsrKey, ProbeResponseInterpreter.Failure(exception)));
+        }
+
+        await revocationPhase.WaitForConfirmationAsync(ready, cancellationToken).ConfigureAwait(false);
 
         await using (var revokedConnection = await client.OpenTransportAsync(enrolment, enrolledTrustBundle, cancellationToken).ConfigureAwait(false))
         {
@@ -912,6 +947,26 @@ public sealed class WslProbeRunner(IProbeTransportClient client)
         }
 
         return results.ToImmutable();
+    }
+
+    private static ReadyForRevocation CreateReadyForRevocation(ImmutableArray<ProbeExecutionResult>.Builder results)
+    {
+        var required = results
+            .Where(static result => result.Kind is ProbeKind.Hello or ProbeKind.Snapshot or ProbeKind.Inventory or ProbeKind.Health)
+            .ToArray();
+        var changedReplay = results.SingleOrDefault(static result => result.Kind == ProbeKind.ChangedReplay);
+        if (required.Length != 4 ||
+            required.Any(static result => result.Disposition != ProbeDisposition.TransportAcknowledged) ||
+            changedReplay is not
+            {
+                Disposition: ProbeDisposition.TransportRejected,
+                RejectionCode: Proto.TransportRejectionCode.ReplayConflict
+            })
+        {
+            throw new InvalidOperationException("The initial reports and changed replay must complete before revocation.");
+        }
+
+        return new(ReadyForRevocation.ReadyState, required.Length, changedReplay.RejectionCode.Value);
     }
 
     private static async Task SendAndRecordAsync(
@@ -960,6 +1015,11 @@ public static class ProbeResponseInterpreter
     public static ProbeDisposition Failure(Exception exception)
     {
         ArgumentNullException.ThrowIfNull(exception);
+        if (exception is RpcException { StatusCode: StatusCode.FailedPrecondition })
+        {
+            return ProbeDisposition.ControllerDenied;
+        }
+
         return exception is AuthenticationException or HttpRequestException
             ? ProbeDisposition.TlsRejected
             : ProbeDisposition.TransportRejected;

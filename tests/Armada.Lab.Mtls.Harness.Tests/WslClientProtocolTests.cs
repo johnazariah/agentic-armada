@@ -149,6 +149,10 @@ public sealed class WslClientProtocolTests
             (ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity),
             ProbeResponseInterpreter.Transport(revoked));
         Assert.Equal(ProbeDisposition.TlsRejected, ProbeResponseInterpreter.Failure(new HttpRequestException()));
+        Assert.Equal(
+            ProbeDisposition.ControllerDenied,
+            ProbeResponseInterpreter.Failure(
+                new Grpc.Core.RpcException(new Grpc.Core.Status(Grpc.Core.StatusCode.FailedPrecondition, "claim-key-mismatch"))));
     }
 
     [Fact]
@@ -176,9 +180,11 @@ public sealed class WslClientProtocolTests
         Assert.NotEqual(exact.Hello.AgentVersion, changed.Hello.AgentVersion);
 
         var mismatched = ProbeEnvelopeFactory.CreateMismatchedFrame(frame);
-        Assert.Equal(frame.SubjectPublicKeyInfo, mismatched.SubjectPublicKeyInfo);
+        mismatched.Validate();
+        Assert.Equal(frame.NodeUid, mismatched.NodeUid);
+        Assert.Equal(frame.IdentityEpoch, mismatched.IdentityEpoch);
+        Assert.NotEqual(frame.SubjectPublicKeyInfo, mismatched.SubjectPublicKeyInfo);
         Assert.NotEqual(frame.CertificateSigningRequest, mismatched.CertificateSigningRequest);
-        Assert.Throws<ArgumentException>(mismatched.Validate);
         Assert.Equal(originalCsr, frame.CertificateSigningRequest);
     }
 
@@ -189,10 +195,12 @@ public sealed class WslClientProtocolTests
         var originalCsr = frame.CertificateSigningRequest.ToArray();
         var trust = TrustBundle();
         var transport = new OfflineProbeTransport(trust);
+        var revocation = new ImmediateRevocationPhase();
 
         var results = await new WslProbeRunner(transport).RunAsync(
             frame,
             trust,
+            revocation,
             new DateTimeOffset(2026, 8, 27, 2, 0, 0, TimeSpan.Zero),
             CancellationToken.None);
 
@@ -201,13 +209,47 @@ public sealed class WslClientProtocolTests
         Assert.All(results.Skip(1).Take(5), static result => Assert.Equal(ProbeDisposition.TransportAcknowledged, result.Disposition));
         Assert.Equal((ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.ReplayConflict), (results[6].Disposition, results[6].RejectionCode));
         Assert.Equal(ProbeDisposition.TlsRejected, results[7].Disposition);
-        Assert.Equal(ProbeDisposition.ClientRejected, results[8].Disposition);
+        Assert.Equal(ProbeDisposition.ControllerDenied, results[8].Disposition);
         Assert.Equal((ProbeDisposition.TransportRejected, Proto.TransportRejectionCode.RevokedIdentity), (results[9].Disposition, results[9].RejectionCode));
         Assert.Equal(originalCsr, frame.CertificateSigningRequest);
+        Assert.Equal(2, transport.EnrollmentFrames.Count);
+        Assert.Equal(frame, transport.EnrollmentFrames[0]);
+        Assert.Equal(frame.NodeUid, transport.EnrollmentFrames[1].NodeUid);
+        Assert.Equal(frame.IdentityEpoch, transport.EnrollmentFrames[1].IdentityEpoch);
+        transport.EnrollmentFrames[1].Validate();
+        Assert.NotEqual(frame.SubjectPublicKeyInfo, transport.EnrollmentFrames[1].SubjectPublicKeyInfo);
         Assert.Equal(7, transport.Envelopes.Count);
         Assert.Equal(transport.Envelopes[0], transport.Envelopes[4]);
         Assert.NotEqual(transport.Envelopes[0], transport.Envelopes[5]);
+        Assert.Equal(ReadyForRevocation.ReadyState, revocation.Ready!.State);
+        Assert.Equal(4, revocation.Ready.CompletedReportCount);
+        Assert.Equal(Proto.TransportRejectionCode.ReplayConflict, revocation.Ready.ReplayRejectionCode);
         WslProbePlan.EnsureSatisfied(results);
+    }
+
+    [Fact]
+    public async Task Probe_runner_does_not_open_post_revocation_transport_until_bridge_confirms()
+    {
+        var trust = TrustBundle();
+        var transport = new OfflineProbeTransport(trust);
+        var revocation = new BlockingRevocationPhase();
+        var task = new WslProbeRunner(transport).RunAsync(
+            Frame(),
+            trust,
+            revocation,
+            new DateTimeOffset(2026, 8, 27, 2, 0, 0, TimeSpan.Zero),
+            CancellationToken.None);
+
+        var ready = await revocation.Ready.WaitAsync(TimeSpan.FromSeconds(2));
+        await revocation.Waiting.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(ReadyForRevocation.ReadyState, ready.State);
+        Assert.Equal(2, transport.OpenCount);
+        Assert.False(task.IsCompleted);
+
+        revocation.Confirm();
+        var results = await task;
+        Assert.Equal(3, transport.OpenCount);
+        Assert.Equal(ProbeDisposition.TransportRejected, results[^1].Disposition);
     }
 
     private static PhaseTwoConfiguration Configuration(string root, DevicePublicFrame frame, byte[]? trustedCa = null) =>
@@ -249,14 +291,29 @@ public sealed class WslClientProtocolTests
     {
         private readonly ProbeTrustBundle enrolledTrust = enrolledTrust;
         public List<byte[]> Envelopes { get; } = [];
+        public List<DevicePublicFrame> EnrollmentFrames { get; } = [];
         private int openCount;
+        public int OpenCount => openCount;
 
-        public Task<Proto.EnrollmentResponse> EnrolAsync(CancellationToken cancellationToken) =>
-            Task.FromResult(new Proto.EnrollmentResponse
+        public Task<Proto.EnrollmentResponse> EnrolAsync(DevicePublicFrame device, CancellationToken cancellationToken)
+        {
+            EnrollmentFrames.Add(device);
+            if (EnrollmentFrames.Count == 2)
+            {
+                Assert.Equal(EnrollmentFrames[0].NodeUid, device.NodeUid);
+                Assert.Equal(EnrollmentFrames[0].IdentityEpoch, device.IdentityEpoch);
+                Assert.NotEqual(EnrollmentFrames[0].SubjectPublicKeyInfo, device.SubjectPublicKeyInfo);
+                device.Validate();
+                return Task.FromException<Proto.EnrollmentResponse>(
+                    new Grpc.Core.RpcException(new Grpc.Core.Status(Grpc.Core.StatusCode.FailedPrecondition, "claim-key-mismatch")));
+            }
+
+            return Task.FromResult(new Proto.EnrollmentResponse
             {
                 LeafCertificateDer = Google.Protobuf.ByteString.CopyFrom([1]),
                 IssuingCaDer = Google.Protobuf.ByteString.CopyFrom([2])
             });
+        }
 
         public Task<IProbeDuplexConnection> OpenTransportAsync(
             Proto.EnrollmentResponse enrolment,
@@ -313,5 +370,42 @@ public sealed class WslClientProtocolTests
                 : Task.FromException<Proto.ControlToNode>(new InvalidOperationException("No response configured."));
 
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+    }
+
+    private sealed class ImmediateRevocationPhase : IRevocationPhase
+    {
+        public ReadyForRevocation? Ready { get; private set; }
+
+        public Task PublishReadyAsync(ReadyForRevocation ready, CancellationToken cancellationToken)
+        {
+            Ready = ready;
+            return Task.CompletedTask;
+        }
+
+        public Task WaitForConfirmationAsync(ReadyForRevocation ready, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
+    }
+
+    private sealed class BlockingRevocationPhase : IRevocationPhase
+    {
+        private readonly TaskCompletionSource<ReadyForRevocation> published = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource waiting = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource confirmation = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<ReadyForRevocation> Ready => published.Task;
+        public Task Waiting => waiting.Task;
+
+        public Task PublishReadyAsync(ReadyForRevocation ready, CancellationToken cancellationToken)
+        {
+            published.TrySetResult(ready);
+            return Task.CompletedTask;
+        }
+
+        public async Task WaitForConfirmationAsync(ReadyForRevocation ready, CancellationToken cancellationToken)
+        {
+            waiting.TrySetResult();
+            await confirmation.Task.WaitAsync(cancellationToken);
+        }
+
+        public void Confirm() => confirmation.TrySetResult();
     }
 }
