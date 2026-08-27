@@ -25,10 +25,18 @@ public sealed class WslClientProtocolTests
             Assert.Equal(frame.SubjectPublicKeyInfo, replay.SubjectPublicKeyInfo);
             Assert.Equal(frame.CertificateSigningRequest, replay.CertificateSigningRequest);
             Assert.Equal(frame.FrameSha256, replay.FrameSha256);
-            var materialDirectory = Path.Combine(root, $"{frame.NodeUid:D}-{frame.IdentityEpoch}");
+            var materialDirectory = Path.Combine(root, "device");
             Assert.True(File.Exists(Path.Combine(materialDirectory, "device-key.pkcs8")));
             Assert.True(File.Exists(Path.Combine(materialDirectory, "device.csr.der")));
+            Assert.True(File.Exists(DeviceMaterialStore.PublicFramePath(root)));
             Assert.Empty(Directory.EnumerateFiles(root, "*", SearchOption.TopDirectoryOnly));
+            if (!OperatingSystem.IsWindows())
+            {
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(root));
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, File.GetUnixFileMode(materialDirectory));
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(materialDirectory, "device-key.pkcs8")));
+                Assert.Equal(UnixFileMode.UserRead | UnixFileMode.UserWrite, File.GetUnixFileMode(Path.Combine(materialDirectory, "device.csr.der")));
+            }
         }
         finally
         {
@@ -59,11 +67,64 @@ public sealed class WslClientProtocolTests
             var frame = DeviceMaterialStore.Provision(new(root, Guid.NewGuid(), 1));
             using var other = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             File.WriteAllBytes(
-                Path.Combine(root, $"{frame.NodeUid:D}-{frame.IdentityEpoch}", "device-key.pkcs8"),
+                Path.Combine(root, "device", "device-key.pkcs8"),
                 other.ExportPkcs8PrivateKey());
 
             var configuration = Configuration(root, frame);
             Assert.Throws<ArgumentException>(() => PhaseTwoClient.Create(configuration));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Verified_remote_root_requires_owner_only_permissions()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateRoot();
+        try
+        {
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead);
+
+            Assert.Throws<IOException>(() => DeviceMaterialStore.VerifyRemoteRoot(root));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Theory]
+    [InlineData("device")]
+    [InlineData("device-key.pkcs8")]
+    [InlineData("device.csr.der")]
+    public void Phase_two_requires_owner_only_persisted_material(string unsafePath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var root = CreateRoot();
+        try
+        {
+            var frame = DeviceMaterialStore.Provision(new(root, Guid.NewGuid(), 1));
+            var path = unsafePath == "device"
+                ? Path.Combine(root, "device")
+                : Path.Combine(root, "device", unsafePath);
+            File.SetUnixFileMode(
+                path,
+                unsafePath == "device"
+                    ? UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute | UnixFileMode.GroupRead
+                    : UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead);
+
+            Assert.Throws<IOException>(() => PhaseTwoClient.Create(Configuration(root, frame)));
         }
         finally
         {
@@ -353,6 +414,10 @@ public sealed class WslClientProtocolTests
     {
         var root = Path.Combine(AppContext.BaseDirectory, $"wsl-client-{Guid.NewGuid():N}");
         Directory.CreateDirectory(root);
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
         return root;
     }
 

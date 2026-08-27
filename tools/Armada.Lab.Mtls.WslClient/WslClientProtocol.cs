@@ -116,6 +116,7 @@ public sealed record DevicePublicFrame(
 
 public static class DeviceMaterialStore
 {
+    public const string PublicFrameRelativePath = "device/public-frame.bin";
     private const UnixFileMode OwnerDirectoryMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
     private const UnixFileMode OwnerFileMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
 
@@ -125,7 +126,7 @@ public static class DeviceMaterialStore
         request.Validate();
 
         var root = VerifyRemoteRoot(request.VerifiedRemoteRoot);
-        var directory = RequireChild(root, $"{request.NodeUid:D}-{request.IdentityEpoch}");
+        var directory = RequireChild(root, "device");
         if (OperatingSystem.IsWindows())
         {
             Directory.CreateDirectory(directory);
@@ -138,12 +139,14 @@ public static class DeviceMaterialStore
 
         var keyPath = RequireChild(directory, "device-key.pkcs8");
         var csrPath = RequireChild(directory, "device.csr.der");
-        if (File.Exists(keyPath) != File.Exists(csrPath))
+        var framePath = RequireChild(root, PublicFrameRelativePath);
+        var materialExists = File.Exists(keyPath) || File.Exists(csrPath) || File.Exists(framePath);
+        if (materialExists && (!File.Exists(keyPath) || !File.Exists(csrPath) || !File.Exists(framePath)))
         {
             throw new IOException("Device key material is incomplete.");
         }
 
-        if (!File.Exists(keyPath))
+        if (!materialExists)
         {
             using var generated = ECDsa.Create(ECCurve.NamedCurves.nistP256);
             var key = generated.ExportPkcs8PrivateKey();
@@ -153,6 +156,13 @@ public static class DeviceMaterialStore
                 HashAlgorithmName.SHA256).CreateSigningRequest();
             WriteOwnerOnly(keyPath, key);
             WriteOwnerOnly(csrPath, csr);
+            var frame = DevicePublicFrame.Create(
+                request.NodeUid,
+                request.IdentityEpoch,
+                generated.ExportSubjectPublicKeyInfo(),
+                csr);
+            frame.Validate();
+            WriteOwnerOnly(framePath, JsonSerializer.SerializeToUtf8Bytes(frame, DevicePublicFrameJson.Options));
             CryptographicOperations.ZeroMemory(key);
         }
 
@@ -173,6 +183,12 @@ public static class DeviceMaterialStore
                 key.ExportSubjectPublicKeyInfo(),
                 csr);
             frame.Validate();
+            var persistedFrame = ReadPublicFrame(framePath);
+            if (!FramesMatch(frame, persistedFrame))
+            {
+                throw new ArgumentException("Persisted public frame does not match the requested device identity.");
+            }
+
             return frame;
         }
         finally
@@ -201,6 +217,11 @@ public static class DeviceMaterialStore
             {
                 throw new IOException("The verified remote root must not descend from a symbolic link.");
             }
+        }
+
+        if (!OperatingSystem.IsWindows() && File.GetUnixFileMode(fullRoot) != OwnerDirectoryMode)
+        {
+            throw new IOException("The verified remote root must be owner-only (0700).");
         }
 
         var fileSystemRoot = Path.GetPathRoot(info.FullName);
@@ -251,14 +272,22 @@ public static class DeviceMaterialStore
         ArgumentNullException.ThrowIfNull(frame);
         frame.Validate();
         var root = VerifyRemoteRoot(verifiedRemoteRoot);
-        var directory = RequireChild(root, $"{frame.NodeUid:D}-{frame.IdentityEpoch}");
+        var directory = RequireChild(root, "device");
         var keyPath = RequireChild(directory, "device-key.pkcs8");
         var csrPath = RequireChild(directory, "device.csr.der");
+        var framePath = RequireChild(root, PublicFrameRelativePath);
         if (new DirectoryInfo(directory).LinkTarget is not null ||
-            !File.Exists(keyPath) || !File.Exists(csrPath) ||
+            !File.Exists(keyPath) || !File.Exists(csrPath) || !File.Exists(framePath) ||
             new FileInfo(keyPath).LinkTarget is not null || new FileInfo(csrPath).LinkTarget is not null)
         {
             throw new IOException("Persisted device material is missing or substituted.");
+        }
+        VerifyOwnedDirectory(directory);
+        VerifyOwnerOnlyFile(keyPath);
+        VerifyOwnerOnlyFile(csrPath);
+        if (!FramesMatch(frame, ReadPublicFrame(framePath)))
+        {
+            throw new ArgumentException("Persisted public frame does not match the supplied public frame.");
         }
 
         var keyBytes = File.ReadAllBytes(keyPath);
@@ -333,7 +362,6 @@ public static class DeviceMaterialStore
 
         if (!OperatingSystem.IsWindows())
         {
-            File.SetUnixFileMode(directory, OwnerDirectoryMode);
             if (File.GetUnixFileMode(directory) != OwnerDirectoryMode)
             {
                 throw new IOException("Device material directory must be owner-only.");
@@ -361,6 +389,38 @@ public static class DeviceMaterialStore
             {
                 throw new IOException("Device material must be owner-only.");
             }
+        }
+    }
+
+    public static string PublicFramePath(string verifiedRemoteRoot) =>
+        RequireChild(VerifyRemoteRoot(verifiedRemoteRoot), PublicFrameRelativePath);
+
+    private static DevicePublicFrame ReadPublicFrame(string path)
+    {
+        if (new FileInfo(path).LinkTarget is not null)
+        {
+            throw new IOException("Persisted public frame is a symbolic link.");
+        }
+
+        var frame = JsonSerializer.Deserialize<DevicePublicFrame>(File.ReadAllBytes(path), DevicePublicFrameJson.Options)
+            ?? throw new ArgumentException("Persisted public frame is invalid.");
+        frame.Validate();
+        return frame;
+    }
+
+    private static bool FramesMatch(DevicePublicFrame left, DevicePublicFrame right) =>
+        left.NodeUid == right.NodeUid &&
+        left.IdentityEpoch == right.IdentityEpoch &&
+        CryptographicOperations.FixedTimeEquals(left.SubjectPublicKeyInfo, right.SubjectPublicKeyInfo) &&
+        CryptographicOperations.FixedTimeEquals(left.PublicKeySha256, right.PublicKeySha256) &&
+        CryptographicOperations.FixedTimeEquals(left.CertificateSigningRequest, right.CertificateSigningRequest) &&
+        CryptographicOperations.FixedTimeEquals(left.FrameSha256, right.FrameSha256);
+
+    private static void VerifyOwnerOnlyFile(string path)
+    {
+        if (!OperatingSystem.IsWindows() && File.GetUnixFileMode(path) != OwnerFileMode)
+        {
+            throw new IOException("Persisted device material must be owner-only (0600).");
         }
     }
 }
