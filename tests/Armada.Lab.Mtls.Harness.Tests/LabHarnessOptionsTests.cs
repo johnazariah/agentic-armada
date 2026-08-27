@@ -175,6 +175,16 @@ public sealed class LabHarnessOptionsTests
         ExecutionGate.RequireLiveApproval(["--execute"], _ => "approved");
     }
 
+    [Theory]
+    [InlineData("armada_c2_0123456789abcdef0123456789abcdef;DROP DATABASE armada")]
+    [InlineData("armada_c2_0123456789abcdef0123456789abcdeF")]
+    [InlineData("armada")]
+    public void Disposable_database_rejects_non_allowlisted_names_before_sql_is_constructed(string name)
+    {
+        Assert.Throws<ArgumentException>(() =>
+            new DisposablePostgresDatabase("Host=localhost;Database=postgres", name));
+    }
+
     private static Dictionary<string, string?> Values() => new(StringComparer.Ordinal)
     {
         ["postgres-admin-connection"] = "Host=localhost;Database=postgres",

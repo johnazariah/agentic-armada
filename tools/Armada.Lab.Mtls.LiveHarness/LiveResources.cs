@@ -6,6 +6,7 @@ using Armada.Application;
 using Armada.Contracts;
 using Armada.Infrastructure.Postgres;
 using Npgsql;
+using System.Text.RegularExpressions;
 
 namespace Armada.Lab.Mtls.LiveHarness;
 
@@ -111,13 +112,15 @@ public sealed class EphemeralLabAuthority : ILabCertificateIssuer, IDisposable
 
 public sealed class DisposablePostgresDatabase : IAsyncDisposable
 {
+    private static readonly Regex DatabasePattern =
+        new("^armada_c2_[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private readonly string adminConnectionString;
     private readonly string databaseName;
     private NpgsqlDataSource? dataSource;
 
     public DisposablePostgresDatabase(string adminConnectionString, string databaseName)
     {
-        if (!databaseName.StartsWith("armada_c2_", StringComparison.Ordinal) || databaseName is "armada" or "armada_lab")
+        if (!DatabasePattern.IsMatch(databaseName))
         {
             throw new ArgumentException("Only an allowlisted C2 database can be managed.", nameof(databaseName));
         }

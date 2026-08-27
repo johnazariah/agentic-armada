@@ -60,10 +60,37 @@ public sealed class VerifiedTemporaryRoot : IAsyncDisposable
         EnsureMacOs();
         if (Directory.Exists(path))
         {
-            Directory.Delete(path, recursive: true);
+            DeleteVerifiedTree(new DirectoryInfo(path));
         }
 
         return ValueTask.CompletedTask;
+    }
+
+    private static void DeleteVerifiedTree(DirectoryInfo directory)
+    {
+        if (directory.LinkTarget is not null)
+        {
+            throw new IOException("Refusing to delete a substituted symbolic link.");
+        }
+
+        foreach (var entry in directory.EnumerateFileSystemInfos())
+        {
+            if (entry.LinkTarget is not null)
+            {
+                throw new IOException("Refusing to delete a temporary root containing a symbolic link.");
+            }
+
+            if (entry is DirectoryInfo child)
+            {
+                DeleteVerifiedTree(child);
+            }
+            else
+            {
+                entry.Delete();
+            }
+        }
+
+        directory.Delete();
     }
 
     private static void EnsureMacOs()
@@ -83,11 +110,13 @@ public sealed class LiveHarnessExecution
         LabHarnessOptions options,
         Func<CancellationToken, Task<PublicDeviceFrame>> phaseOne,
         Func<PublicDeviceFrame, ReadOnlyMemory<byte>, X509Certificate2, CancellationToken, Task<IReadOnlyList<EvidenceItem>>> phaseTwo,
+        Func<CancellationToken, Task> cleanupRemote,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(phaseOne);
         ArgumentNullException.ThrowIfNull(phaseTwo);
+        ArgumentNullException.ThrowIfNull(cleanupRemote);
 
         var frame = await phaseOne(cancellationToken);
         frame.Validate();
@@ -97,13 +126,16 @@ public sealed class LiveHarnessExecution
             throw new InvalidOperationException("Validated device digest was not canonical.");
         }
 
-        await using var root = VerifiedTemporaryRoot.Create();
-        using var authority = new EphemeralLabAuthority(options.ListenAddress, TimeSpan.FromHours(1));
-        await using var database = new DisposablePostgresDatabase(options.PostgresAdminConnection, options.DatabaseName);
+        VerifiedTemporaryRoot? root = null;
+        EphemeralLabAuthority? authority = null;
+        DisposablePostgresDatabase? database = null;
         var secret = RandomNumberGenerator.GetBytes(NodeTransportProtocol.MinimumClaimSecretBytes);
         WebApplication? application = null;
         try
         {
+            root = VerifiedTemporaryRoot.Create();
+            authority = new EphemeralLabAuthority(options.ListenAddress, TimeSpan.FromHours(1));
+            database = new DisposablePostgresDatabase(options.PostgresAdminConnection, options.DatabaseName);
             await database.CreateAndMigrateAsync(cancellationToken);
             var claim = new EnrollmentClaimReference(
                 Guid.NewGuid(),
@@ -121,10 +153,37 @@ public sealed class LiveHarnessExecution
         finally
         {
             CryptographicOperations.ZeroMemory(secret);
-            if (application is not null)
-            {
-                await application.DisposeAsync();
-            }
+            var cleanup = new CleanupCoordinator(
+            [
+                ("application", async token =>
+                {
+                    if (application is not null)
+                    {
+                        await application.DisposeAsync();
+                    }
+                }),
+                ("wsl-temporary-root", cleanupRemote),
+                ("database", async token =>
+                {
+                    if (database is not null)
+                    {
+                        await database.DropAsync(token);
+                    }
+                }),
+                ("authority", _ =>
+                {
+                    authority?.Dispose();
+                    return Task.CompletedTask;
+                }),
+                ("temporary-root", async _ =>
+                {
+                    if (root is not null)
+                    {
+                        await root.DisposeAsync();
+                    }
+                })
+            ]);
+            await cleanup.CleanupAsync(CancellationToken.None);
         }
     }
 
@@ -142,10 +201,8 @@ public sealed class LiveHarnessExecution
             StreamEndpoint = new(options.ListenAddress, options.StreamPort),
             ServerCertificate = authority.ServerCertificate,
             CertificateLifetime = TimeSpan.FromHours(1),
-            ClientCertificateValidation = (certificate, _, errors) =>
-                certificate is not null &&
-                errors == SslPolicyErrors.None &&
-                certificate.Verify()
+            ClientCertificateValidation = (certificate, _, _) =>
+                MtlsValidation.IsTrustedClient(certificate, authority.CaCertificate, DateTimeOffset.UtcNow)
         };
         var composition = LabMtlsAdapter.Compose(
             builder,
@@ -171,8 +228,30 @@ public sealed class LiveHarnessExecution
         }
 
         var evidence = RedactedEvidence.Create(items);
-        Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        var output = new DirectoryInfo(directory);
+        if (output.Exists)
+        {
+            if (output.LinkTarget is not null ||
+                File.GetUnixFileMode(directory) != (UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute))
+            {
+                throw new IOException("Evidence output directory must be a verified owner-only non-link directory.");
+            }
+        }
+        else
+        {
+            Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            output = new DirectoryInfo(directory);
+            if (output.LinkTarget is not null ||
+                File.GetUnixFileMode(directory) != (UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute))
+            {
+                throw new IOException("Evidence output directory could not be verified.");
+            }
+        }
         var path = System.IO.Path.Combine(directory, "c2-evidence.txt");
+        if (File.Exists(path) || new FileInfo(path).LinkTarget is not null)
+        {
+            throw new IOException("Evidence output already exists or is a symbolic link.");
+        }
         await File.WriteAllLinesAsync(path, evidence.Select(item => $"{item.Name}={item.Value}"), cancellationToken);
         File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
     }
