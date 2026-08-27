@@ -272,6 +272,30 @@ public sealed class BootstrapDistributionTests
             Failure(stateFixture.Installer.Status(stateFixture.InstallRoot, stateFixture.StateRoot)).Code);
     }
 
+    [Fact]
+    public void Packager_rejects_missing_source_and_existing_output_paths()
+    {
+        using var fixture = new BootstrapFixture();
+        var existingOutput = Path.Combine(fixture.Root, "existing-output");
+        Directory.CreateDirectory(existingOutput);
+
+        var missingSource = fixture.Packager.Create(
+            Path.Combine(fixture.Root, "missing"),
+            Path.Combine(fixture.Root, "missing-output"),
+            fixture.Signer,
+            "node-agent",
+            "1.0.0");
+        var existingOutputResult = fixture.Packager.Create(
+            fixture.SourceRoot,
+            existingOutput,
+            fixture.Signer,
+            "node-agent",
+            "1.0.0");
+
+        Assert.Equal("bootstrap-package-path-invalid", Failure(missingSource).Code);
+        Assert.Equal("bootstrap-package-path-invalid", Failure(existingOutputResult).Code);
+    }
+
     private static void SetSparseLength(string path, long length)
     {
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
