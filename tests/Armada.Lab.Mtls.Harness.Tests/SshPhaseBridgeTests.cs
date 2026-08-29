@@ -302,10 +302,10 @@ public sealed class SshPhaseBridgeTests
         try
         {
             var options = Options(helperDirectory);
-            var process = new FakeSshPhaseProcess(
-                ProtocolLines(JsonSerializer.Serialize(
+            var process = PhaseTwoProcess(
+                JsonSerializer.Serialize(
                     new ReadyForRevocation(ReadyForRevocation.ReadyState, 6, Proto.TransportRejectionCode.ReplayConflict),
-                    JsonOptions)),
+                    JsonOptions),
                 new("", "", 0));
             var identities = new RecordingIdentityRegistry();
 
@@ -324,6 +324,41 @@ public sealed class SshPhaseBridgeTests
     }
 
     [Fact]
+    public async Task Phase_two_does_not_send_the_secret_without_a_valid_configuration_receipt()
+    {
+        var helperDirectory = CreateHelperDirectory();
+        try
+        {
+            var options = Options(helperDirectory);
+            var secret = Secret();
+            var invalidProtocolOutputs = new IEnumerable<string>[]
+            {
+                [],
+                [ProtocolBegin, "ARMADA_C2_PHASE_TWO_CONFIG_READY_wrong"],
+                [new string('x', 16 * 1024 + 1)]
+            };
+
+            using var authority = Authority();
+            foreach (var output in invalidProtocolOutputs)
+            {
+                var process = new FakeSshPhaseProcess(output, new("", "", 0));
+
+                await Assert.ThrowsAsync<IOException>(() =>
+                    new SshPhaseBridge(options, new FakeSshProcessInvoker(process)).RunPhaseTwoAsync(
+                        Claim(options), new RecordingIdentityRegistry(), PublicFrame(options), secret, authority, CancellationToken.None));
+
+                Assert.Single(process.Lines);
+                Assert.DoesNotContain(Convert.ToBase64String(secret), process.Lines[0], StringComparison.Ordinal);
+                Assert.Empty(process.Writes);
+            }
+        }
+        finally
+        {
+            DeleteHelperDirectory(helperDirectory);
+        }
+    }
+
+    [Fact]
     public async Task Phase_two_sends_the_secret_only_in_stdin_and_confirms_after_controller_revocation()
     {
         var helperDirectory = CreateHelperDirectory();
@@ -334,10 +369,10 @@ public sealed class SshPhaseBridgeTests
             var results = WslProbePlan.Create()
                 .Select(static expected => new ProbeExecutionResult(expected.Kind, expected.Disposition, expected.RejectionCode))
                 .ToArray();
-            var process = new FakeSshPhaseProcess(
-                ProtocolLines(JsonSerializer.Serialize(
+            var process = PhaseTwoProcess(
+                JsonSerializer.Serialize(
                     new ReadyForRevocation(ReadyForRevocation.ReadyState, 4, Proto.TransportRejectionCode.ReplayConflict),
-                    JsonOptions)),
+                    JsonOptions),
                 new(JsonSerializer.Serialize(results, JsonOptions), "remote diagnostics", 0));
             var identities = new RecordingIdentityRegistry(() =>
             {
@@ -370,7 +405,7 @@ public sealed class SshPhaseBridgeTests
             Assert.Equal(results.Length, evidence.Count);
             Assert.Equal("probe-10", evidence[^1].Name);
             Assert.Equal("TransportRejected", evidence[^1].Value);
-            Assert.True(process.Operations.IndexOf("line") < process.Operations.IndexOf("read"));
+            Assert.True(process.Operations.IndexOf("read") < process.Operations.IndexOf("line", process.Operations.IndexOf("read")));
         }
         finally
         {
@@ -385,10 +420,10 @@ public sealed class SshPhaseBridgeTests
         try
         {
             var options = Options(helperDirectory);
-            var process = new FakeSshPhaseProcess(
-                ProtocolLines(JsonSerializer.Serialize(
+            var process = PhaseTwoProcess(
+                JsonSerializer.Serialize(
                     new ReadyForRevocation(ReadyForRevocation.ReadyState, 4, Proto.TransportRejectionCode.ReplayConflict),
-                    JsonOptions)),
+                    JsonOptions),
                 new("[]", "", 0));
 
             using var authority = Authority();
@@ -409,10 +444,10 @@ public sealed class SshPhaseBridgeTests
         try
         {
             var options = Options(helperDirectory);
-            var process = new FakeSshPhaseProcess(
-                ProtocolLines(JsonSerializer.Serialize(
+            var process = PhaseTwoProcess(
+                JsonSerializer.Serialize(
                     new ReadyForRevocation(ReadyForRevocation.ReadyState, 4, Proto.TransportRejectionCode.ReplayConflict),
-                    JsonOptions)),
+                    JsonOptions),
                 new(new string(' ', 64 * 1024 + 1), "", 0));
 
             using var authority = Authority();
@@ -527,12 +562,31 @@ public sealed class SshPhaseBridgeTests
             startupLines,
             completion ?? new(ProtocolOutput(StageComplete), "", 0));
 
-    private static IEnumerable<string> ProtocolLines(string line) => [ProtocolBegin, line];
-
     private static string ProtocolOutput(string output) => ProtocolBegin + '\n' + output;
 
     private static string ShellQuoted(string fragment) =>
         fragment.Replace("'", "'\"'\"'", StringComparison.Ordinal);
+
+    private static FakeSshPhaseProcess PhaseTwoProcess(string ready, SshProcessResult completion)
+    {
+        var reads = 0;
+        var process = new FakeSshPhaseProcess([ProtocolBegin], completion);
+        process.OnRead = current => ++reads switch
+        {
+            1 => ExtractConfigurationReceipt(Assert.Single(current.Lines)),
+            2 => ready,
+            _ => null
+        };
+        return process;
+    }
+
+    private static string ExtractConfigurationReceipt(string command)
+    {
+        var prefix = LabHarnessCommandContract.PhaseTwoConfigReadyPrefix;
+        var start = command.IndexOf(prefix, StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        return command.Substring(start, prefix.Length + 32);
+    }
 
     private static void DeleteHelperDirectory(string helperDirectory)
     {
@@ -606,6 +660,7 @@ public sealed class SshPhaseBridgeTests
         public List<string> Operations { get; } = [];
         public SshProcessResult Completion { get; } = completion ?? new("", "", 0);
         public Action? OnComplete { get; set; }
+        public Func<FakeSshPhaseProcess, string?>? OnRead { get; set; }
 
         public Task WriteLineAsync(string value, CancellationToken cancellationToken)
         {
@@ -634,7 +689,7 @@ public sealed class SshPhaseBridgeTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             Operations.Add("read");
-            return Task.FromResult(outputLines.Count == 0 ? null : outputLines.Dequeue());
+            return Task.FromResult(outputLines.Count == 0 ? OnRead?.Invoke(this) : outputLines.Dequeue());
         }
 
         public Task<SshProcessResult> CompleteAsync(CancellationToken cancellationToken)

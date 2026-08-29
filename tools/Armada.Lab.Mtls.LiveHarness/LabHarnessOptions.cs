@@ -112,16 +112,19 @@ public static class LabHarnessCommandContract
 {
     public const string SshHost = "johnaz-phd-wsl";
     public const string WslDotnet = "/home/johnaz/.local/share/dotnet/dotnet";
+    public const string PhaseTwoConfigReadyPrefix = "ARMADA_C2_PHASE_TWO_CONFIG_READY_";
     private static readonly Regex HelperDigestPattern =
         new("^[a-f0-9]{64}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private static readonly Regex RemoteRootPattern =
         new("^armada-c2-[a-f0-9]{32}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex PhaseTwoConfigReceiptPattern =
+        new($"^{PhaseTwoConfigReadyPrefix}[a-f0-9]{{32}}$", RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public static string PhaseOneBootstrap(string helperDigest, string remoteRoot) =>
         $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/helper.manifest\"; cd \"$root\"; sha256sum --quiet --strict --check helper.manifest; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-one";
 
-    public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot) =>
-        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/helper.manifest\"; cd \"$root\"; sha256sum --quiet --strict --check helper.manifest; test ! -L \"$root/device\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
+    public static string PhaseTwoBootstrap(string helperDigest, string remoteRoot, string configurationReceipt) =>
+        $"set -eu; umask 077; root=\"$HOME/.cache/{ValidateRemoteRoot(remoteRoot)}\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; test ! -L \"$root/helper.manifest\"; cd \"$root\"; sha256sum --quiet --strict --check helper.manifest; test ! -L \"$root/device\"; test \"$(stat -c '%u:%a' \"$root/device\")\" = \"$(id -u):700\"; test -f \"$root/device/public-frame.bin\"; test '{ValidateHelperDigest(helperDigest)}' = \"$(sha256sum \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" | awk '{{print $1}}')\"; /usr/bin/printf '%s\\n' {ValidatePhaseTwoConfigReceipt(configurationReceipt)}; exec {WslDotnet} \"$root/helper/Armada.Lab.Mtls.WslClient.dll\" phase-two";
 
     private static string ValidateHelperDigest(string helperDigest) =>
         HelperDigestPattern.IsMatch(helperDigest)
@@ -132,4 +135,9 @@ public static class LabHarnessCommandContract
         RemoteRootPattern.IsMatch(remoteRoot)
             ? remoteRoot
             : throw new ArgumentException("remoteRoot must be an allowlisted generated name.");
+
+    private static string ValidatePhaseTwoConfigReceipt(string configurationReceipt) =>
+        PhaseTwoConfigReceiptPattern.IsMatch(configurationReceipt)
+            ? configurationReceipt
+            : throw new ArgumentException("configurationReceipt must be a generated phase-two configuration token.");
 }

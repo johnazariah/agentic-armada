@@ -53,7 +53,8 @@ public sealed class LabHarnessOptionsTests
 
         var phaseTwo = LabHarnessCommandContract.PhaseTwoBootstrap(
             new string('a', 64),
-            "armada-c2_0123456789abcdef0123456789abcdef".Replace('_', '-'));
+            "armada-c2_0123456789abcdef0123456789abcdef".Replace('_', '-'),
+            LabHarnessCommandContract.PhaseTwoConfigReadyPrefix + new string('b', 32));
         Assert.EndsWith(" phase-two", phaseTwo, StringComparison.Ordinal);
         Assert.StartsWith("set -eu;", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
@@ -63,6 +64,7 @@ public sealed class LabHarnessOptionsTests
         Assert.Contains("test ! -L \"$root/helper\"", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("sha256sum --quiet --strict --check helper.manifest", phaseTwo, StringComparison.Ordinal);
         Assert.Contains("test ! -L \"$root/device\"", phaseTwo, StringComparison.Ordinal);
+        Assert.Contains("/usr/bin/printf '%s\\n' " + LabHarnessCommandContract.PhaseTwoConfigReadyPrefix, phaseTwo, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -102,7 +104,9 @@ public sealed class LabHarnessOptionsTests
         Assert.Throws<ArgumentException>(() =>
             LabHarnessCommandContract.PhaseOneBootstrap("'; touch unsafe; #", "armada-c2-0123456789abcdef0123456789abcdef"));
         Assert.Throws<ArgumentException>(() =>
-            LabHarnessCommandContract.PhaseTwoBootstrap(new string('a', 64), "../unsafe"));
+            LabHarnessCommandContract.PhaseTwoBootstrap(new string('a', 64), "../unsafe", LabHarnessCommandContract.PhaseTwoConfigReadyPrefix + new string('b', 32)));
+        Assert.Throws<ArgumentException>(() =>
+            LabHarnessCommandContract.PhaseTwoBootstrap(new string('a', 64), "armada-c2-0123456789abcdef0123456789abcdef", "unsafe"));
     }
 
     [Fact]

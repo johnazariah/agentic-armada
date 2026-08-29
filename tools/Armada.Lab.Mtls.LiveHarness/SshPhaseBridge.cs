@@ -213,12 +213,14 @@ public sealed class SshPhaseBridge
         }
 
         await using var process = await ssh.StartAsync(cancellationToken);
+        var configurationReceipt = LabHarnessCommandContract.PhaseTwoConfigReadyPrefix + Guid.NewGuid().ToString("N");
         await process.WriteLineAsync(
-            CreateProtocolCommand(LabHarnessCommandContract.PhaseTwoBootstrap(helperDigest, remoteRoot)),
+            CreateProtocolCommand(LabHarnessCommandContract.PhaseTwoBootstrap(helperDigest, remoteRoot, configurationReceipt)),
             cancellationToken);
+        await process.FlushAsync(cancellationToken);
+        await ReadProtocolReceiptAsync(process, configurationReceipt, "phase-two configuration", cancellationToken);
         await process.WriteLineAsync(input, cancellationToken);
         await process.FlushAsync(cancellationToken);
-        await ReadProtocolBeginAsync(process, cancellationToken);
         var ready = ParseReadyForRevocation(await process.ReadLineAsync(cancellationToken));
 
         var revoked = await identities.RevokeAsync(
@@ -349,6 +351,20 @@ public sealed class SshPhaseBridge
 
             startup.AppendLine(line);
             EnsureStartupPreamble(startup.ToString());
+        }
+    }
+
+    private static async Task ReadProtocolReceiptAsync(
+        ISshPhaseProcess process,
+        string expected,
+        string operation,
+        CancellationToken cancellationToken)
+    {
+        await ReadProtocolBeginAsync(process, cancellationToken);
+        var receipt = await process.ReadLineAsync(cancellationToken);
+        if (!string.Equals(receipt, expected, StringComparison.Ordinal))
+        {
+            throw new IOException($"WSL {operation} did not return the expected protocol receipt.");
         }
     }
 
