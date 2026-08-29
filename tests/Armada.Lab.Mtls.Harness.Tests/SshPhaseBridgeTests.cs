@@ -52,7 +52,7 @@ public sealed class SshPhaseBridgeTests
             Assert.Contains(Convert.ToBase64String(Encoding.UTF8.GetBytes("z.helper")), stagingPayload, StringComparison.Ordinal);
             Assert.Contains(Convert.ToBase64String([1, 2]), stagingPayload, StringComparison.Ordinal);
             Assert.Contains(Convert.ToBase64String([3]), stagingPayload, StringComparison.Ordinal);
-            Assert.True(staging.Operations.IndexOf("read") < staging.Operations.IndexOf("write"));
+            Assert.True(staging.Operations.IndexOf("write") < staging.Operations.IndexOf("complete"));
             Assert.Single(phaseOne.Lines);
             Assert.Single(phaseOne.Writes);
             var request = JsonSerializer.Deserialize<DeviceProvisioningRequest>(phaseOne.Writes[0], JsonOptions);
@@ -156,13 +156,16 @@ public sealed class SshPhaseBridgeTests
     }
 
     [Fact]
-    public async Task Helper_staging_waits_for_a_bounded_ssh_startup_preamble_before_sending_the_payload()
+    public async Task Helper_staging_accepts_a_bounded_ssh_startup_preamble_with_an_exact_completion_receipt()
     {
         var helperDirectory = CreateHelperDirectory(("dependency.dll", [1, 2, 3]));
         try
         {
             var options = Options(helperDirectory);
-            var staging = StageProcess(["WSL startup notice"]);
+            var staging = StageProcess(completion: new(
+                "WSL startup notice\n" + ProtocolOutput(StageComplete),
+                "",
+                0));
             var phaseOne = new FakeSshPhaseProcess(completion: new(
                 ProtocolOutput(JsonSerializer.Serialize(DeviceFrame(options.NodeUid, options.IdentityEpoch), JsonOptions)),
                 "",
@@ -171,7 +174,7 @@ public sealed class SshPhaseBridgeTests
             await new SshPhaseBridge(options, new FakeSshProcessInvoker(staging, phaseOne))
                 .RunPhaseOneAsync(CancellationToken.None);
 
-            Assert.True(staging.Operations.IndexOf("read") < staging.Operations.IndexOf("write"));
+            Assert.True(staging.Operations.IndexOf("write") < staging.Operations.IndexOf("complete"));
         }
         finally
         {
@@ -185,7 +188,7 @@ public sealed class SshPhaseBridgeTests
         var helperDirectory = CreateHelperDirectory();
         try
         {
-            var staging = StageProcess(completion: new($"{StageComplete}\nunexpected\n", "", 0));
+            var staging = StageProcess(completion: new(ProtocolOutput($"{StageComplete}\nunexpected\n"), "", 0));
             var invoker = new FakeSshProcessInvoker(staging);
 
             await Assert.ThrowsAsync<IOException>(() =>
@@ -220,18 +223,21 @@ public sealed class SshPhaseBridgeTests
     }
 
     [Fact]
-    public async Task Helper_staging_rejects_an_oversized_ssh_startup_preamble_before_sending_the_payload()
+    public async Task Helper_staging_rejects_an_oversized_ssh_startup_preamble_after_sending_the_payload()
     {
         var helperDirectory = CreateHelperDirectory();
         try
         {
-            var staging = StageProcess([new string('x', 16 * 1024 + 1)]);
+            var staging = StageProcess(completion: new(
+                new string('x', 16 * 1024 + 1) + "\n" + ProtocolOutput(StageComplete),
+                "",
+                0));
             var invoker = new FakeSshProcessInvoker(staging);
 
             await Assert.ThrowsAsync<IOException>(() =>
                 new SshPhaseBridge(Options(helperDirectory), invoker).RunPhaseOneAsync(CancellationToken.None));
 
-            Assert.DoesNotContain("write", staging.Operations);
+            Assert.Contains("write", staging.Operations);
         }
         finally
         {
@@ -364,7 +370,7 @@ public sealed class SshPhaseBridgeTests
             Assert.Equal(results.Length, evidence.Count);
             Assert.Equal("probe-10", evidence[^1].Name);
             Assert.Equal("TransportRejected", evidence[^1].Value);
-            Assert.True(process.Operations.IndexOf("read") < process.Operations.LastIndexOf("line"));
+            Assert.True(process.Operations.IndexOf("line") < process.Operations.IndexOf("read"));
         }
         finally
         {
@@ -436,7 +442,7 @@ public sealed class SshPhaseBridgeTests
             Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
             Assert.Contains("rm -rf -- \"$root\"", command, StringComparison.Ordinal);
             Assert.Contains("test ! -e \"$root\"", command, StringComparison.Ordinal);
-            Assert.EndsWith(ShellQuoted($"printf '%s\\n' {CleanupComplete}") + "'", command, StringComparison.Ordinal);
+            Assert.EndsWith(ShellQuoted($"/usr/bin/printf '%s\\n' {CleanupComplete}") + "'", command, StringComparison.Ordinal);
         }
         finally
         {
@@ -458,7 +464,7 @@ public sealed class SshPhaseBridgeTests
             var command = Assert.Single(process.Lines);
             Assert.Contains("if test -e \"$root\" || test -L \"$root\"; then", command, StringComparison.Ordinal);
             Assert.Contains("test ! -L \"$root\"", command, StringComparison.Ordinal);
-            Assert.Contains(ShellQuoted($"printf '%s\\n' {CleanupComplete}"), command, StringComparison.Ordinal);
+            Assert.Contains(ShellQuoted($"/usr/bin/printf '%s\\n' {CleanupComplete}"), command, StringComparison.Ordinal);
         }
         finally
         {
@@ -468,7 +474,6 @@ public sealed class SshPhaseBridgeTests
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private const string ProtocolBegin = "ARMADA_C2_PROTOCOL_BEGIN";
-    private const string StageReady = "ARMADA_C2_STAGE_READY";
     private const string StageComplete = "ARMADA_C2_STAGE_COMPLETE";
     private const string CleanupComplete = "ARMADA_C2_CLEANUP_COMPLETE";
 
@@ -519,8 +524,8 @@ public sealed class SshPhaseBridgeTests
         IEnumerable<string>? startupLines = null,
         SshProcessResult? completion = null) =>
         new(
-            (startupLines ?? []).Append(ProtocolBegin).Append(StageReady),
-            completion ?? new(StageComplete + '\n', "", 0));
+            startupLines,
+            completion ?? new(ProtocolOutput(StageComplete), "", 0));
 
     private static IEnumerable<string> ProtocolLines(string line) => [ProtocolBegin, line];
 

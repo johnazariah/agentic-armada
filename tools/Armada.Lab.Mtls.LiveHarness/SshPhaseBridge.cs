@@ -138,7 +138,6 @@ public sealed class SshPhaseBridge
     private const int MaximumPhaseTwoResultsBytes = 64 * 1024;
     private const int MaximumSshStartupOutputBytes = 16 * 1024;
     private const string ProtocolBegin = "ARMADA_C2_PROTOCOL_BEGIN";
-    private const string StageReady = "ARMADA_C2_STAGE_READY";
     private const string StageComplete = "ARMADA_C2_STAGE_COMPLETE";
     private const string CleanupComplete = "ARMADA_C2_CLEANUP_COMPLETE";
     private readonly LabHarnessOptions options;
@@ -217,10 +216,9 @@ public sealed class SshPhaseBridge
         await process.WriteLineAsync(
             CreateProtocolCommand(LabHarnessCommandContract.PhaseTwoBootstrap(helperDigest, remoteRoot)),
             cancellationToken);
-        await process.FlushAsync(cancellationToken);
-        await ReadProtocolBeginAsync(process, cancellationToken);
         await process.WriteLineAsync(input, cancellationToken);
         await process.FlushAsync(cancellationToken);
+        await ReadProtocolBeginAsync(process, cancellationToken);
         var ready = ParseReadyForRevocation(await process.ReadLineAsync(cancellationToken));
 
         var revoked = await identities.RevokeAsync(
@@ -249,7 +247,7 @@ public sealed class SshPhaseBridge
     private async Task CleanupCoreAsync(CancellationToken cancellationToken)
     {
         var output = await RunAsync(
-            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; if test -e \"$root\" || test -L \"$root\"; then test ! -L \"$root\"; test -d \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; fi; test ! -e \"$root\"; test ! -L \"$root\"; printf '%s\\n' {CleanupComplete}",
+            $"set -eu; root=\"$HOME/.cache/{remoteRoot}\"; if test -e \"$root\" || test -L \"$root\"; then test ! -L \"$root\"; test -d \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; rm -rf -- \"$root\"; fi; test ! -e \"$root\"; test ! -L \"$root\"; /usr/bin/printf '%s\\n' {CleanupComplete}",
             null,
             cancellationToken,
             MaximumSshStartupOutputBytes);
@@ -279,15 +277,16 @@ public sealed class SshPhaseBridge
         await using var process = await ssh.StartAsync(cancellationToken);
         await process.WriteLineAsync(
             CreateProtocolCommand(
-                $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; printf '%s\\n' {StageReady}; {reader}; test ! -L \"$root/helper.manifest\"; chmod 600 \"$root/helper.manifest\"; cd \"$root\"; sha256sum --quiet --strict --check helper.manifest; printf '%s\\n' {StageComplete}"),
+                $"set -eu; umask 077; root=\"$HOME/.cache/{remoteRoot}\"; test ! -L \"$root\"; mkdir -p \"$root/helper\"; chmod 700 \"$root\" \"$root/helper\"; test ! -L \"$root\"; test \"$(stat -c '%u:%a' \"$root\")\" = \"$(id -u):700\"; test ! -L \"$root/helper\"; test \"$(stat -c '%u:%a' \"$root/helper\")\" = \"$(id -u):700\"; {reader}; test ! -L \"$root/helper.manifest\"; chmod 600 \"$root/helper.manifest\"; cd \"$root\"; sha256sum --quiet --strict --check helper.manifest; /usr/bin/printf '%s\\n' {StageComplete}"),
             cancellationToken);
-        await process.FlushAsync(cancellationToken);
-        await ReadStageReadyAsync(process, cancellationToken);
         await process.WriteAsync(payload.ToString(), cancellationToken);
         await process.FlushAsync(cancellationToken);
         var completion = await process.CompleteAsync(cancellationToken);
         ThrowIfFailed(completion);
-        RequireExactOutput(completion.StandardOutput, StageComplete, "WSL helper staging");
+        RequireExactOutput(
+            ExtractProtocolOutput(completion.StandardOutput, MaximumSshStartupOutputBytes),
+            StageComplete,
+            "WSL helper staging");
         return digest;
     }
 
@@ -327,20 +326,10 @@ public sealed class SshPhaseBridge
     }
 
     private static string CreateProtocolCommand(string script) =>
-        $"exec /bin/bash --noprofile --norc -c {ShellQuote($"printf '%s\\n' {ProtocolBegin}; {script}")}";
+        $"exec /bin/bash --noprofile --norc -c {ShellQuote($"/usr/bin/printf '%s\\n' {ProtocolBegin}; {script}")}";
 
     private static string ShellQuote(string value) =>
         $"'{value.Replace("'", "'\"'\"'", StringComparison.Ordinal)}'";
-
-    private static async Task ReadStageReadyAsync(ISshPhaseProcess process, CancellationToken cancellationToken)
-    {
-        await ReadProtocolBeginAsync(process, cancellationToken);
-        var line = await process.ReadLineAsync(cancellationToken);
-        if (!string.Equals(line, StageReady, StringComparison.Ordinal))
-        {
-            throw new IOException("WSL helper staging did not return the expected readiness receipt.");
-        }
-    }
 
     private static async Task ReadProtocolBeginAsync(ISshPhaseProcess process, CancellationToken cancellationToken)
     {
